@@ -1,4 +1,4 @@
-﻿//{{NO_DEPENDENCIES}}
+//{{NO_DEPENDENCIES}}
 // Microsoft Developer Studio generated include file.
 // Used by CLCLSet.rc
 //
@@ -256,13 +256,35 @@
 #define IDS_TOOL_NON_PROP               9007
 #define IDS_TOOL_ERR_TITLE              9008
 
+#define IDD_DIALOG_CLOUD                125
+#define IDD_DIALOG_TOKEN_INPUT          126
+#define IDD_DIALOG_CLOUD_BATCHES        127
+#define IDC_CHECK_CLOUD_ENABLE          1120
+#define IDC_EDIT_CLIENT_ID              1121
+#define IDC_EDIT_TOKEN                  1122
+#define IDC_BUTTON_AUTH                 1123
+#define IDC_BUTTON_DISCONNECT           1124
+#define IDC_BUTTON_SAVE_CLOUD           1125
+#define IDC_BUTTON_IMPORT_CLOUD         1126
+#define IDC_STATIC_CLOUD_STATUS         1127
+#define IDC_STATIC_CLOUD_INFO           1128
+#define IDC_BUTTON_PASTE_TOKEN          1129
+#define IDC_BUTTON_DELETE_CLOUD         1130
+#define IDC_BUTTON_CLEAR_HISTORY        1132
+#define IDC_LIST_BATCHES                1133
+#define IDC_BUTTON_IMPORT_BATCH         1134
+#define IDC_BUTTON_DELETE_BATCH         1135
+#define IDC_BUTTON_REFRESH_BATCHES      1136
+#define IDC_STATIC_BATCH_STATUS         1137
+
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        126
+#define _APS_NEXT_RESOURCE_VALUE        128
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1118
+#define _APS_NEXT_CONTROL_VALUE         1138
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
+

@@ -30,6 +30,9 @@
 #endif
 
 #include "resource.h"
+#ifdef OPTION_SET
+#include "CLCLSet/SetCloud.h"
+#endif
 
 /* Define */
 #define USER_INI_OLD					TEXT("user.ini")
@@ -738,6 +741,17 @@ BOOL ini_get_option(TCHAR *err_str)
 	option.fmt_file_font_italic = profile_get_int(TEXT("fmt_file"), TEXT("font_italic"), 0, ini_path);
 	option.fmt_file_font_charset = profile_get_int(TEXT("fmt_file"), TEXT("font_charset"), char_set, ini_path);
 
+#ifdef OPTION_SET
+	// cloud
+	option.cloud_enable = profile_get_int(TEXT("cloud"), TEXT("enable"), 0, ini_path);
+	profile_get_string(TEXT("cloud"), TEXT("client_id"), TEXT("8a6ce5d366014eb4b2b0ab1f65926a6b"), option.cloud_client_id, sizeof(option.cloud_client_id) / sizeof(TCHAR), ini_path);
+	if (lstrcmp(option.cloud_client_id, TEXT("23fd2dfd52bc4766a1d90102b125910e")) == 0 ||
+		option.cloud_client_id[0] == TEXT('\0')) {
+		lstrcpy(option.cloud_client_id, TEXT("8a6ce5d366014eb4b2b0ab1f65926a6b"));
+	}
+	cloud_load_token(ini_path, option.cloud_token, sizeof(option.cloud_token) / sizeof(TCHAR));
+#endif
+
 	profile_free();
 	return TRUE;
 }
@@ -1095,6 +1109,13 @@ BOOL ini_put_option(void)
 	profile_write_int(TEXT("fmt_file"), TEXT("font_weight"), option.fmt_file_font_weight, ini_path);
 	profile_write_int(TEXT("fmt_file"), TEXT("font_italic"), option.fmt_file_font_italic, ini_path);
 	profile_write_int(TEXT("fmt_file"), TEXT("font_charset"), option.fmt_file_font_charset, ini_path);
+
+#ifdef OPTION_SET
+	// cloud
+	profile_write_int(TEXT("cloud"), TEXT("enable"), option.cloud_enable, ini_path);
+	profile_write_string(TEXT("cloud"), TEXT("client_id"), option.cloud_client_id, ini_path);
+	cloud_save_token(ini_path, option.cloud_token);
+#endif
 
 	profile_flush(ini_path);
 	profile_free();

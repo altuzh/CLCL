@@ -42,6 +42,7 @@
 #include "SetWindow.h"
 #include "SetSendkey.h"
 #include "SetTool.h"
+#include "SetCloud.h"
 #include "SelectKey.h"
 
 #include "resource.h"
@@ -565,7 +566,7 @@ static int CALLBACK prop_sheet_proc(const HWND hDlg, const UINT msg, const LPARA
 static int show_option(const HWND hWnd, const TCHAR *cmd_line)
 {
 #define sizeof_PROPSHEETHEADER		40	// Workaround for older common controls
-#define PROP_CNT_OPTION				9
+#define PROP_CNT_OPTION				10
 	PROPSHEETPAGE psp;
 	PROPSHEETHEADER psh;
 	HPROPSHEETPAGE hpsp[PROP_CNT_OPTION];
@@ -619,6 +620,11 @@ static int show_option(const HWND hWnd, const TCHAR *cmd_line)
 	psp.pfnDlgProc = set_tool_proc;
 	hpsp[8] = CreatePropertySheetPage(&psp);
 
+	// Cloud
+	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_CLOUD);
+	psp.pfnDlgProc = set_cloud_proc;
+	hpsp[9] = CreatePropertySheetPage(&psp);
+
 	ZeroMemory(&psh, sizeof(PROPSHEETHEADER));
 	psh.dwSize = sizeof_PROPSHEETHEADER;
 	psh.dwFlags = PSH_NOAPPLYNOW | PSH_USECALLBACK;
@@ -631,7 +637,7 @@ static int show_option(const HWND hWnd, const TCHAR *cmd_line)
 
 	psh.nStartPage = 0;
 
-	if (cmd_line != NULL && *cmd_line >= TEXT('0') && *cmd_line <= TEXT('8')) {
+	if (cmd_line != NULL && *cmd_line >= TEXT('0') && *cmd_line <= TEXT('9')) {
 		psh.nStartPage = *cmd_line - TEXT('0');
 		switch (psh.nStartPage) {
 		case 4:		// Format

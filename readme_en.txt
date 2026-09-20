@@ -354,6 +354,14 @@ CLCL.exe [/vwnx]
 
 * Update history
 
+- Ver 2.2.0 -> Ver 2.2.1
+	- Added Cloud synchronization and non-destructive backup batches with Yandex Disk.
+	- Added Cloud Backup Management dialog to select, restore, and delete backup batches.
+	- Added Clear Local History function strictly preserving user Favourites.
+	- Modernized history storage with high-performance SQLite and FTS full-text search.
+	- Added persistent bitmap thumbnail serialization across application restarts.
+	- Modernized owner-drawn menu navigation and in-place cursor handling.
+
 - Ver 2.1.3 -> Ver 2.2.0
 	- Added support for the Windows dark mode.
 	- Improved to support for high-DPI displays.

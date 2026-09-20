@@ -266,11 +266,9 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 {
 	DATA_INFO *di = *root;
 	DATA_INFO *new_item;
-#ifndef OPTION_SET
-	DATA_INFO *cdi;
+	DATA_INFO *cdi = NULL;
 	DATA_INFO *child_item;
 	int i;
-#endif	// OPTION_SET
 	DWORD data_size;
 
 	while (size > (DWORD)(p - buf)) {
@@ -315,28 +313,23 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 
 		case '\x1':
 			p++;
-#ifndef OPTION_SET
 			// Create parent item
 			new_item = data_create_item(NULL, FALSE, err_str);
 			if (new_item == NULL) {
 				return NULL;
 			}
-#endif	// OPTION_SET
 
 			// Title
 			if (size > (DWORD)(p - buf) && *p != '\x2') {
-#ifndef OPTION_SET
 				if (*p != '\0') {
 					new_item->title = alloc_char_to_tchar(p);
 				}
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
 			}
 			// Modified date and time
 			if (size > (DWORD)(p - buf) && *p != '\x2') {
-#ifndef OPTION_SET
 				if (*p != '\0') {
 					new_item->modified.dwHighDateTime = x2i(p);
 					for (i = 0; size > (DWORD)(p - buf) && *p != '\0' && i < 8; p++, i++)
@@ -345,49 +338,40 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 				if (*p != '\0') {
 					new_item->modified.dwLowDateTime = x2i(p);
 				}
-#endif	// OPTION_SET
 				for (; *p != '\0'; p++)
 					;
 				p++;
 			}
 			// Window name
 			if (size > (DWORD)(p - buf) && *p != '\x2') {
-#ifndef OPTION_SET
 				if (*p != '\0') {
 					new_item->window_name = alloc_char_to_tchar(p);
 				}
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
 			}
 			// String for tool
 			if (size > (DWORD)(p - buf) && *p != '\x2') {
-#ifndef OPTION_SET
 				if (*p != '\0') {
 					new_item->plugin_string = alloc_char_to_tchar(p);
 				}
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
 			}
 			// Long for tool
 			if (size > (DWORD)(p - buf) && *p != '\x2') {
-#ifndef OPTION_SET
 				new_item->plugin_param = a2i(p);
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
 			}
 			// Options
 			if (size > (DWORD)(p - buf) && *p != '\x2') {
-#ifndef OPTION_SET
 				if (*p != '\0') {
 					file_expand_option(new_item, p);
 				}
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
@@ -400,7 +384,6 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 			}
 			p++;
 
-#ifndef OPTION_SET
 			if (*root == NULL) {
 				*root = new_item;
 			} else {
@@ -408,10 +391,8 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 			}
 			di = new_item;
 			cdi = NULL;
-#endif	// OPTION_SET
 
 		default:
-#ifndef OPTION_SET
 			if (di == NULL) {
 				return NULL;
 			}
@@ -423,53 +404,42 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 			}
 			child_item->struct_size = sizeof(DATA_INFO);
 			child_item->type = TYPE_DATA;
-#endif	// OPTION_SET
 
 			// Read header
 			// Size
 			data_size = a2i(p);
-#ifndef OPTION_SET
 			child_item->size = data_size;
-#endif	// OPTION_SET
 			for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 				;
 			p++;
 			// Format
 			if (size > (DWORD)(p - buf) && *p != '\x3') {
-#ifndef OPTION_SET
 				child_item->format_name = alloc_char_to_tchar(p);
 				child_item->format_name_hash = str2hash(child_item->format_name);
 				child_item->format = clipboard_get_format(0, child_item->format_name);
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
 			}
 			// String for tool
 			if (size > (DWORD)(p - buf) && *p != '\x3') {
-#ifndef OPTION_SET
 				child_item->plugin_string = alloc_char_to_tchar(p);
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
 			}
 			// Long for tool
 			if (size > (DWORD)(p - buf) && *p != '\x3') {
-#ifndef OPTION_SET
 				child_item->plugin_param = a2i(p);
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
 			}
 			// Options
 			if (size > (DWORD)(p - buf) && *p != '\x3') {
-#ifndef OPTION_SET
 				if (*p != '\0') {
 					file_expand_option(child_item, p);
 				}
-#endif	// OPTION_SET
 				for (; size > (DWORD)(p - buf) && *p != '\0'; p++)
 					;
 				p++;
@@ -483,15 +453,12 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 			p++;
 
 			if (data_size > 0) {
-#ifndef OPTION_SET
 				if ((child_item->data = format_bytes_to_data(child_item->format_name, p, &child_item->size)) == NULL) {
 					child_item->data = clipboard_bytes_to_data(child_item->format_name, p, &child_item->size);
 				}
-#endif	// OPTION_SET
 				p += data_size;
 			}
 
-#ifndef OPTION_SET
 			// Add format
 			if (cdi == NULL) {
 				di->child = child_item;
@@ -499,7 +466,6 @@ static BYTE *file_file_to_item(const BYTE *buf, BYTE *p, const DWORD size, DATA_
 				cdi->next = child_item;
 			}
 			cdi = child_item;
-#endif	// OPTION_SET
 			break;
 		}
 	}
