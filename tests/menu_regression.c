@@ -1,0 +1,478 @@
+/* Native popup-loop regression. No user profile, clipboard, or database is opened.
+ * Only cursor I/O is recorded: Windows cannot move the pointer on a non-input
+ * desktop. Menu creation, drawing, tracking, hooks and dialogs are real Win32. */
+#include <windows.h>
+#include <stdio.h>
+static POINT test_cursor = {300, 200};
+static BOOL test_get_cursor(LPPOINT pt) { *pt = test_cursor; return TRUE; }
+static BOOL test_set_cursor(int x, int y) { test_cursor.x = x; test_cursor.y = y; return TRUE; }
+#define GetCursorPos test_get_cursor
+#define SetCursorPos test_set_cursor
+#define menu_show_align test_menu_show_align
+#define save_regist unused_save_regist
+#include "../main.c"
+#undef GetCursorPos
+#undef SetCursorPos
+#undef menu_show_align
+#undef save_regist
+BOOL save_regist(HWND owner) { (void)owner; return TRUE; }
+static int phase, ticks, failures, scenario, open_steps;
+static BOOL finished;
+static DATA_INFO *folder, *landing;
+static HWND idle_menu;
+static POINT before_delete;
+static POINT switch_point;
+static RECT switch_row;
+static DATA_INFO *switch_target, *clipboard_selection;
+
+int menu_show_align(HWND owner, HMENU menu, const POINT *pos, UINT align);
+int test_menu_show_align(HWND owner, HMENU menu, const POINT *pos, UINT align)
+{
+    POINT initial = {300, 200};
+    if (scenario == 10) {
+        HMONITOR hMon = MonitorFromWindow(owner, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi;
+        mi.cbSize = sizeof(mi);
+        if (hMon && GetMonitorInfo(hMon, &mi)) {
+            initial.x = mi.rcWork.right;
+            initial.y = mi.rcWork.bottom;
+        }
+    }
+    return menu_show_align(owner, menu, pos ? pos : &initial, align);
+}
+
+#define CHECK(condition, message) do { if (!(condition)) { \
+    printf("FAIL: %s (phase %d)\n", message, phase); failures++; } } while (0)
+
+static void key(HWND owner, UINT vk)
+{
+    if (vk == VK_DELETE && scenario % 2 == 0) {
+        KBDLLHOOKSTRUCT kb = {0};
+        kb.vkCode = vk;
+        menu_key_wnd = owner;
+        CHECK(menu_key_hook_proc(HC_ACTION, WM_KEYDOWN, (LPARAM)&kb) == 1, "hardware Delete down consumed");
+        CHECK(menu_key_hook_proc(HC_ACTION, WM_KEYUP, (LPARAM)&kb) == 1, "hardware Delete up consumed");
+        menu_key_wnd = NULL;
+    } else {
+        PostMessage(owner, WM_KEYDOWN, vk, 1);
+        PostMessage(owner, WM_KEYUP, vk, 0xC0000001);
+    }
+}
+
+static BOOL CALLBACK fill_dialog(HWND hwnd, LPARAM unused)
+{
+    (void)unused;
+    if (GetDlgItem(hwnd, IDC_FAV_EDIT_NAME)) {
+        SetDlgItemText(hwnd, IDC_FAV_EDIT_NAME, TEXT("Created by regression"));
+        PostMessage(hwnd, WM_COMMAND, IDOK, 0);
+        phase = 32;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static HMENU target_menu(DATA_INFO *target)
+{
+    if (!target || target == &history_data) return popup_menu;
+    if (target == &regist_data) return menu_get_favourites_submenu(popup_menu);
+    return menu_find_data_submenu(popup_menu, target);
+}
+
+static void right_click(HWND owner)
+{
+    MSG msg = {0};
+    msg.hwnd = owner;
+    msg.message = WM_RBUTTONUP;
+    msg.pt = test_cursor;
+    CHECK(menu_msg_filter_proc(MSGF_MENU, 0, (LPARAM)&msg) == 1, "right click handled");
+}
+
+static BOOL context_mouse(HWND owner, UINT message, POINT point)
+{
+    MSG msg = {0};
+    msg.hwnd = owner;
+    msg.message = message;
+    msg.pt = point;
+    return CallMsgFilter(&msg, MSGF_MENU);
+}
+
+static void check_context_highlight(void)
+{
+    MENU_CONTEXT_HIT *hit;
+    RECT old_row = {0}, new_row = {0};
+    HDC screen, source, canvas;
+    HBITMAP bitmap, prior, source_prior;
+    COLORREF old_before, old_after, new_before, new_after;
+    int old_x, old_y, new_x, new_y;
+    CHECK(menu_context_highlight && menu_context_highlight->set_di == switch_target,
+        "highlight tracks the newly right-clicked clipboard item");
+    CHECK(menu_context_original != menu_context_highlight, "old and new highlighted items differ");
+    for (hit = menu_context_hits; hit; hit = hit->next) {
+        if (hit->item == menu_context_original) old_row = hit->rect;
+        if (hit->item == menu_context_highlight) new_row = hit->rect;
+    }
+    CHECK(!IsRectEmpty(&old_row) && !IsRectEmpty(&new_row), "both highlighted rows were captured");
+    if (IsRectEmpty(&old_row) || IsRectEmpty(&new_row) || !menu_ghost_bmp) return;
+    screen = GetDC(NULL);
+    source = CreateCompatibleDC(screen);
+    canvas = CreateCompatibleDC(screen);
+    bitmap = CreateCompatibleBitmap(screen, menu_ghost_rect.right - menu_ghost_rect.left,
+        menu_ghost_rect.bottom - menu_ghost_rect.top);
+    source_prior = SelectObject(source, menu_ghost_bmp);
+    prior = SelectObject(canvas, bitmap);
+    BitBlt(canvas, 0, 0, menu_ghost_rect.right - menu_ghost_rect.left,
+        menu_ghost_rect.bottom - menu_ghost_rect.top, source, 0, 0, SRCCOPY);
+    old_x = old_row.right - menu_ghost_rect.left - 6;
+    old_y = (old_row.top + old_row.bottom) / 2 - menu_ghost_rect.top;
+    new_x = new_row.right - menu_ghost_rect.left - 6;
+    new_y = (new_row.top + new_row.bottom) / 2 - menu_ghost_rect.top;
+    old_before = GetPixel(canvas, old_x, old_y);
+    new_before = GetPixel(canvas, new_x, new_y);
+    menu_context_draw_highlight(canvas);
+    old_after = GetPixel(canvas, old_x, old_y);
+    new_after = GetPixel(canvas, new_x, new_y);
+    CHECK(old_after != old_before, "old clipboard highlight is cleared");
+    CHECK(new_after != new_before, "new clipboard item is visibly highlighted");
+    SelectObject(canvas, prior);
+    SelectObject(source, source_prior);
+    DeleteObject(bitmap);
+    DeleteDC(canvas);
+    DeleteDC(source);
+    ReleaseDC(NULL, screen);
+}
+
+static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_ITEM_TO_CLIPBOARD) {
+        clipboard_selection = (DATA_INFO *)lp;
+        return 0; /* Verify normal item dispatch without touching the clipboard. */
+    }
+    if (msg == WM_CREATE || msg == WM_DESTROY || msg == WM_HISTORY_CHANGED || msg == WM_REGIST_CHANGED)
+        return 0; /* Never invoke application startup, persistence, or shutdown. */
+    if (msg == WM_ENTERIDLE && wp == MSGF_MENU)
+        idle_menu = (HWND)lp;
+    if (msg == WM_TIMER && wp == 77) {
+        RECT rc;
+        HMENU sub = popup_menu ? target_menu(scenario == 6 || scenario == 7 ? landing : folder) : NULL;
+        if (++ticks > 40) {
+            CHECK(FALSE, "menu test timed out");
+            finished = TRUE;
+            EndMenu();
+            return 0;
+        }
+        if (phase == 0 && IsWindowVisible(idle_menu)) {
+            SendMessage(idle_menu, 0x01E5, 0, 0);
+            key(hwnd, VK_RIGHT);
+            if (--open_steps == 0) phase++;
+        } else if (phase == 1 && (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0) == sub && IsWindowVisible(idle_menu)) {
+            int index = scenario == 8 ? 1 : 0;
+            DATA_INFO *selected = scenario == 6 || scenario == 7 ? folder : (scenario == 8 ? folder->child->next : folder->child);
+            SendMessage(idle_menu, 0x01E5, index, 0);
+            CHECK(current_selected_mii && current_selected_mii->set_di == selected, "target selected");
+            GetMenuItemRect(NULL, sub, index, &rc);
+            test_cursor.x = rc.left + 15;
+            test_cursor.y = rc.top + 7;
+            before_delete = test_cursor;
+            if (scenario == 1 || scenario == 4 || scenario == 6 || scenario == 7 || scenario >= 11) {
+                phase = scenario >= 11 ? 40 : 10;
+                if (scenario >= 11) {
+                    switch_target = folder->child->next;
+                    GetMenuItemRect(NULL, sub, 1, &switch_row);
+                    switch_point.x = switch_row.left + 4;
+                    switch_point.y = switch_row.top + 7;
+                }
+                right_click(hwnd);
+            } else {
+                phase = 2;
+                key(hwnd, VK_DELETE);
+            }
+        } else if ((phase == 40 || phase == 43) && popup_menu == NULL && IsWindowVisible(idle_menu)) {
+            BOOL left = scenario == 11 || scenario == 14;
+            UINT down = left ? WM_LBUTTONDOWN : WM_RBUTTONDOWN;
+            UINT up = left ? WM_LBUTTONUP : WM_RBUTTONUP;
+            RECT overlap;
+            POINT point;
+            GetWindowRect(idle_menu, &rc);
+            if (IntersectRect(&overlap, &rc, &switch_row)) {
+                point.x = overlap.left + 1;
+                point.y = overlap.top + 1;
+                CHECK(!context_mouse(hwnd, down, point), "live context menu takes priority over clipboard rows");
+                CHECK(!context_mouse(hwnd, up, point), "live context menu release is not intercepted");
+            }
+            if (scenario == 13 && phase == 40) {
+                SendMessage(idle_menu, 0x01E5, 0, 0);
+                key(hwnd, VK_RIGHT);
+                phase = 43;
+                return 0;
+            }
+            CHECK(context_mouse(hwnd, down, switch_point), "clipboard item press consumed while context is open");
+            point.x = point.y = -30000;
+            CHECK(context_mouse(hwnd, up, point), "drag-off release consumed without selecting");
+            CHECK(menu_context_pick == NULL, "dragging off does not change context target");
+            CHECK(context_mouse(hwnd, down, switch_point), "new clipboard item press consumed");
+            phase = left ? 45 : 41;
+            finished = left;
+            test_cursor = switch_point;
+            if (!context_mouse(hwnd, up, switch_point)) {
+                CHECK(FALSE, "new clipboard item release consumed");
+                finished = TRUE;
+                EndMenu();
+            }
+        } else if (phase == 41 && popup_menu == NULL && IsWindowVisible(idle_menu)) {
+            HMENU context = (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0);
+            CHECK(menu_context_pick == NULL, "replacement context menu has started");
+            check_context_highlight();
+            SendMessage(idle_menu, 0x01E5, scenario == 13 ? 0 : GetMenuItemCount(context) - 1, 0);
+            key(hwnd, scenario == 13 ? VK_RIGHT : VK_RETURN);
+            phase = scenario == 13 ? 44 : 42;
+        } else if (phase == 44 && popup_menu == NULL && IsWindowVisible(idle_menu)) {
+            SendMessage(idle_menu, 0x01E5, 0, 0);
+            key(hwnd, VK_RETURN);
+            phase = 42;
+        } else if (phase == 42 && popup_menu && !menu_cursor_restore_needed) {
+            if (scenario == 13) {
+                CHECK(regist_data.child && lstrcmp(regist_data.child->title, TEXT("Second disposable item")) == 0,
+                    "Add to Favourites acts on newly right-clicked item");
+                CHECK(folder->child->next == switch_target, "adding preserves both clipboard items");
+            } else {
+                CHECK(folder->child && folder->child != switch_target && !folder->child->next,
+                    "Delete acts on newly right-clicked item only");
+            }
+            CHECK(IsWindowVisible(idle_menu) && (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0) == target_menu(folder),
+                "clipboard menu restored after switched action");
+            CHECK(clipboard_selection == NULL, "RMB does not run LMB action");
+            finished = TRUE;
+            EndMenu();
+        } else if ((phase == 10 || phase == 11) && popup_menu == NULL && IsWindowVisible(idle_menu)) {
+            HMENU context = (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0);
+            SendMessage(idle_menu, 0x01E5, scenario == 6 ? 0 : GetMenuItemCount(context) - 1, 0);
+            key(hwnd, VK_RETURN);
+            phase = phase == 11 ? 3 : (scenario == 6 ? 31 : (scenario == 7 ? 3 : 2));
+        } else if (phase == 31) {
+            EnumThreadWindows(GetCurrentThreadId(), fill_dialog, 0);
+        } else if (phase == 32 && popup_menu && !menu_cursor_restore_needed) {
+            DATA_INFO *child;
+            BOOL found = FALSE;
+            for (child = folder->child; child; child = child->next)
+                if (child->title && lstrcmp(child->title, TEXT("Created by regression")) == 0) found = TRUE;
+            CHECK(found, "dialog created new folder");
+            CHECK((HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0) == target_menu(landing), "create keeps current menu");
+            CHECK(test_cursor.x == before_delete.x && test_cursor.y == before_delete.y, "create keeps cursor in place");
+            finished = TRUE;
+            EndMenu();
+        } else if (phase == 2 && popup_menu && !menu_cursor_restore_needed) {
+            CHECK(folder->child && !folder->child->next, "Delete removed exactly one item");
+            CHECK(IsWindowVisible(idle_menu) && (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0) == sub, "current submenu remains visible");
+            if (scenario == 10) {
+                MONITORINFO mi;
+                HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+                mi.cbSize = sizeof(mi);
+                GetMonitorInfo(hMon, &mi);
+                GetWindowRect(idle_menu, &rc);
+                CHECK((menu_reopen_align & TPM_RIGHTALIGN) != 0, "TPM_RIGHTALIGN recorded");
+                CHECK((menu_reopen_align & TPM_BOTTOMALIGN) != 0, "TPM_BOTTOMALIGN recorded");
+                CHECK(rc.right >= mi.rcWork.right - 10, "reopened menu pinned to right edge");
+                CHECK(rc.bottom >= mi.rcWork.bottom - 10, "reopened menu pinned to bottom edge");
+            } else if (scenario == 8) {
+                GetMenuItemRect(NULL, sub, 0, &rc);
+                CHECK(PtInRect(&rc, test_cursor) && test_cursor.x == before_delete.x, "deleted last row clamps cursor to remaining row");
+            } else {
+                CHECK(test_cursor.x == before_delete.x && test_cursor.y == before_delete.y, "cursor stays in place");
+            }
+            SendMessage(idle_menu, 0x01E5, 0, 0);
+            if (scenario == 4) {
+                phase = 11;
+                right_click(hwnd);
+            } else {
+                key(hwnd, VK_DELETE);
+                phase++;
+            }
+        } else if (phase == 3 && popup_menu && !menu_cursor_restore_needed) {
+            if (scenario < 2 || scenario >= 8) CHECK(history_data.child == NULL, "empty history folder pruned");
+            else if (scenario == 2) CHECK(regist_data.child == NULL, "last root favourite removed");
+            else if (scenario == 7) CHECK(landing->child && !landing->child->next, "explicit folder deletion preserves sibling");
+            else {
+                BOOL preserved = data_check(&regist_data, folder) != NULL;
+                CHECK(preserved, "empty Favourites submenu is preserved");
+                if (preserved) {
+                    CHECK(folder->child == NULL, "only the last favourite was deleted");
+                    CHECK(data_check(&regist_data, folder) == landing, "Favourites ancestors preserved");
+                    CHECK(menu_find_data_index(target_menu(landing), folder) >= 0, "empty submenu remains in parent menu");
+                }
+            }
+            CHECK(IsWindowVisible(idle_menu) && (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0) == target_menu(landing), "parent menu remains visible");
+            GetWindowRect(idle_menu, &rc);
+            CHECK(PtInRect(&rc, test_cursor), "cursor lands in parent menu");
+            finished = TRUE;
+            EndMenu();
+        }
+        return 0;
+    }
+    return main_proc(hwnd, msg, wp, lp);
+}
+
+BOOL CALLBACK bitmap_get_menu_bitmap(DATA_INFO *di, const int width, const int height);
+
+static void test_bitmap_serialization(void)
+{
+    TCHAR err_str[BUF_SIZE] = {0};
+    TCHAR temp_path[MAX_PATH];
+    GetTempPath(MAX_PATH, temp_path);
+    lstrcat(temp_path, TEXT("clcl_test_regist.dat"));
+
+    // Create a simple test bitmap
+    HDC hdc = GetDC(NULL);
+    HDC mem_dc = CreateCompatibleDC(hdc);
+    HBITMAP hbmp = CreateCompatibleBitmap(hdc, 16, 16);
+    HBITMAP old_bmp = (HBITMAP)SelectObject(mem_dc, hbmp);
+    RECT rc = {0, 0, 16, 16};
+    FillRect(mem_dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    SelectObject(mem_dc, old_bmp);
+    DeleteDC(mem_dc);
+    ReleaseDC(NULL, hdc);
+
+    // Create DATA_INFO item with CF_BITMAP
+    DATA_INFO *item = data_create_item(TEXT("Test Bitmap Item"), FALSE, err_str);
+    DATA_INFO *cdi = data_create_data(CF_BITMAP, TEXT("BITMAP"), (HANDLE)hbmp, 0, FALSE, err_str);
+    item->child = cdi;
+
+    // Test clipboard_data_to_bytes
+    DWORD dib_size = 0;
+    BYTE *dib_bytes = clipboard_data_to_bytes(cdi, &dib_size);
+    CHECK(dib_bytes != NULL && dib_size > 0, "clipboard_data_to_bytes returns non-NULL for BITMAP");
+    if (dib_bytes) mem_free((void **)&dib_bytes);
+
+    // Test file_write_data
+    BOOL write_ok = file_write_data(temp_path, item, FALSE, err_str);
+    CHECK(write_ok, "file_write_data succeeds for BITMAP");
+
+    // Free original item
+    data_free(item);
+
+    // Read back from file
+    DATA_INFO *loaded = NULL;
+    BOOL read_ok = file_read_data(temp_path, &loaded, err_str);
+    CHECK(read_ok, "file_read_data succeeds for BITMAP");
+    CHECK(loaded != NULL, "loaded item is non-NULL");
+    if (loaded != NULL) {
+        CHECK(loaded->child != NULL, "loaded child is non-NULL");
+        if (loaded->child != NULL) {
+            CHECK(loaded->child->data != NULL, "loaded bitmap data handle is non-NULL");
+            CHECK(loaded->child->size > 0, "loaded bitmap size is greater than 0");
+            CHECK(loaded->child->format == CF_BITMAP, "loaded child format is CF_BITMAP");
+            // Test menu bitmap creation
+            BOOL menu_bmp_ok = bitmap_get_menu_bitmap(loaded->child, 16, 16);
+            CHECK(menu_bmp_ok, "bitmap_get_menu_bitmap succeeds on deserialized item");
+            CHECK(loaded->child->menu_bitmap != NULL, "menu_bitmap is non-NULL");
+        }
+        data_free(loaded);
+    }
+    DeleteFile(temp_path);
+    printf("PASS: Bitmap serialization/deserialization and thumbnail generation\n");
+}
+
+int main(void)
+{
+    HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
+    WNDCLASS wc = {0};
+    HWND owner;
+    TCHAR error[BUF_SIZE];
+    MENU_INFO items[2] = {0};
+    ACTION_INFO action = {0};
+    DATA_INFO *first, *second, *outer, *middle;
+    MENU_INFO favourite_items = {0};
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (!desktop || !SetThreadDesktop(desktop)) {
+        printf("FAIL: isolated desktop unavailable (%lu)\n", GetLastError());
+        return 1;
+    }
+    hInst = GetModuleHandle(NULL);
+    InitCommonControls();
+    SetDpi(96);
+    GetCurrentDirectory(MAX_PATH, work_path);
+    lstrcat(work_path, TEXT("\\Release\\menu-test-profile"));
+    if (!ini_get_option(error)) { printf("FAIL: option defaults\n"); return 1; }
+    format_initialize(error);
+    option.menu_show_tooltip = 0;
+    option.menu_show_tool_menu = 1;
+    option.def_paste_wait = 0;
+    wc.lpfnWndProc = test_proc;
+    wc.hInstance = hInst;
+    wc.lpszClassName = TEXT("CLCLMenuRegressionOwner");
+    RegisterClass(&wc);
+    owner = CreateWindow(wc.lpszClassName, TEXT("Menu regression"), WS_OVERLAPPED, 0, 0, 100, 100, NULL, NULL, hInst, NULL);
+    history_data.type = regist_data.type = TYPE_ROOT;
+    for (scenario = 0; scenario < 16; scenario++) {
+    phase = ticks = 0;
+    finished = FALSE;
+    landing = NULL;
+    idle_menu = NULL;
+    clipboard_selection = NULL;
+    folder = data_create_folder(TEXT("Test date"), error);
+    first = data_create_item(TEXT("First disposable item"), FALSE, error);
+    second = data_create_item(TEXT("Second disposable item"), FALSE, error);
+    first->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), NULL, 0, FALSE, error);
+    second->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), NULL, 0, FALSE, error);
+    first->next = second;
+    folder->child = first;
+    ZeroMemory(items, sizeof(items));
+    if (scenario < 2 || scenario >= 8) {
+        history_data.child = folder;
+        items[0].content = MENU_CONTENT_HISTORY;
+        open_steps = 1;
+        if (scenario == 9 || scenario == 10 || scenario == 14 || scenario == 15) {
+            folder->child = NULL;
+            data_free(folder);
+            folder = &history_data;
+            folder->child = first;
+            phase = 1;
+        }
+    } else {
+        favourite_items.content = MENU_CONTENT_REGIST;
+        items[0].content = MENU_CONTENT_POPUP;
+        items[0].title = TEXT("Favourites");
+        items[0].mi = &favourite_items;
+        items[0].mi_cnt = 1;
+        if (scenario == 2) {
+            folder->child = NULL;
+            data_free(folder);
+            folder = &regist_data;
+            folder->child = first;
+            open_steps = 1;
+        } else {
+            outer = data_create_folder(TEXT("Outer"), error);
+            middle = data_create_folder(TEXT("Middle"), error);
+            regist_data.child = outer;
+            outer->child = middle;
+            middle->child = folder;
+            landing = middle;
+            if (scenario != 5) {
+                folder->next = data_create_folder(TEXT("Keep sibling"), error);
+            }
+            open_steps = scenario >= 6 ? 3 : 4;
+        }
+    }
+    items[1].content = MENU_CONTENT_CANCEL;
+    items[1].title = TEXT("Cancel");
+    action.menu_info = items;
+    action.menu_cnt = 2;
+    action.paste = (scenario == 11 || scenario == 14) ? 1 : 0;
+    SetTimer(owner, 77, 150, NULL);
+    printf("Running scenario %d\n", scenario);
+    show_popup_menu(owner, &action, FALSE, FALSE);
+    CHECK(finished, "popup did not dismiss during Delete");
+    if (scenario == 11 || scenario == 14) {
+        CHECK(clipboard_selection == switch_target, "LMB selects the newly clicked clipboard item");
+        CHECK(folder->child->next == switch_target, "LMB preserves both clipboard items");
+    }
+    CHECK(menu_context_hits == NULL, "context hit targets released");
+    KillTimer(owner, 77);
+    data_free(history_data.child);
+    data_free(regist_data.child);
+    history_data.child = regist_data.child = NULL;
+    }
+    DestroyWindow(owner);
+    test_bitmap_serialization();
+    printf("%s: 16 native-menu scenarios (Delete, Favourites, cursor positioning, LMB/RMB context switching) + bitmap serialization\n", failures ? "FAILED" : "PASS");
+    return failures ? 1 : 0;
+}

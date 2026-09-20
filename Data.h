@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Data.h
@@ -21,46 +21,47 @@
 #define TYPE_ROOT						3
 
 /* Struct */
-// アイテム情報
+// Item information
 typedef struct _DATA_INFO {
-	DWORD struct_size;					// 構造体のサイズ
+	DWORD struct_size;					// Structure size
 
 	int type;							// TYPE_
-	TCHAR *title;						// タイトル
+	TCHAR *title;						// Title
 
-	TCHAR *format_name;					// 形式名
-	int format_name_hash;				// 形式名のハッシュ
-	UINT format;						// 形式値
+	TCHAR *format_name;					// Format name
+	int format_name_hash;				// Format name hash
+	UINT format;						// Format value
 
-	HANDLE data;						// データ
-	DWORD size;							// サイズ
+	HANDLE data;						// Data
+	DWORD size;							// Size
 
-	FILETIME modified;					// 更新日時
-	TCHAR *window_name;					// コピーしたウィンドウタイトル
+	FILETIME modified;					// Modified date and time
+	TCHAR *window_name;					// Copied window title
 
-	TCHAR *plugin_string;				// プラグイン用データ
+	TCHAR *plugin_string;				// Data for plug-in
 	LPARAM plugin_param;
 
-// 以下保存しない情報
-	TCHAR *menu_title;					// メニューに表示するタイトル (未設定の場合は形式を表示)
-	BOOL free_title;					// タイトルを TRUE-解放する FALSE-解放しない
-	HICON menu_icon;					// メニューに表示するアイコンハンドル
-	BOOL free_icon;						// アイコンハンドルを TRUE-解放する FALSE-解放しない
-	HBITMAP menu_bitmap;				// メニューに表示するビットマップ
-	BOOL free_bitmap;					// ビットマップハンドルを TRUE-解放する FALSE-解放しない
-	int menu_bmp_width;					// メニューに表示するビットマップの個別サイズ
+// Information not saved below
+	TCHAR *menu_title;					// Title to display in menu (displays format if not set)
+	BOOL free_title;					// Title: TRUE-Free FALSE-Do not free
+	HICON menu_icon;					// Icon handle to display in menu
+	BOOL free_icon;						// Icon handle: TRUE-Free FALSE-Do not free
+	HBITMAP menu_bitmap;				// Bitmap to display in menu
+	BOOL free_bitmap;					// Bitmap handle: TRUE-Free FALSE-Do not free
+	int menu_bmp_width;					// Individual size of bitmap to display in menu
 	int menu_bmp_height;
-	LPARAM param1;						// プラグイン用データ
+	LPARAM param1;						// Data for plug-in
 	LPARAM param2;
 
 	struct _DATA_INFO *child;
 	struct _DATA_INFO *next;
 
 // Ver 1.0.5
-	int hkey_id;						// ホットキー
+	int hkey_id;						// Hotkey
 	UINT op_modifiers;
 	UINT op_virtkey;
 	int op_paste;
+	UINT64 content_hash;				// Content hash value (for duplicate check)
 } DATA_INFO;
 
 /* Function Prototypes */
@@ -77,6 +78,8 @@ DATA_INFO *data_check(DATA_INFO *di, const DATA_INFO *check_di);
 void data_set_modified(DATA_INFO *di);
 BOOL data_get_modified_string(const DATA_INFO *di, TCHAR *ret);
 TCHAR *data_get_title(DATA_INFO *di);
+UINT64 fnv1a_64(const void *data, const size_t len, const UINT64 seed);
+UINT64 data_calc_hash(DATA_INFO *di);
 
 #endif
 /* End of source */

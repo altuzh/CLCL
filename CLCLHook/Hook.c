@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCLHook
  *
  * Hook.c
@@ -35,7 +35,7 @@ HINSTANCE hInstDLL;
 /* Local Function Prototypes **/
 
 /*
- * DllMain - メイン
+ * DllMain - main entry point
  */
 int WINAPI DllMain(HINSTANCE hInstance, DWORD dwNotification, LPVOID lpReserved)
 {
@@ -47,26 +47,31 @@ int WINAPI DllMain(HINSTANCE hInstance, DWORD dwNotification, LPVOID lpReserved)
 }
 
 /*
- * key_hook_proc - フックプロシージャ
+ * key_hook_proc - hook procedure (WH_KEYBOARD_LL)
  */
 LRESULT CALLBACK key_hook_proc(INT nCode, WPARAM wParam, LPARAM lParam)
 {
 	if (nCode >= 0) {
-		SendMessage(call_wnd, msg_id, wParam, lParam);
+		KBDLLHOOKSTRUCT *kb = (KBDLLHOOKSTRUCT *)lParam;
+		LPARAM flags = 0;
+		if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+			flags = 0x80000000;
+		}
+		PostMessage(call_wnd, msg_id, (WPARAM)kb->vkCode, flags);
 	}
 	return CallNextHookEx(next_hook, nCode, wParam, lParam);
 }
 
 /*
- * set_hook - フックの開始
+ * set_hook - start hook
  */
 __declspec(dllexport) BOOL CALLBACK SetHook(const HWND hWnd, const int msg)
 {
 	call_wnd = hWnd;
 	msg_id = msg;
 
-	//フックを開始する
-	next_hook = SetWindowsHookEx(WH_KEYBOARD, (HOOKPROC)key_hook_proc, hInstDLL, 0);
+	// Start hook (using WH_KEYBOARD_LL compatible with 64-bit apps and all processes)
+	next_hook = SetWindowsHookEx(WH_KEYBOARD_LL, (HOOKPROC)key_hook_proc, hInstDLL, 0);
 	if (next_hook == NULL) {
 		return FALSE;
 	}
@@ -74,12 +79,12 @@ __declspec(dllexport) BOOL CALLBACK SetHook(const HWND hWnd, const int msg)
 }
 
 /*
- * UnHook - フックの解除
+ * UnHook - unhook
  */
 __declspec(dllexport) void CALLBACK UnHook(void)
 {
 	if (next_hook != NULL) {
-		//フックを解除する
+		// Unhook
 		UnhookWindowsHookEx(next_hook);
 	}
 }

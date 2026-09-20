@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * ToolTip.h
@@ -19,6 +19,8 @@
 
 /* Function Prototypes */
 BOOL tooltip_show(const HWND hToolTip, TCHAR *tip_text, const long x, const long y, const long top);
+BOOL tooltip_show_image(const HWND hToolTip, TCHAR *tip_text, const HBITMAP hbmp, const BOOL free_bmp, const long x, const long y, const long top, const RECT *anchor_rect);
+BOOL tooltip_show_image_delay(const HWND hToolTip, TCHAR *tip_text, const HBITMAP hbmp, const BOOL free_bmp, const long x, const long y, const long top, const RECT *anchor_rect, const int delay);
 void tooltip_hide(const HWND hToolTip);
 void tooltip_close(const HWND hToolTip);
 BOOL tooltip_regist(const HINSTANCE hInstance);

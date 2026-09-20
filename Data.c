@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Data.c
@@ -21,23 +21,24 @@
 #include "Message.h"
 #include "ClipBoard.h"
 #include "Format.h"
+#include "DbHistory.h"
 
 /* Define */
 
 /* Global Variables */
-// オプション
+// Options
 extern OPTION_INFO option;
 
 /* Local Function Prototypes */
 
 /*
- * data_create_data - データの作成
+ * data_create_data - create data
  */
 DATA_INFO *data_create_data(const UINT format, TCHAR *format_name, const HANDLE data, const DWORD size, const BOOL init, TCHAR *err_str)
 {
 	DATA_INFO *new_item;
 
-	// アイテムの確保
+	// Allocate item
 	if ((new_item = (DATA_INFO *)mem_calloc(sizeof(DATA_INFO))) == NULL) {
 		message_get_error(GetLastError(), err_str);
 		return NULL;
@@ -54,13 +55,13 @@ DATA_INFO *data_create_data(const UINT format, TCHAR *format_name, const HANDLE 
 }
 
 /*
- * data_create_item - アイテムの作成
+ * data_create_item - create item
  */
 DATA_INFO *data_create_item(const TCHAR *title, const BOOL set_date, TCHAR *err_str)
 {
 	DATA_INFO *new_item;
 
-	// アイテムの確保
+	// Allocate item
 	if ((new_item = (DATA_INFO *)mem_calloc(sizeof(DATA_INFO))) == NULL) {
 		message_get_error(GetLastError(), err_str);
 		return NULL;
@@ -75,13 +76,13 @@ DATA_INFO *data_create_item(const TCHAR *title, const BOOL set_date, TCHAR *err_
 }
 
 /*
- * data_create_folder - フォルダの作成
+ * data_create_folder - create folder
  */
 DATA_INFO *data_create_folder(const TCHAR *title, TCHAR *err_str)
 {
 	DATA_INFO *new_item;
 
-	// アイテムの確保
+	// Allocate item
 	if ((new_item = (DATA_INFO *)mem_calloc(sizeof(DATA_INFO))) == NULL) {
 		message_get_error(GetLastError(), err_str);
 		return NULL;
@@ -93,7 +94,7 @@ DATA_INFO *data_create_folder(const TCHAR *title, TCHAR *err_str)
 }
 
 /*
- * data_item_copy - アイテムのコピーを作成
+ * data_item_copy - create item copy
  */
 DATA_INFO *data_item_copy(const DATA_INFO *di, const BOOL next_copy, const BOOL move_flag, TCHAR *err_str)
 {
@@ -111,7 +112,7 @@ DATA_INFO *data_item_copy(const DATA_INFO *di, const BOOL next_copy, const BOOL 
 	new_di->title = alloc_copy(di->title);
 	new_di->format_name = alloc_copy(di->format_name);
 	new_di->format_name_hash = di->format_name_hash;
-	new_di->format = di->format;
+	new_di->format = (di->format != 0) ? di->format : clipboard_get_format(0, di->format_name);
 	new_di->modified.dwLowDateTime = di->modified.dwLowDateTime;
 	new_di->modified.dwHighDateTime = di->modified.dwHighDateTime;
 	new_di->window_name = alloc_copy(di->window_name);
@@ -123,17 +124,18 @@ DATA_INFO *data_item_copy(const DATA_INFO *di, const BOOL next_copy, const BOOL 
 		new_di->op_virtkey = di->op_virtkey;
 		new_di->op_paste = di->op_paste;
 	}
-	// データのコピー
+	// Copy data
 	if (di->data != NULL && (new_di->data = format_copy_data(di->format_name, di->data, &new_di->size)) == NULL) {
-		new_di->data = clipboard_copy_data(di->format, di->data, &new_di->size);
+		UINT fmt = (di->format != 0) ? di->format : clipboard_get_format(0, di->format_name);
+		new_di->data = clipboard_copy_data(fmt, di->data, &new_di->size);
 	}
 
-	// 子アイテムのコピー
+	// Copy child item
 	if (di->child != NULL && (new_di->child = data_item_copy(di->child, TRUE, move_flag, err_str)) == NULL) {
 		data_free(new_di);
 		return NULL;
 	}
-	// 次アイテムのコピー
+	// Copy next item
 	if (next_copy == TRUE && di->next != NULL &&
 		(new_di->next = data_item_copy(di->next, TRUE, move_flag, err_str)) == NULL) {
 		data_free(new_di);
@@ -143,7 +145,7 @@ DATA_INFO *data_item_copy(const DATA_INFO *di, const BOOL next_copy, const BOOL 
 }
 
 /*
- * data_delete - アイテムの削除
+ * data_delete - delete item
  */
 BOOL data_delete(DATA_INFO **root, DATA_INFO *del_di, const BOOL free_item)
 {
@@ -156,16 +158,24 @@ BOOL data_delete(DATA_INFO **root, DATA_INFO *del_di, const BOOL free_item)
 		*root = del_di->next;
 		del_di->next = NULL;
 		if (free_item == TRUE) {
+			if (db_history_is_open() && del_di->type == TYPE_ITEM && del_di->param1 > 0) {
+				db_history_delete_item((int)del_di->param1);
+				del_di->param1 = 0;
+			}
 			data_free(del_di);
 		}
 		return TRUE;
 	}
 	for (di = *root; di != NULL; di = di->next) {
 		if (di->next == del_di) {
-			// 削除
+			// Delete
 			di->next = del_di->next;
 			del_di->next = NULL;
 			if (free_item == TRUE) {
+				if (db_history_is_open() && del_di->type == TYPE_ITEM && del_di->param1 > 0) {
+					db_history_delete_item((int)del_di->param1);
+					del_di->param1 = 0;
+				}
 				data_free(del_di);
 			}
 			return TRUE;
@@ -178,7 +188,7 @@ BOOL data_delete(DATA_INFO **root, DATA_INFO *del_di, const BOOL free_item)
 }
 
 /*
- * data_adjust - アイテムの整理
+ * data_adjust - organize items
  */
 void data_adjust(DATA_INFO **root)
 {
@@ -188,7 +198,7 @@ void data_adjust(DATA_INFO **root)
 	while (di != NULL) {
 		if (di->type == TYPE_ITEM && di->child == NULL) {
 			wk_di = di->next;
-			// 削除
+			// Delete
 			data_delete(root, di, TRUE);
 			di = wk_di;
 		} else {
@@ -201,25 +211,25 @@ void data_adjust(DATA_INFO **root)
 }
 
 /*
- * data_menu_free - アイテムに関連付けられたメニュー情報を解放
+ * data_menu_free - free menu information associated with item
  */
 void data_menu_free_item(DATA_INFO *di)
 {
-	// テキストの解放
+	// Free text
 	if (di->free_title == TRUE) {
 		mem_free(&di->menu_title);
 	}
 	di->menu_title = NULL;
 	di->free_title = FALSE;
 
-	// アイコンの解放
+	// Free icon
 	if (di->free_icon == TRUE && di->menu_icon != NULL) {
 		DestroyIcon(di->menu_icon);
 	}
 	di->menu_icon = NULL;
 	di->free_icon = FALSE;
 
-	// ビットマップの解放
+	// Free bitmap
 	if (di->free_bitmap == TRUE && di->menu_bitmap != NULL) {
 		DeleteObject((HGDIOBJ)di->menu_bitmap);
 	}
@@ -239,7 +249,7 @@ void data_menu_free(DATA_INFO *di)
 }
 
 /*
- * data_free - アイテムの解放
+ * data_free - free item
  */
 void data_free(DATA_INFO *di)
 {
@@ -268,7 +278,7 @@ void data_free(DATA_INFO *di)
 }
 
 /*
- * data_check - アイテムの存在チェック
+ * data_check - check item existence
  */
 DATA_INFO *data_check(DATA_INFO *di, const DATA_INFO *check_di)
 {
@@ -290,7 +300,7 @@ DATA_INFO *data_check(DATA_INFO *di, const DATA_INFO *check_di)
 }
 
 /*
- * data_set_modified - 更新日時を設定
+ * data_set_modified - set modified date/time
  */
 void data_set_modified(DATA_INFO *di)
 {
@@ -305,7 +315,7 @@ void data_set_modified(DATA_INFO *di)
 }
 
 /*
- * data_get_modified_string - 更新日時文字列を取得
+ * data_get_modified_string - get modified date/time string
  */
 BOOL data_get_modified_string(const DATA_INFO *di, TCHAR *ret)
 {
@@ -318,18 +328,18 @@ BOOL data_get_modified_string(const DATA_INFO *di, TCHAR *ret)
 		*ret = TEXT('\0');
 		return FALSE;
 	}
-	// ファイルタイムをシステムタイムに変換
+	// Convert file time to system time
 	if (FileTimeToSystemTime(&di->modified, &sys_time) == FALSE) {
 		*ret = TEXT('\0');
 		return FALSE;
 	}
-	// 日付文字列の取得
+	// Get date string
 	p = option.data_date_format;
 	if (p == NULL || *p == TEXT('\0')) {
 		p = NULL;
 	}
 	GetDateFormat(0, 0, &sys_time, p, str_day, BUF_SIZE - 1);
-	// 時間文字列の取得
+	// Get time string
 	p = option.data_time_format;
 	if (p == NULL || *p == TEXT('\0')) {
 		p = NULL;
@@ -341,7 +351,7 @@ BOOL data_get_modified_string(const DATA_INFO *di, TCHAR *ret)
 }
 
 /*
- * data_get_title - アイテムのタイトルを取得
+ * data_get_title - get item title
  */
 TCHAR *data_get_title(DATA_INFO *di)
 {
@@ -369,5 +379,147 @@ TCHAR *data_get_title(DATA_INFO *di)
 		ret = TEXT("");
 	}
 	return ret;
+}
+
+/*
+ * fnv1a_64 - 64-bit FNV-1a hash algorithm
+ */
+UINT64 fnv1a_64(const void *data, const size_t len, const UINT64 seed)
+{
+	const BYTE *p = (const BYTE *)data;
+	UINT64 hash = seed ? seed : 14695981039346656037ULL;
+	size_t i;
+
+	if (data == NULL || len == 0) {
+		return 0;
+	}
+	for (i = 0; i < len; i++) {
+		hash ^= (UINT64)p[i];
+		hash *= 1099511628211ULL;
+	}
+	return hash;
+}
+
+/*
+ * data_calc_hash - compute content hash for duplicate prevention
+ */
+UINT64 data_calc_hash(DATA_INFO *di)
+{
+	DATA_INFO *c;
+	UINT64 hash = 0;
+
+	if (di == NULL) {
+		return 0;
+	}
+	if (di->content_hash != 0) {
+		return di->content_hash;
+	}
+
+	// Ensure lazy DB items have their data loaded
+	if (db_history_is_open()) {
+		if (di->param2 == 0 && di->param1 > 0) {
+			db_history_ensure_item_data(di);
+		}
+	}
+
+	if (di->type == TYPE_ITEM) {
+		// 1. Text formats (CF_UNICODETEXT / CF_TEXT)
+		DATA_INFO *t_di = NULL;
+		for (c = di->child; c != NULL; c = c->next) {
+			if (c->format == CF_UNICODETEXT || (c->format_name != NULL && lstrcmpi(c->format_name, TEXT("UNICODE TEXT")) == 0)) {
+				t_di = c;
+				break;
+			}
+			if (t_di == NULL && (c->format == CF_TEXT || (c->format_name != NULL && lstrcmpi(c->format_name, TEXT("TEXT")) == 0))) {
+				t_di = c;
+			}
+		}
+		if (t_di != NULL) {
+			if (t_di->data != NULL) {
+				if (t_di->format == CF_UNICODETEXT) {
+					const WCHAR *w = (const WCHAR *)GlobalLock(t_di->data);
+					if (w != NULL) {
+						hash = fnv1a_64(w, wcslen(w) * sizeof(WCHAR), 0xCBF29CE484222325ULL);
+						GlobalUnlock(t_di->data);
+					}
+				} else {
+					const char *a = (const char *)GlobalLock(t_di->data);
+					if (a != NULL) {
+						TCHAR *w = alloc_char_to_tchar(a);
+						if (w != NULL) {
+							hash = fnv1a_64(w, lstrlen(w) * sizeof(TCHAR), 0xCBF29CE484222325ULL);
+							mem_free((void **)&w);
+						} else {
+							hash = fnv1a_64(a, strlen(a), 0xCBF29CE484222325ULL);
+						}
+						GlobalUnlock(t_di->data);
+					}
+				}
+			}
+			if (hash == 0) {
+				DWORD size = 0;
+				BYTE *mem = format_data_to_bytes(t_di, &size);
+				if (mem == NULL) mem = clipboard_data_to_bytes(t_di, &size);
+				if (mem != NULL && size > 0) {
+					hash = fnv1a_64(mem, size, 0xCBF29CE484222325ULL);
+					mem_free((void **)&mem);
+				}
+			}
+			if (hash != 0) {
+				di->content_hash = hash;
+				return hash;
+			}
+		}
+
+		// 2. Bitmap formats (CF_BITMAP / CF_DIB / CF_DIBV5)
+		DATA_INFO *b_di = NULL;
+		for (c = di->child; c != NULL; c = c->next) {
+			if (c->format == CF_DIB || c->format == CF_DIBV5 || c->format == CF_BITMAP ||
+				(c->format_name != NULL && (lstrcmpi(c->format_name, TEXT("BITMAP")) == 0 || lstrcmpi(c->format_name, TEXT("DIB")) == 0))) {
+				b_di = c;
+				break;
+			}
+		}
+		if (b_di != NULL) {
+			DWORD size = 0;
+			BYTE *mem = format_data_to_bytes(b_di, &size);
+			if (mem == NULL) mem = clipboard_data_to_bytes(b_di, &size);
+			if (mem != NULL && size > 0) {
+				hash = fnv1a_64(mem, size, 0x811C9DC517B4C8FBULL);
+				mem_free((void **)&mem);
+			}
+			if (hash != 0) {
+				di->content_hash = hash;
+				return hash;
+			}
+		}
+
+		// 3. Fallback: hash the primary child format's data bytes
+		for (c = di->child; c != NULL; c = c->next) {
+			DWORD size = 0;
+			BYTE *mem = format_data_to_bytes(c, &size);
+			if (mem == NULL) mem = clipboard_data_to_bytes(c, &size);
+			if (mem != NULL && size > 0) {
+				hash = fnv1a_64(mem, size, (UINT64)c->format);
+				mem_free((void **)&mem);
+				break;
+			}
+		}
+		if (hash == 0 && di->title != NULL && *di->title != TEXT('\0')) {
+			hash = fnv1a_64(di->title, lstrlen(di->title) * sizeof(TCHAR), 0x54657874ULL);
+		}
+	} else {
+		// Single DATA node
+		DWORD size = 0;
+		BYTE *mem = format_data_to_bytes(di, &size);
+		if (mem == NULL) mem = clipboard_data_to_bytes(di, &size);
+		if (mem != NULL && size > 0) {
+			hash = fnv1a_64(mem, size, (UINT64)di->format);
+			mem_free((void **)&mem);
+		}
+	}
+
+	di->content_hash = hash;
+	return hash;
 }
 /* End of source */

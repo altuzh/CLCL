@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Format.c
@@ -21,17 +21,18 @@
 #include "Message.h"
 #include "Format.h"
 #include "dpi.h"
+#include "DbHistory.h"
 
 /* Define */
 
 /* Global Variables */
-// オプション
+// Options
 extern OPTION_INFO option;
 
 /* Local Function Prototypes */
 
 /*
- * format_get_index - 形式情報のインデックスを取得
+ * format_get_index - get format information index
  */
 int format_get_index(const TCHAR *format_name, const int name_hash)
 {
@@ -67,7 +68,7 @@ int format_get_index(const TCHAR *format_name, const int name_hash)
 }
 
 /*
- * format_get_priority_highest - 優先順位が一番高いデータを取得
+ * format_get_priority_highest - get highest priority data
  */
 DATA_INFO *format_get_priority_highest(DATA_INFO *di)
 {
@@ -90,7 +91,7 @@ DATA_INFO *format_get_priority_highest(DATA_INFO *di)
 }
 
 /*
- * format_initialize - 形式情報の初期化
+ * format_initialize - initialize format information
  */
 BOOL format_initialize(TCHAR *err_str)
 {
@@ -100,7 +101,7 @@ BOOL format_initialize(TCHAR *err_str)
 	int i;
 
 	for (i = 0; i < option.format_cnt; i++) {
-		// モジュールハンドル取得
+		// Get module handle
 		if ((option.format_info + i)->lib_file_path != NULL &&
 			*(option.format_info + i)->lib_file_path != TEXT('\0')) {
 			lib = (option.format_info + i)->lib = LoadLibrary((option.format_info + i)->lib_file_path);
@@ -110,10 +111,10 @@ BOOL format_initialize(TCHAR *err_str)
 				return FALSE;
 			}
 		} else {
-			// 本体
+			// Main executable
 			lib = GetModuleHandle(NULL);
 		}
-		// 形式毎の関数アドレス取得
+		// Get function address for each format
 		// general
 		wsprintf(buf, TEXT("%sinitialize"), (option.format_info + i)->func_header);
 		tchar_to_char(buf, cbuf, BUF_SIZE - 1);
@@ -202,7 +203,7 @@ BOOL format_initialize(TCHAR *err_str)
 		tchar_to_char(buf, cbuf, BUF_SIZE - 1);
 		(option.format_info + i)->func_window_hide_data = GetProcAddress(lib, cbuf);
 
-		// 初期化
+		// Initialize
 		if ((option.format_info + i)->func_initialize != NULL) {
 			((option.format_info + i)->func_initialize)();
 		}
@@ -211,7 +212,7 @@ BOOL format_initialize(TCHAR *err_str)
 }
 
 /*
- * format_get_icon - 形式用のアイコンを取得
+ * format_get_icon - get icon for format
  */
 HICON format_get_icon(const int index, const int icon_size, BOOL *free_icon)
 {
@@ -222,7 +223,7 @@ HICON format_get_icon(const int index, const int icon_size, BOOL *free_icon)
 }
 
 /*
- * format_free - 形式情報の解放
+ * format_free - free format information
  */
 BOOL format_free(void)
 {
@@ -237,7 +238,7 @@ BOOL format_free(void)
 }
 
 /*
- * format_initialize_item - 形式毎のアイテムの初期化
+ * format_initialize_item - initialize item for each format
  */
 BOOL format_initialize_item(DATA_INFO *di, const BOOL set_init_data)
 {
@@ -251,7 +252,7 @@ BOOL format_initialize_item(DATA_INFO *di, const BOOL set_init_data)
 }
 
 /*
- * format_copy_data - 形式毎のデータコピー
+ * format_copy_data - copy data for each format
  */
 HANDLE format_copy_data(const TCHAR *format_name, const HANDLE data, DWORD *ret_size)
 {
@@ -265,7 +266,7 @@ HANDLE format_copy_data(const TCHAR *format_name, const HANDLE data, DWORD *ret_
 }
 
 /*
- * format_data_to_bytes - データをバイト列に変換
+ * format_data_to_bytes - convert data to byte array
  */
 BYTE *format_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 {
@@ -279,7 +280,7 @@ BYTE *format_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 }
 
 /*
- * format_bytes_to_data - バイト列をデータに変換
+ * format_bytes_to_data - convert byte array to data
  */
 HANDLE format_bytes_to_data(const TCHAR *format_name, const BYTE *data, DWORD *size)
 {
@@ -293,11 +294,11 @@ HANDLE format_bytes_to_data(const TCHAR *format_name, const BYTE *data, DWORD *s
 }
 
 /*
- * format_get_file_info - 形式毎のコモンダイアログ情報の取得 (mode = TRUE-open FALSE-save)
+ * format_get_file_info - get common dialog information for each format (mode = TRUE-open FALSE-save)
  *
- *	戻り値: -1 - コモンダイアログを表示しない
- *			0  - 未設定
- *			1  - 設定済み
+ *	Return value: -1 - Do not display common dialog
+ *			0  - Not set
+ *			1  - Set
  */
 int format_get_file_info(const TCHAR *format_name, const DATA_INFO *di, OPENFILENAME *of, const BOOL mode)
 {
@@ -311,7 +312,7 @@ int format_get_file_info(const TCHAR *format_name, const DATA_INFO *di, OPENFILE
 }
 
 /*
- * format_data_to_file - データをファイルに保存
+ * format_data_to_file - save data to file
  */
 BOOL format_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int filter_index, TCHAR *err_str)
 {
@@ -325,7 +326,7 @@ BOOL format_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int filter
 }
 
 /*
- * format_file_to_data - ファイルからデータを作成
+ * format_file_to_data - create data from file
  */
 HANDLE format_file_to_data(const TCHAR *file_name, const TCHAR *format_name, DWORD *ret_size, TCHAR *err_str)
 {
@@ -339,7 +340,7 @@ HANDLE format_file_to_data(const TCHAR *file_name, const TCHAR *format_name, DWO
 }
 
 /*
- * format_free_data - 形式毎のデータを解放
+ * format_free_data - free data for each format
  */
 BOOL format_free_data(const TCHAR *format_name, HANDLE data)
 {
@@ -353,7 +354,7 @@ BOOL format_free_data(const TCHAR *format_name, HANDLE data)
 }
 
 /*
- * format_free_item - 形式毎のアイテム情報を解放
+ * format_free_item - free item information for each format
  */
 BOOL format_free_item(DATA_INFO *di)
 {
@@ -367,7 +368,7 @@ BOOL format_free_item(DATA_INFO *di)
 }
 
 /*
- * format_get_menu_title - 形式毎のメニュータイトルを取得
+ * format_get_menu_title - get menu title for each format
  */
 BOOL format_get_menu_title(DATA_INFO *di)
 {
@@ -384,7 +385,7 @@ BOOL format_get_menu_title(DATA_INFO *di)
 }
 
 /*
- * format_get_menu_icon - 形式毎のメニュー用アイコンを取得
+ * format_get_menu_icon - get menu icon for each format
  */
 BOOL format_get_menu_icon(DATA_INFO *di)
 {
@@ -401,7 +402,7 @@ BOOL format_get_menu_icon(DATA_INFO *di)
 }
 
 /*
- * format_get_menu_bitmap - 形式毎のメニュー用ビットマップを取得
+ * format_get_menu_bitmap - get menu bitmap for each format
  */
 BOOL format_get_menu_bitmap(DATA_INFO *di)
 {
@@ -409,6 +410,9 @@ BOOL format_get_menu_bitmap(DATA_INFO *di)
 
 	if (di->menu_bitmap != NULL) {
 		return TRUE;
+	}
+	if (db_history_is_open() && di->data == NULL) {
+		db_history_ensure_item_data(di);
 	}
 	i = format_get_index(di->format_name, di->format_name_hash);
 	if (i == -1 || (option.format_info + i)->func_get_menu_bitmap == NULL) {
@@ -419,12 +423,15 @@ BOOL format_get_menu_bitmap(DATA_INFO *di)
 }
 
 /*
- * format_get_tooltip_text - 形式毎のメニュー用ツールチップテキストを取得
+ * format_get_tooltip_text - get menu tooltip text for each format
  */
 TCHAR *format_get_tooltip_text(DATA_INFO *di)
 {
 	int i;
 
+	if (db_history_is_open() && di->data == NULL) {
+		db_history_ensure_item_data(di);
+	}
 	i = format_get_index(di->format_name, di->format_name_hash);
 	if (i == -1 || (option.format_info + i)->func_get_tooltip_text == NULL) {
 		return FALSE;
@@ -433,7 +440,7 @@ TCHAR *format_get_tooltip_text(DATA_INFO *di)
 }
 
 /*
- * format_window_create - 形式毎のデータ表示ウィンドウの作成
+ * format_window_create - create data display window for each format
  */
 BOOL format_window_create(const HWND parent_wnd)
 {
@@ -448,7 +455,7 @@ BOOL format_window_create(const HWND parent_wnd)
 }
 
 /*
- * format_window_destroy - 形式毎のデータ表示ウィンドウの破棄
+ * format_window_destroy - destroy data display window for each format
  */
 BOOL format_window_destroy(void)
 {
@@ -463,12 +470,15 @@ BOOL format_window_destroy(void)
 }
 
 /*
- * format_window_show_data - 形式毎のデータを表示
+ * format_window_show_data - display data for each format
  */
 BOOL format_window_show_data(const HWND hWnd, DATA_INFO *di, const BOOL lock)
 {
 	int i;
 
+	if (db_history_is_open() && di->data == NULL) {
+		db_history_ensure_item_data(di);
+	}
 	i = format_get_index(di->format_name, di->format_name_hash);
 	if (i == -1 || (option.format_info + i)->func_window_show_data == NULL) {
 		return FALSE;
@@ -477,7 +487,7 @@ BOOL format_window_show_data(const HWND hWnd, DATA_INFO *di, const BOOL lock)
 }
 
 /*
- * format_window_save_data - 形式毎のデータを保存
+ * format_window_save_data - save data for each format
  */
 BOOL format_window_save_data(const HWND hWnd, DATA_INFO *di)
 {
@@ -491,7 +501,7 @@ BOOL format_window_save_data(const HWND hWnd, DATA_INFO *di)
 }
 
 /*
- * format_window_hide_data - 形式毎のデータを非表示
+ * format_window_hide_data - hide data for each format
  */
 BOOL format_window_hide_data(const HWND hWnd, DATA_INFO *di)
 {

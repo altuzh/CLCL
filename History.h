@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * History.h
@@ -18,6 +18,9 @@
 /* Struct */
 
 /* Function Prototypes */
+BOOL history_get_item_date(const DATA_INFO *di, TCHAR *date_buf, FILETIME *ft_day);
+BOOL history_pop_to_date_folder(DATA_INFO **root, DATA_INFO *popped_item);
+BOOL history_restructure(DATA_INFO **root, const int max_items);
 BOOL history_add(DATA_INFO **root, DATA_INFO *new_item, const BOOL overlap_check);
 
 #endif

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Ini.c
@@ -46,7 +46,7 @@ static BOOL ini_put_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INF
 void ini_set_language(const TCHAR* locale_name);
 
 /*
- * ini_get_format_name - 形式名の取得
+ * ini_get_format_name - get format names
  */
 static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 {
@@ -55,7 +55,7 @@ static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 	TCHAR *p, *r;
 	int i;
 
-	// 項目数の取得
+	// Get number of items
 	p = format_name;
 	*cnt = 0;
 	while (1) {
@@ -73,13 +73,13 @@ static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 		}
 	}
 
-	// 確保
+	// Allocate
 	if ((ret = mem_calloc(sizeof(FORMAT_NAME) * (*cnt))) == NULL) {
 		*cnt = 0;
 		return NULL;
 	}
 
-	// 項目を切り出す
+	// Extract items
 	p = format_name;
 	r = buf;
 	i = 0;
@@ -107,7 +107,7 @@ static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 }
 
 /*
- * ini_get_option - メニューオプションを取得
+ * ini_get_option - get menu options
  */
 static BOOL ini_get_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INFO *mi, const int mcnt, TCHAR *err_str)
 {
@@ -149,7 +149,7 @@ static BOOL ini_get_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INF
 }
 
 /*
- * ini_get_option - オプションを取得
+ * ini_get_option - get options
  */
 BOOL ini_get_option(TCHAR *err_str)
 {
@@ -169,7 +169,7 @@ BOOL ini_get_option(TCHAR *err_str)
 	wsprintf(ini_path, TEXT("%s\\%s"), work_path, USER_INI);
 	wsprintf(ini_path_old, TEXT("%s\\%s"), work_path, USER_INI_OLD);
 	if (file_check_file(ini_path) == FALSE && file_check_file(ini_path_old) == TRUE) {
-		// INIファイル名変更 (Ver 1.0.8)
+		// Change INI file name (Ver 1.0.8)
 		MoveFile(ini_path_old, ini_path);
 	}
 	profile_initialize(ini_path, TRUE);
@@ -444,7 +444,7 @@ BOOL ini_get_option(TCHAR *err_str)
 		(option.format_info + 3)->func_header = alloc_copy(TEXT("file_"));
 
 		for (i = 0; i < option.format_cnt; i++) {
-			// 形式名の取得
+			// Get format name
 			(option.format_info + i)->fn = ini_get_format_name((option.format_info + i)->format_name,
 				&(option.format_info + i)->fn_cnt);
 		}
@@ -461,7 +461,7 @@ BOOL ini_get_option(TCHAR *err_str)
 			wsprintf(buf, TEXT("func_header-%d"), i);
 			(option.format_info + i)->func_header = profile_alloc_string(TEXT("format"), buf, TEXT(""), ini_path);
 
-			// 形式名の取得
+			// Get format name
 			(option.format_info + i)->fn = ini_get_format_name((option.format_info + i)->format_name,
 				&(option.format_info + i)->fn_cnt);
 		}
@@ -516,7 +516,7 @@ BOOL ini_get_option(TCHAR *err_str)
 		(option.filter_info + 2)->limit_size = 0;
 
 		for (i = 0; i < option.filter_cnt; i++) {
-			// 形式名の取得
+			// Get format name
 			(option.filter_info + i)->fn = ini_get_format_name((option.filter_info + i)->format_name,
 				&(option.filter_info + i)->fn_cnt);
 		}
@@ -535,7 +535,7 @@ BOOL ini_get_option(TCHAR *err_str)
 			wsprintf(buf, TEXT("limit_size-%d"), i);
 			(option.filter_info + i)->limit_size = profile_get_int(TEXT("filter"), buf, 0, ini_path);
 
-			// 形式名の取得
+			// Get format name
 			(option.filter_info + i)->fn = ini_get_format_name((option.filter_info + i)->format_name,
 				&(option.filter_info + i)->fn_cnt);
 		}
@@ -716,7 +716,7 @@ BOOL ini_get_option(TCHAR *err_str)
 	option.bin_font_charset = profile_get_int(TEXT("binview"), TEXT("font_charset"), char_set, ini_path);
 
 	// text format
-	option.fmt_txt_menu_tooltip_size = profile_get_int(TEXT("fmt_text"), TEXT("menu_tooltip_size"), 1024, ini_path);
+	option.fmt_txt_menu_tooltip_size = profile_get_int(TEXT("fmt_text"), TEXT("menu_tooltip_size"), 65536, ini_path);
 	option.fmt_txt_viewer_word_wrap = profile_get_int(TEXT("fmt_text"), TEXT("viewer_word_wrap"), 0, ini_path);
 	option.fmt_txt_tab_size = profile_get_int(TEXT("fmt_text"), TEXT("tab_size"), 8, ini_path);
 	option.fmt_txt_font_name = profile_alloc_string(TEXT("fmt_text"), TEXT("font_name"), TEXT(""), ini_path);
@@ -743,7 +743,7 @@ BOOL ini_get_option(TCHAR *err_str)
 }
 
 /*
- * ini_put_menu - メニューオプションを書きこむ
+ * ini_put_menu - write menu options
  */
 static BOOL ini_put_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INFO *mi, const int mcnt)
 {
@@ -785,7 +785,7 @@ static BOOL ini_put_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INF
 }
 
 /*
- * ini_put_option - オプションを書きこむ
+ * ini_put_option - write options
  */
 BOOL ini_put_option(void)
 {
@@ -1102,7 +1102,7 @@ BOOL ini_put_option(void)
 }
 
 /*
- * ini_free_format_name - 形式名を解放
+ * ini_free_format_name - free format names
  */
 void ini_free_format_name(FORMAT_NAME *fn, const int fn_cnt)
 {
@@ -1117,7 +1117,7 @@ void ini_free_format_name(FORMAT_NAME *fn, const int fn_cnt)
 }
 
 /*
- * ini_free_menu - メニューオプションを解放
+ * ini_free_menu - free menu options
  */
 void ini_free_menu(MENU_INFO *mi, const int mcnt)
 {
@@ -1141,7 +1141,7 @@ void ini_free_menu(MENU_INFO *mi, const int mcnt)
 }
 
 /*
- * ini_free - オプションを解放
+ * ini_free - free options
  */
 BOOL ini_free(void)
 {

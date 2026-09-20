@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * fmt_Text.c
@@ -29,7 +29,7 @@
 
 /* Global Variables */
 static HICON txt_icon;
-// 読み込み済みのアイコンのサイズ
+// Size of loaded icon
 static int txt_icon_size;
 static HWND hTxtWnd;
 
@@ -40,7 +40,7 @@ extern OPTION_INFO option;
 static HICON text_load_icon(const int icon_size);
 
 /*
- * text_initialize - 初期化
+ * text_initialize - initialization
  */
 __declspec(dllexport) BOOL CALLBACK text_initialize(void)
 {
@@ -50,7 +50,7 @@ __declspec(dllexport) BOOL CALLBACK text_initialize(void)
 }
 
 /*
- * text_load_icon - 形式用のアイコンの読み込み
+ * text_load_icon - load icon for format
  */
 static HICON text_load_icon(const int icon_size)
 {
@@ -69,7 +69,7 @@ static HICON text_load_icon(const int icon_size)
 }
 
 /*
- * text_get_icon - 形式用のアイコンを取得
+ * text_get_icon - get icon for format
  */
 __declspec(dllexport) HICON CALLBACK text_get_icon(const int icon_size, BOOL *free_icon)
 {
@@ -78,7 +78,7 @@ __declspec(dllexport) HICON CALLBACK text_get_icon(const int icon_size, BOOL *fr
 }
 
 /*
- * text_free - 終了処理
+ * text_free - cleanup
  */
 __declspec(dllexport) BOOL CALLBACK text_free(void)
 {
@@ -91,7 +91,7 @@ __declspec(dllexport) BOOL CALLBACK text_free(void)
 }
 
 /*
- * text_initialize_item - アイテム情報の初期化
+ * text_initialize_item - initialize item information
  */
 __declspec(dllexport) BOOL CALLBACK text_initialize_item(DATA_INFO *di, const BOOL set_init_data)
 {
@@ -99,7 +99,7 @@ __declspec(dllexport) BOOL CALLBACK text_initialize_item(DATA_INFO *di, const BO
 }
 
 /*
- * text_copy_data - データのコピー
+ * text_copy_data - copy data
  */
 __declspec(dllexport) HANDLE CALLBACK text_copy_data(const TCHAR *format_name, const HANDLE data, DWORD *ret_size)
 {
@@ -107,7 +107,7 @@ __declspec(dllexport) HANDLE CALLBACK text_copy_data(const TCHAR *format_name, c
 }
 
 /*
- * text_data_to_bytes - データをバイト列に変換
+ * text_data_to_bytes - convert data to byte array
  */
 __declspec(dllexport) BYTE* CALLBACK text_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 {
@@ -115,7 +115,7 @@ __declspec(dllexport) BYTE* CALLBACK text_data_to_bytes(const DATA_INFO *di, DWO
 }
 
 /*
- * text_bytes_to_data - バイト列をデータに変換
+ * text_bytes_to_data - convert byte array to data
  */
 __declspec(dllexport) HANDLE CALLBACK text_bytes_to_data(const TCHAR *format_name, const BYTE *data, DWORD *size)
 {
@@ -123,7 +123,7 @@ __declspec(dllexport) HANDLE CALLBACK text_bytes_to_data(const TCHAR *format_nam
 }
 
 /*
- * text_get_file_info - コモンダイアログ情報の取得
+ * text_get_file_info - get common dialog information
  */
 __declspec(dllexport) int CALLBACK text_get_file_info(const TCHAR *format_name, const DATA_INFO *di, OPENFILENAME *of, const BOOL mode)
 {
@@ -146,7 +146,7 @@ __declspec(dllexport) int CALLBACK text_get_file_info(const TCHAR *format_name, 
 }
 
 /*
- * text_data_to_file - データをファイルに保存
+ * text_data_to_file - save data to file
  */
 __declspec(dllexport) BOOL CALLBACK text_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int filter_index, TCHAR *err_str)
 {
@@ -159,7 +159,7 @@ __declspec(dllexport) BOOL CALLBACK text_data_to_file(DATA_INFO *di, const TCHAR
 		message_get_error(GetLastError(), err_str);
 		return FALSE;
 	}
-	// ファイルに書き込む
+	// Write to file
 	if (di->format == CF_UNICODETEXT) {
 		if (file_write_buf(file_name, tmp, di->size - sizeof(WCHAR), err_str) == FALSE) {
 			GlobalUnlock(di->data);
@@ -176,7 +176,7 @@ __declspec(dllexport) BOOL CALLBACK text_data_to_file(DATA_INFO *di, const TCHAR
 }
 
 /*
- * text_file_to_data - ファイルからデータを作成
+ * text_file_to_data - create data from file
  */
 __declspec(dllexport) HANDLE CALLBACK text_file_to_data(const TCHAR *file_name, const TCHAR *format_name, DWORD *ret_size, TCHAR *err_str)
 {
@@ -185,11 +185,11 @@ __declspec(dllexport) HANDLE CALLBACK text_file_to_data(const TCHAR *file_name, 
 	BYTE *mem;
 	DWORD size;
 
-	// ファイルの読み込み
+	// Read file
 	if ((data = file_read_buf(file_name, &size, err_str)) == NULL) {
 		return NULL;
 	}
-	// コピー先確保
+	// Allocate destination
 	if (lstrcmp(format_name, TEXT("UNICODE TEXT")) == 0) {
 		if ((ret = GlobalAlloc(GHND, size + sizeof(WCHAR))) == NULL) {
 			message_get_error(GetLastError(), err_str);
@@ -203,14 +203,14 @@ __declspec(dllexport) HANDLE CALLBACK text_file_to_data(const TCHAR *file_name, 
 			return NULL;
 		}
 	}
-	// コピー先ロック
+	// Lock destination
 	if ((mem = GlobalLock(ret)) == NULL) {
 		message_get_error(GetLastError(), err_str);
 		GlobalFree(ret);
 		mem_free(&data);
 		return NULL;
 	}
-	// コピー
+	// Copy
 	CopyMemory(mem, data, size);
 	if (lstrcmp(format_name, TEXT("UNICODE TEXT")) == 0) {
 		*((WCHAR *)mem + (size / sizeof(WCHAR))) = L'\0';
@@ -223,14 +223,14 @@ __declspec(dllexport) HANDLE CALLBACK text_file_to_data(const TCHAR *file_name, 
 			*ret_size = size;
 		}
 	}
-	// ロック解除
+	// Unlock
 	GlobalUnlock(ret);
 	mem_free(&data);
 	return ret;
 }
 
 /*
- * text_free_data - データの解放
+ * text_free_data - free data
  */
 __declspec(dllexport) BOOL CALLBACK text_free_data(const TCHAR *format_name, HANDLE data)
 {
@@ -244,7 +244,7 @@ __declspec(dllexport) BOOL CALLBACK text_free_data(const TCHAR *format_name, HAN
 }
 
 /*
- * text_free_item - アイテム情報の解放
+ * text_free_item - free item information
  */
 __declspec(dllexport) BOOL CALLBACK text_free_item(DATA_INFO *di)
 {
@@ -252,7 +252,7 @@ __declspec(dllexport) BOOL CALLBACK text_free_item(DATA_INFO *di)
 }
 
 /*
- * text_get_menu_title - メニュータイトルの取得
+ * text_get_menu_title - get menu title
  */
 __declspec(dllexport) BOOL CALLBACK text_get_menu_title(DATA_INFO *di)
 {
@@ -275,7 +275,7 @@ __declspec(dllexport) BOOL CALLBACK text_get_menu_title(DATA_INFO *di)
 		return TRUE;
 	}
 
-	// メニュー用文字列
+	// String for menu
 	if (di->format == CF_UNICODETEXT) {
 #ifdef UNICODE
 		p = (WCHAR *)mem;
@@ -333,7 +333,7 @@ __declspec(dllexport) BOOL CALLBACK text_get_menu_title(DATA_INFO *di)
 }
 
 /*
- * text_get_menu_icon - メニュー用アイコンの取得
+ * text_get_menu_icon - get menu icon
  */
 __declspec(dllexport) BOOL CALLBACK text_get_menu_icon(DATA_INFO *di, const int icon_size)
 {
@@ -343,7 +343,7 @@ __declspec(dllexport) BOOL CALLBACK text_get_menu_icon(DATA_INFO *di, const int 
 }
 
 /*
- * text_get_menu_bitmap - メニュー用ビットマップの取得
+ * text_get_menu_bitmap - get menu bitmap
  */
 __declspec(dllexport) BOOL CALLBACK text_get_menu_bitmap(DATA_INFO *di, const int width, const int height)
 {
@@ -351,7 +351,7 @@ __declspec(dllexport) BOOL CALLBACK text_get_menu_bitmap(DATA_INFO *di, const in
 }
 
 /*
- * text_get_tooltip_text - メニュー用ツールチップテキスト
+ * text_get_tooltip_text - menu tooltip text
  */
 __declspec(dllexport) TCHAR* CALLBACK text_get_tooltip_text(DATA_INFO *di)
 {
@@ -371,30 +371,34 @@ __declspec(dllexport) TCHAR* CALLBACK text_get_tooltip_text(DATA_INFO *di)
 		GlobalUnlock(di->data);
 		return NULL;
 	}
-	if ((ret = mem_alloc(sizeof(TCHAR) * (option.fmt_txt_menu_tooltip_size + 1))) == NULL) {
+	int max_chars = option.fmt_txt_menu_tooltip_size;
+	if (max_chars < 65536) {
+		max_chars = 65536;
+	}
+	if ((ret = mem_alloc(sizeof(TCHAR) * (max_chars + 1))) == NULL) {
 		GlobalUnlock(di->data);
 		return NULL;
 	}
 	if (di->format == CF_UNICODETEXT) {
 #ifdef UNICODE
-		len = (di->size / sizeof(WCHAR) + 1 < (DWORD)option.fmt_txt_menu_tooltip_size + 1) ?
-			di->size / sizeof(WCHAR) + 1 : option.fmt_txt_menu_tooltip_size + 1;
+		len = (di->size / sizeof(WCHAR) + 1 < (DWORD)max_chars + 1) ?
+			di->size / sizeof(WCHAR) + 1 : max_chars + 1;
 		lstrcpyn(ret, (WCHAR *)mem, len);
 #else
-		len = (di->size / sizeof(WCHAR) < (DWORD)option.fmt_txt_menu_tooltip_size) ?
-			di->size / sizeof(WCHAR) : option.fmt_txt_menu_tooltip_size;
-		WideCharToMultiByte(CP_ACP, 0, (WCHAR *)mem, di->size / sizeof(WCHAR), ret, option.fmt_txt_menu_tooltip_size, NULL, NULL);
+		len = (di->size / sizeof(WCHAR) < (DWORD)max_chars) ?
+			di->size / sizeof(WCHAR) : max_chars;
+		WideCharToMultiByte(CP_ACP, 0, (WCHAR *)mem, di->size / sizeof(WCHAR), ret, max_chars, NULL, NULL);
 		*(ret + len) = '\0';
 #endif
 	} else {
 #ifdef UNICODE
-		len = (di->size < (DWORD)option.fmt_txt_menu_tooltip_size) ?
-			di->size : option.fmt_txt_menu_tooltip_size;
-		MultiByteToWideChar(CP_ACP, 0, mem, di->size, ret, option.fmt_txt_menu_tooltip_size);
+		len = (di->size < (DWORD)max_chars) ?
+			di->size : max_chars;
+		MultiByteToWideChar(CP_ACP, 0, mem, di->size, ret, max_chars);
 		*(ret + len) = L'\0';
 #else
-		len = (di->size + 1 < (DWORD)option.fmt_txt_menu_tooltip_size + 1) ?
-			di->size + 1 : option.fmt_txt_menu_tooltip_size + 1;
+		len = (di->size + 1 < (DWORD)max_chars + 1) ?
+			di->size + 1 : max_chars + 1;
 		lstrcpyn(ret, mem, len);
 #endif
 	}
@@ -403,7 +407,7 @@ __declspec(dllexport) TCHAR* CALLBACK text_get_tooltip_text(DATA_INFO *di)
 }
 
 /*
- * text_window_create - データ表示ウィンドウの作成
+ * text_window_create - create data display window
  */
 __declspec(dllexport) HWND CALLBACK text_window_create(const HWND parent_wnd)
 {
@@ -421,7 +425,7 @@ __declspec(dllexport) HWND CALLBACK text_window_create(const HWND parent_wnd)
 }
 
 /*
- * text_window_destroy - データ表示ウィンドウの破棄
+ * text_window_destroy - destroy data display window
  */
 __declspec(dllexport) BOOL CALLBACK text_window_destroy(const HWND hWnd)
 {
@@ -430,7 +434,7 @@ __declspec(dllexport) BOOL CALLBACK text_window_destroy(const HWND hWnd)
 }
 
 /*
- * text_window_show_data - データの表示
+ * text_window_show_data - display data
  */
 __declspec(dllexport) BOOL CALLBACK text_window_show_data(const HWND hWnd, DATA_INFO *di, const BOOL lock)
 {
@@ -478,7 +482,7 @@ __declspec(dllexport) BOOL CALLBACK text_window_show_data(const HWND hWnd, DATA_
 }
 
 /*
- * text_window_save_data - データの保存
+ * text_window_save_data - save data
  */
 __declspec(dllexport) BOOL CALLBACK text_window_save_data(const HWND hWnd, DATA_INFO *di)
 {
@@ -498,7 +502,7 @@ __declspec(dllexport) BOOL CALLBACK text_window_save_data(const HWND hWnd, DATA_
 		di->size = 0;
 	}
 	size = SendMessage(hWnd, WM_GETTEXTLENGTH, 0, 0);
-	// データの作成
+	// Create data
 	if (di->format == CF_UNICODETEXT) {
 #ifdef UNICODE
 		if ((data = GlobalAlloc(GHND, sizeof(WCHAR) * (size + 1))) == NULL) {
@@ -510,7 +514,7 @@ __declspec(dllexport) BOOL CALLBACK text_window_save_data(const HWND hWnd, DATA_
 		}
 		SendMessage(hWnd, WM_GETTEXT, size + 1, (LPARAM)to_mem);
 #else
-		// 現在表示されている内容の取得
+		// Get currently displayed content
 		if ((buf = mem_alloc(sizeof(TCHAR) * (size + 1))) == NULL) {
 			return FALSE;
 		}
@@ -532,7 +536,7 @@ __declspec(dllexport) BOOL CALLBACK text_window_save_data(const HWND hWnd, DATA_
 		GlobalUnlock(data);
 	} else {
 #ifdef UNICODE
-		// 現在表示されている内容の取得
+		// Get currently displayed content
 		if ((buf = mem_alloc(sizeof(TCHAR) * (size + 1))) == NULL) {
 			return FALSE;
 		}
@@ -562,7 +566,7 @@ __declspec(dllexport) BOOL CALLBACK text_window_save_data(const HWND hWnd, DATA_
 #endif
 		GlobalUnlock(data);
 	}
-	// 新しいデータを設定
+	// Set new data
 	di->data = data;
 	if (di->format == CF_UNICODETEXT) {
 		di->size = sizeof(WCHAR) * (size + 1);
@@ -574,7 +578,7 @@ __declspec(dllexport) BOOL CALLBACK text_window_save_data(const HWND hWnd, DATA_
 }
 
 /*
- * text_window_hide_data - データの非表示
+ * text_window_hide_data - hide data
  */
 __declspec(dllexport) BOOL CALLBACK text_window_hide_data(const HWND hWnd, DATA_INFO *di)
 {

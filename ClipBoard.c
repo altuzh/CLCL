@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * ClipBoard.c
@@ -52,7 +52,7 @@ static BOOL should_ignore()
 	for (UINT fmt = EnumClipboardFormats(0); fmt != 0; fmt = EnumClipboardFormats(fmt)) {
 		if (fmt == exclude_monitoring || fmt == clipboard_viewer_ignore) {
 			HANDLE h = GetClipboardData(fmt);
-			// フォーマットが ExcludeClipboardContentFromMonitorProcessing のデータが存在する場合は無視する。
+			// If ExcludeClipboardContentFromMonitorProcessing data exists, ignore clipboard update.
 			if (h != 0)
 				return TRUE;
 		}
@@ -75,7 +75,7 @@ static BOOL should_ignore()
 }
 
 /*
- * clipboard_get_format - クリップボード形式名の取得
+ * clipboard_get_format - Get clipboard format name
  */
 UINT clipboard_get_format(const UINT format, TCHAR *type_name)
 {
@@ -112,7 +112,7 @@ UINT clipboard_get_format(const UINT format, TCHAR *type_name)
 	};
 
 	if (format != 0) {
-		// format から名前を取得
+		// Get format name from format ID
 		*type_name = TEXT('\0');
 		if (GetClipboardFormatName(format, type_name, BUF_SIZE - 1) != 0) {
 			return 0;
@@ -128,7 +128,7 @@ UINT clipboard_get_format(const UINT format, TCHAR *type_name)
 		}
 
 	} else {
-		// 名前から format を取得
+		// Get format ID from name
 		for (i = 0; (fi + i)->format != 0; i++) {
 			if (lstrcmpi(type_name, (fi + i)->name) == 0) {
 				return ((int)(fi + i)->format);
@@ -139,7 +139,7 @@ UINT clipboard_get_format(const UINT format, TCHAR *type_name)
 }
 
 /*
- * clipboard_get_datainfo - クリップボードの内容からデータリストを作成
+ * clipboard_get_datainfo - Create data list from clipboard contents
  */
 DATA_INFO *clipboard_get_datainfo(const BOOL use_filter, const BOOL get_data, TCHAR *err_str)
 {
@@ -157,30 +157,30 @@ DATA_INFO *clipboard_get_datainfo(const BOOL use_filter, const BOOL get_data, TC
 	while ((format = EnumClipboardFormats(format)) != 0) {
 		clipboard_get_format(format, buf);
 
-		// フィルタ (形式)
+		// Filter (format)
 		if (use_filter == TRUE && filter_format_check(buf) == FALSE) {
 			continue;
 		}
 
-		// アイテムの作成
+		// Create item
 		if ((new_item = data_create_data(format, buf, NULL, 0, FALSE, err_str)) == NULL) {
 			return NULL;
 		}
 		if (get_data == TRUE) {
-			// クリップボードデータのコピー
+			// Copy clipboard data
 			if ((data = GetClipboardData(format)) != NULL &&
 				(new_item->data = format_copy_data(new_item->format_name, data, &new_item->size)) == NULL) {
 				new_item->data = clipboard_copy_data(format, data, &new_item->size);
 			}
 		}
 		
-		// フィルタ (サイズ)
+		// Filter (size)
 		if (use_filter == TRUE && filter_size_check(new_item->format_name, new_item->size) == FALSE) {
 			data_free(new_item);
 			continue;
 		}
 
-		// リストに追加
+		// Add to list
 		if (ret_di == NULL) {
 			ret_di = new_item;
 		} else {
@@ -192,17 +192,17 @@ DATA_INFO *clipboard_get_datainfo(const BOOL use_filter, const BOOL get_data, TC
 }
 
 /*
- * clipboard_to_item - クリップボードのデータからアイテムを作成
+ * clipboard_to_item - Create item from clipboard data
  */
 DATA_INFO *clipboard_to_item(TCHAR *err_str)
 {
 	DATA_INFO *new_item;
 
-	// アイテムの作成
+	// Create item
 	if ((new_item = data_create_item(NULL, TRUE, err_str)) == NULL) {
 		return NULL;
 	}
-	// クリップボードデータ取得
+	// Get clipboard data
 	if ((new_item->child = clipboard_get_datainfo(TRUE, TRUE, err_str)) == NULL) {
 		data_free(new_item);
 		return NULL;
@@ -211,18 +211,18 @@ DATA_INFO *clipboard_to_item(TCHAR *err_str)
 }
 
 /*
- * clipboard_set_data - クリップボードにデータを設定
+ * clipboard_set_data - Set data to clipboard
  */
 static BOOL clipboard_set_data(const UINT format, const TCHAR *name, const HANDLE data, TCHAR *err_str)
 {
 	UINT fmt = format;
 
-	// クリップボード形式を取得
+	// Get clipboard format
 	if (fmt == 0 && (fmt = RegisterClipboardFormat(name)) == 0) {
 		message_get_error(GetLastError(), err_str);
 		return FALSE;
 	}
-	// クリップボードにデータを設定
+	// Set data to clipboard
 	if (SetClipboardData(fmt, data) == NULL && data != NULL) {
 		message_get_error(GetLastError(), err_str);
 		return FALSE;
@@ -231,7 +231,7 @@ static BOOL clipboard_set_data(const UINT format, const TCHAR *name, const HANDL
 }
 
 /*
- * clipboard_set_datainfo - クリップボードにデータを設定
+ * clipboard_set_datainfo - Set data info to clipboard
  */
 BOOL clipboard_set_datainfo(const HWND hWnd, DATA_INFO *set_di, TCHAR *err_str)
 {
@@ -240,7 +240,7 @@ BOOL clipboard_set_datainfo(const HWND hWnd, DATA_INFO *set_di, TCHAR *err_str)
 	if (set_di == NULL) {
 		return FALSE;
 	}
-	// クリップボードの初期化
+	// Initialize clipboard
 	if (OpenClipboard(hWnd) == FALSE) {
 		message_get_error(GetLastError(), err_str);
 		return FALSE;
@@ -252,7 +252,7 @@ BOOL clipboard_set_datainfo(const HWND hWnd, DATA_INFO *set_di, TCHAR *err_str)
 	}
 	switch (set_di->type) {
 	case TYPE_ITEM:
-		// 子アイテムを全て追加
+		// Add all child items
 		for (di = set_di->child; di != NULL; di = di->next) {
 			if (clipboard_set_data(di->format, di->format_name, di->data, err_str) == FALSE) {
 				CloseClipboard();
@@ -263,7 +263,7 @@ BOOL clipboard_set_datainfo(const HWND hWnd, DATA_INFO *set_di, TCHAR *err_str)
 		break;
 
 	case TYPE_DATA:
-		// 1件のみ追加
+		// Add single item
 		if (clipboard_set_data(set_di->format, set_di->format_name, set_di->data, err_str) == FALSE) {
 			CloseClipboard();
 			return FALSE;
@@ -276,7 +276,7 @@ BOOL clipboard_set_datainfo(const HWND hWnd, DATA_INFO *set_di, TCHAR *err_str)
 }
 
 /*
- * clipboard_copy_data - クリップボードデータのコピーを作成
+ * clipboard_copy_data - Create copy of clipboard data
  */
 HANDLE clipboard_copy_data(const UINT format, const HANDLE data, DWORD *ret_size)
 {
@@ -291,7 +291,7 @@ HANDLE clipboard_copy_data(const UINT format, const HANDLE data, DWORD *ret_size
 
 	switch (format) {
 	case CF_PALETTE:
-		// パレット
+		// Palette
 		pcnt = 0;
 		if (GetObject(data, sizeof(WORD), &pcnt) == 0) {
 			return NULL;
@@ -314,7 +314,7 @@ HANDLE clipboard_copy_data(const UINT format, const HANDLE data, DWORD *ret_size
 
 	case CF_DSPBITMAP:
 	case CF_BITMAP:
-		// ビットマップ
+		// Bitmap
 		if ((to_mem = bitmap_to_dib(data, ret_size)) == NULL) {
 			return NULL;
 		}
@@ -328,16 +328,16 @@ HANDLE clipboard_copy_data(const UINT format, const HANDLE data, DWORD *ret_size
 
 	case CF_DSPMETAFILEPICT:
 	case CF_METAFILEPICT:
-		// コピー元ロック
+		// Lock source
 		if ((from_mem = GlobalLock(data)) == NULL) {
 			return NULL;
 		}
-		// メタファイル
+		// Metafile
 		if ((ret = GlobalAlloc(GHND, sizeof(METAFILEPICT))) == NULL) {
 			GlobalUnlock(data);
 			return NULL;
 		}
-		// コピー先ロック
+		// Lock destination
 		if ((to_mem = GlobalLock(ret)) == NULL) {
 			GlobalFree(ret);
 			GlobalUnlock(data);
@@ -347,50 +347,50 @@ HANDLE clipboard_copy_data(const UINT format, const HANDLE data, DWORD *ret_size
 		if ((((METAFILEPICT *)to_mem)->hMF = CopyMetaFile(((METAFILEPICT *)from_mem)->hMF, NULL)) != NULL) {
 			*ret_size = sizeof(METAFILEPICT) + GetMetaFileBitsEx(((METAFILEPICT *)to_mem)->hMF, 0, NULL);
 		}
-		// ロック解除
+		// Unlock
 		GlobalUnlock(ret);
 		GlobalUnlock(data);
 		break;
 
 	case CF_DSPENHMETAFILE:
 	case CF_ENHMETAFILE:
-		// 拡張メタファイル
+		// Enhanced metafile
 		if ((ret = CopyEnhMetaFile(data, NULL)) != NULL) {
 			*ret_size = GetEnhMetaFileBits(ret, 0, NULL);
 		}
 		break;
 
 	default:
-		// その他
-		// メモリチェック
+		// Other formats
+		// Memory check
 		if (IsBadReadPtr(data, 1) == TRUE) {
 			return NULL;
 		}
-		// サイズ取得
+		// Get size
 		if ((*ret_size = GlobalSize(data)) == 0) {
 			return NULL;
 		}
-		// コピー元ロック
+		// Lock source
 		if ((from_mem = GlobalLock(data)) == NULL) {
 			return NULL;
 		}
 
-		// コピー先確保
+		// Allocate destination
 		if ((ret = GlobalAlloc(GHND, *ret_size)) == NULL) {
 			GlobalUnlock(data);
 			return NULL;
 		}
-		// コピー先ロック
+		// Lock destination
 		if ((to_mem = GlobalLock(ret)) == NULL) {
 			GlobalFree(ret);
 			GlobalUnlock(data);
 			return NULL;
 		}
 
-		// コピー
+		// Copy
 		CopyMemory(to_mem, from_mem, *ret_size);
 
-		// ロック解除
+		// Unlock
 		GlobalUnlock(ret);
 		GlobalUnlock(data);
 		break;
@@ -399,7 +399,7 @@ HANDLE clipboard_copy_data(const UINT format, const HANDLE data, DWORD *ret_size
 }
 
 /*
- * clipboard_data_to_bytes - データをバイト列に変換
+ * clipboard_data_to_bytes - Convert data to byte array
  */
 BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 {
@@ -412,9 +412,11 @@ BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 		return NULL;
 	}
 
-	switch (di->format) {
+	UINT format = di->format ? di->format : clipboard_get_format(0, di->format_name);
+
+	switch (format) {
 	case CF_PALETTE:
-		// パレット
+		// Palette
 		i = 0;
 		GetObject(di->data, sizeof(WORD), &i);
 		size = sizeof(LOGPALETTE) + (sizeof(PALETTEENTRY) * i);
@@ -428,8 +430,8 @@ BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 
 	case CF_DSPBITMAP:
 	case CF_BITMAP:
-		// ビットマップ
-		if ((ret = bitmap_to_dib(di->data, &size)) == NULL) {
+		// Bitmap
+		if ((ret = bitmap_to_dib((HBITMAP)di->data, &size)) == NULL) {
 			break;
 		}
 		break;
@@ -439,7 +441,7 @@ BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 
 	case CF_DSPMETAFILEPICT:
 	case CF_METAFILEPICT:
-		// メタファイル
+		// Metafile
 		if ((tmp = GlobalLock(di->data)) == NULL) {
 			break;
 		}
@@ -460,7 +462,7 @@ BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 
 	case CF_DSPENHMETAFILE:
 	case CF_ENHMETAFILE:
-		// 拡張メタファイル
+		// Enhanced metafile
 		size = GetEnhMetaFileBits(di->data, 0, NULL);
 		if ((ret = mem_alloc(size)) == NULL) {
 			break;
@@ -472,7 +474,7 @@ BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 		break;
 
 	default:
-		// その他
+		// Other formats
 		if ((tmp = GlobalLock(di->data)) == NULL) {
 			break;
 		}
@@ -492,7 +494,7 @@ BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 }
 
 /*
- * clipboard_bytes_to_data - バイト列をデータに変換
+ * clipboard_bytes_to_data - Convert byte array to data
  */
 HANDLE clipboard_bytes_to_data(TCHAR *format_name, const BYTE *data, DWORD *size)
 {
@@ -504,13 +506,13 @@ HANDLE clipboard_bytes_to_data(TCHAR *format_name, const BYTE *data, DWORD *size
 	}
 	switch (clipboard_get_format(0, format_name)) {
 	case CF_PALETTE:
-		// パレット
+		// Palette
 		ret = CreatePalette((LOGPALETTE *)data);
 		break;
 
 	case CF_DSPBITMAP:
 	case CF_BITMAP:
-		// ビットマップ
+		// Bitmap
 		ret = dib_to_bitmap(data);
 		break;
 
@@ -519,7 +521,7 @@ HANDLE clipboard_bytes_to_data(TCHAR *format_name, const BYTE *data, DWORD *size
 
 	case CF_DSPMETAFILEPICT:
 	case CF_METAFILEPICT:
-		// メタファイル
+		// Metafile
 		if ((ret = GlobalAlloc(GHND, sizeof(METAFILEPICT))) == NULL) {
 			break;
 		}
@@ -545,19 +547,19 @@ HANDLE clipboard_bytes_to_data(TCHAR *format_name, const BYTE *data, DWORD *size
 		break;
 
 	default:
-		// その他
-		// コピー先確保
+		// Other formats
+		// Allocate destination
 		if ((ret = GlobalAlloc(GHND, *size)) == NULL) {
 			return NULL;
 		}
-		// コピー先ロック
+		// Lock destination
 		if ((to_mem = GlobalLock(ret)) == NULL) {
 			GlobalFree(ret);
 			return NULL;
 		}
-		// コピー
+		// Copy
 		CopyMemory(to_mem, data, *size);
-		// ロック解除
+		// Unlock
 		GlobalUnlock(ret);
 		break;
 	}
@@ -565,7 +567,7 @@ HANDLE clipboard_bytes_to_data(TCHAR *format_name, const BYTE *data, DWORD *size
 }
 
 /*
- * clipboard_data_to_file - データをファイルに保存
+ * clipboard_data_to_file - Save data to file
  */
 BOOL clipboard_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int filter_index, TCHAR *err_str)
 {
@@ -587,7 +589,7 @@ BOOL clipboard_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int fil
 
 	case CF_DSPMETAFILEPICT:
 	case CF_METAFILEPICT:
-		// メタファイル
+		// Metafile
 		if ((tmp = GlobalLock(di->data)) == NULL) {
 			message_get_error(GetLastError(), err_str);
 			return FALSE;
@@ -604,7 +606,7 @@ BOOL clipboard_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int fil
 
 	case CF_DSPENHMETAFILE:
 	case CF_ENHMETAFILE:
-		// 拡張メタファイル
+		// Enhanced metafile
 		if ((enh_meta = CopyEnhMetaFile(di->data, file_name)) == NULL) {
 			message_get_error(GetLastError(), err_str);
 			return FALSE;
@@ -613,13 +615,13 @@ BOOL clipboard_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int fil
 		break;
 
 	default:
-		// その他
-		// データをバイト列に変換
+		// Other formats
+		// Convert data to byte array
 		if ((tmp = clipboard_data_to_bytes(di, &size)) == NULL) {
 			message_get_error(GetLastError(), err_str);
 			return FALSE;
 		}
-		// ファイルに書き込む
+		// Write to file
 		if (file_write_buf(file_name, tmp, di->size, err_str) == FALSE) {
 			mem_free(&tmp);
 			return FALSE;
@@ -631,7 +633,7 @@ BOOL clipboard_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int fil
 }
 
 /*
- * clipboard_file_to_data - ファイルからデータを作成
+ * clipboard_file_to_data - Create data from file
  */
 HANDLE clipboard_file_to_data(const TCHAR *file_name, TCHAR *format_name, DWORD *ret_size, TCHAR *err_str)
 {
@@ -646,7 +648,7 @@ HANDLE clipboard_file_to_data(const TCHAR *file_name, TCHAR *format_name, DWORD 
 
 	case CF_DSPMETAFILEPICT:
 	case CF_METAFILEPICT:
-		// メタファイル
+		// Metafile
 		if ((ret = GlobalAlloc(GHND, sizeof(METAFILEPICT))) == NULL) {
 			message_get_error(GetLastError(), err_str);
 			return NULL;
@@ -675,12 +677,12 @@ HANDLE clipboard_file_to_data(const TCHAR *file_name, TCHAR *format_name, DWORD 
 		break;
 
 	default:
-		// その他
-		// ファイルの読み込み
+		// Other formats
+		// Read file
 		if ((data = file_read_buf(file_name, &size, err_str)) == NULL) {
 			return NULL;
 		}
-		// バイト列をデータに変換
+		// Convert byte array to data
 		ret = clipboard_bytes_to_data(format_name, data, &size);
 		mem_free(&data);
 		break;
@@ -692,7 +694,7 @@ HANDLE clipboard_file_to_data(const TCHAR *file_name, TCHAR *format_name, DWORD 
 }
 
 /*
- * clipboard_free_data - クリップボード形式毎のメモリの解放
+ * clipboard_free_data - Free memory for clipboard format
  */
 BOOL clipboard_free_data(TCHAR *format_name, HANDLE data)
 {
@@ -705,13 +707,13 @@ BOOL clipboard_free_data(TCHAR *format_name, HANDLE data)
 
 	switch (clipboard_get_format(0, format_name)) {
 	case CF_PALETTE:
-		// パレット
+		// Palette
 		ret = DeleteObject((HGDIOBJ)data);
 		break;
 
 	case CF_DSPBITMAP:
 	case CF_BITMAP:
-		// ビットマップ
+		// Bitmap
 		ret = DeleteObject((HGDIOBJ)data);
 		break;
 
@@ -720,7 +722,7 @@ BOOL clipboard_free_data(TCHAR *format_name, HANDLE data)
 
 	case CF_DSPMETAFILEPICT:
 	case CF_METAFILEPICT:
-		// メタファイル
+		// Metafile
 		if ((mem = GlobalLock(data)) != NULL) {
 			DeleteMetaFile(((METAFILEPICT *)mem)->hMF);
 			GlobalUnlock(data);
@@ -732,12 +734,12 @@ BOOL clipboard_free_data(TCHAR *format_name, HANDLE data)
 
 	case CF_DSPENHMETAFILE:
 	case CF_ENHMETAFILE:
-		// 拡張メタファイル
+		// Enhanced metafile
 		ret = DeleteEnhMetaFile((HENHMETAFILE)data);
 		break;
 
 	default:
-		// その他
+		// Other formats
 		if (GlobalFree((HGLOBAL)data) == NULL) {
 			ret = TRUE;
 		}

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCLSet
  *
  * CLCLSet.c
@@ -67,7 +67,7 @@ static HWND sort_listview;
 static HMODULE hModThemes;
 #endif	// OP_XP_STYLE
 
-// オプション
+// Options
 extern OPTION_INFO option;
 
 /* Local Function Prototypes */
@@ -81,7 +81,7 @@ static int show_option(const HWND hWnd, const TCHAR *cmd_line);
 static void get_work_path(const HINSTANCE hInstance);
 
 /*
- * init_themes - XP用スタイルの初期化
+ * init_themes - initialize XP style
  */
 #ifdef OP_XP_STYLE
 static void init_themes(void)
@@ -91,7 +91,7 @@ static void init_themes(void)
 #endif	// OP_XP_STYLE
 
 /*
- * themes_free - XP用スタイルの解放
+ * themes_free - free XP style
  */
 #ifdef OP_XP_STYLE
 static void themes_free(void)
@@ -104,7 +104,7 @@ static void themes_free(void)
 #endif	// OP_XP_STYLE
 
 /*
- * open_theme - XP用スタイルを開く
+ * open_theme - open XP style
  */
 #ifdef OP_XP_STYLE
 long open_theme(const HWND hWnd, const WCHAR *class_name)
@@ -125,7 +125,7 @@ long open_theme(const HWND hWnd, const WCHAR *class_name)
 #endif	// OP_XP_STYLE
 
 /*
- * close_theme - XP用スタイルを閉じる
+ * close_theme - close XP style
  */
 #ifdef OP_XP_STYLE
 void close_theme(long hTheme)
@@ -146,7 +146,7 @@ void close_theme(long hTheme)
 #endif	// OP_XP_STYLE
 
 /*
- * close_theme - XP用スタイルでスクロールバーのボタンの描画
+ * close_theme - draw scrollbar button with XP style
  */
 #ifdef OP_XP_STYLE
 BOOL draw_theme_scroll(LPDRAWITEMSTRUCT lpDrawItem, UINT i, long hTheme)
@@ -210,7 +210,7 @@ BOOL draw_theme_scroll(LPDRAWITEMSTRUCT lpDrawItem, UINT i, long hTheme)
 #endif	// OP_XP_STYLE
 
 /*
- * alloc_get_text - EDITに設定されているサイズ分のメモリを確保してEDITの内容を設定する
+ * alloc_get_text - allocate memory for EDIT control size and retrieve EDIT text
  */
 void alloc_get_text(const HWND hEdit, TCHAR **buf)
 {
@@ -227,7 +227,7 @@ void alloc_get_text(const HWND hEdit, TCHAR **buf)
 }
 
 /*
- * file_select - ファイル選択ダイアログの表示
+ * file_select - display file selection dialog
  */
 int file_select(const HWND hDlg, const TCHAR *oFilter, const int Index, TCHAR *ret)
 {
@@ -254,7 +254,7 @@ int file_select(const HWND hDlg, const TCHAR *oFilter, const int Index, TCHAR *r
 }
 
 /*
- * draw_scroll_sontrol - スクロールバーのボタンの描画
+ * draw_scroll_sontrol - draw scrollbar buttons
  */
 void draw_scroll_sontrol(LPDRAWITEMSTRUCT lpDrawItem, UINT i)
 {
@@ -265,19 +265,19 @@ void draw_scroll_sontrol(LPDRAWITEMSTRUCT lpDrawItem, UINT i)
 		return;
 	}
 	if (lpDrawItem->itemState & ODS_DISABLED) {
-		// 使用不能 
+		// Disabled
 		// unavailable
 		i |= DFCS_INACTIVE;
 	}
 	if (lpDrawItem->itemState & ODS_SELECTED) {
-		// 選択
+		// Select
 		i |= DFCS_PUSHED;
 	}
 
-	// フレームコントロールの描画
+	// Draw frame control
 	DrawFrameControl(lpDrawItem->hDC, &(lpDrawItem->rcItem), DFC_SCROLL, i);
 
-	// フォーカス
+	// Focus
 	if (lpDrawItem->itemState & ODS_FOCUS) {
 		lpDrawItem->rcItem.left += FOCUSRECT_SIZE;
 		lpDrawItem->rcItem.top += FOCUSRECT_SIZE;
@@ -288,7 +288,7 @@ void draw_scroll_sontrol(LPDRAWITEMSTRUCT lpDrawItem, UINT i)
 }
 
 /*
- * enum_windows_proc - ウィンドウ列挙プロシージャ
+ * enum_windows_proc - window enumeration procedure
  */
 BOOL CALLBACK enum_windows_proc(const HWND hWnd, const LPARAM lParam)
 {
@@ -299,11 +299,11 @@ BOOL CALLBACK enum_windows_proc(const HWND hWnd, const LPARAM lParam)
 	TCHAR buf[BUF_SIZE];
 	int i;
 
-	// 情報取得
+	// Get information
 	GetWindowText(hWnd, title, BUF_SIZE - 1);
 	GetClassName(hWnd, class_name, BUF_SIZE - 1);
 
-	// 既に追加済みかチェック
+	// Check if already added
 	for (i = 0; i < ListView_GetItemCount(hListView); i++) {
 		ListView_GetItemText(hListView, i, 0, buf, BUF_SIZE - 1);
 		if (lstrcmpi(buf, title) == 0) {
@@ -314,7 +314,7 @@ BOOL CALLBACK enum_windows_proc(const HWND hWnd, const LPARAM lParam)
 		}
 	}
 
-	// アイテムの追加
+	// Add item
 	lvi.mask = LVIF_TEXT;
 	lvi.iItem = ListView_GetItemCount(hListView);
 	lvi.iSubItem = 0;
@@ -328,7 +328,7 @@ BOOL CALLBACK enum_windows_proc(const HWND hWnd, const LPARAM lParam)
 }
 
 /*
- * listview_set_lparam - アイテムのLPARAMを設定
+ * listview_set_lparam - set item LPARAM
  */
 BOOL listview_set_lparam(const HWND hListView, const int i, const LPARAM lParam)
 {
@@ -342,7 +342,7 @@ BOOL listview_set_lparam(const HWND hListView, const int i, const LPARAM lParam)
 }
 
 /*
- * listview_get_lparam - アイテムのLPARAMを取得
+ * listview_get_lparam - get item LPARAM
  */
 LPARAM listview_get_lparam(const HWND hListView, const int i)
 {
@@ -356,7 +356,7 @@ LPARAM listview_get_lparam(const HWND hListView, const int i)
 }
 
 /*
- * listview_move_item - リストビューのアイテムを移動
+ * listview_move_item - move list view item
  */
 void listview_move_item(const HWND hListView, int index, const int Move)
 {
@@ -367,24 +367,24 @@ void listview_move_item(const HWND hListView, int index, const int Move)
 	int i = 0;
 	LPARAM lp;
 
-	// LPARAMの取得
+	// Get LPARAM
 	lp = listview_get_lparam(hListView, index);
-	// ヘッダの取得
+	// Get header
 	if ((header_wnd = ListView_GetHeader(hListView)) == NULL) {
 		header_wnd = GetWindow(hListView, GW_CHILD);
 	}
-	// テキストの取得
+	// Get text
 	column_cnt = Header_GetItemCount(header_wnd);
 	for (i = 0; i < column_cnt; i++) {
 		*(*(buf + i)) = TEXT('\0');
 		ListView_GetItemText(hListView, index, i, *(buf + i), BUF_SIZE - 1);
 	}
-	// アイテムの削除
+	// Delete item
 	ListView_DeleteItem(hListView, index);
 
 	index += Move;
 
-	// 移動先にアイテムを追加
+	// Add item to destination
 	lvi.mask = LVIF_TEXT | LVIF_PARAM;
 	lvi.iItem = index;
 	lvi.iSubItem = 0;
@@ -401,7 +401,7 @@ void listview_move_item(const HWND hListView, int index, const int Move)
 }
 
 /*
- * listview_notify_proc - リストビューメッセージ
+ * listview_notify_proc - list view message
  */
 LRESULT listview_notify_proc(const HWND hWnd, const LPARAM lParam, const HWND hListView)
 {
@@ -414,19 +414,19 @@ LRESULT listview_notify_proc(const HWND hWnd, const LPARAM lParam, const HWND hL
 	}
 
 	switch (plv->hdr.code) {
-	case LVN_ITEMCHANGED:		// アイテムの選択状態の変更
+	case LVN_ITEMCHANGED:		// Change item selection state
 	case NM_CUSTOMDRAW:
 		return SendMessage(hWnd, WM_LV_EVENT, plv->hdr.code, lParam);
 	}
 
 	switch (CForm->code) {
-	case NM_DBLCLK:				// ダブルクリック
+	case NM_DBLCLK:				// Double click
 		SendMessage(hWnd, WM_COMMAND, IDC_BUTTON_EDIT, 0);
 		return 1;
 	}
 
 	switch (LKey->hdr.code) {
-	case LVN_KEYDOWN:			// キーダウン
+	case LVN_KEYDOWN:			// Key down
 		if (LKey->wVKey == VK_DELETE) {
 			SendMessage(hWnd, WM_COMMAND, IDC_BUTTON_DELETE, 0);
 			return 1;
@@ -436,7 +436,7 @@ LRESULT listview_notify_proc(const HWND hWnd, const LPARAM lParam, const HWND hL
 }
 
 /*
- * compare_func - ソート用文字列比較
+ * compare_func - string comparison for sorting
  */
 static int CALLBACK compare_func(LPARAM lParam1, LPARAM lParam2, LPARAM colum)
 {
@@ -446,7 +446,7 @@ static int CALLBACK compare_func(LPARAM lParam1, LPARAM lParam2, LPARAM colum)
 	int header;
 	int ret;
 
-	// ソート情報
+	// Sort information
 	order = (colum < 0) ? 1 : 0;
 	header = ABS(colum) - 1;
 
@@ -459,7 +459,7 @@ static int CALLBACK compare_func(LPARAM lParam1, LPARAM lParam2, LPARAM colum)
 }
 
 /*
- * listview_header_notify_proc - リストビューヘッダメッセージ
+ * listview_header_notify_proc - list view header message
  */
 LRESULT listview_header_notify_proc(const HWND hListView, const LPARAM lParam)
 {
@@ -469,13 +469,13 @@ LRESULT listview_header_notify_proc(const HWND hListView, const LPARAM lParam)
 
 	switch (hdn->hdr.code) {
 	case HDN_ITEMCLICK:
-		// ソートの設定
+		// Set sort
 		sort_listview = hListView;
 		colum = (ABS(colum) == (hdn->iItem + 1)) ? (colum * -1) : (hdn->iItem + 1);
 		for (i = 0; i < ListView_GetItemCount(hListView); i++) {
 			listview_set_lparam(hListView, i, i);
 		}
-		// ソート
+		// Sort
 		ListView_SortItems(hListView, compare_func, colum);
 		break;
 	}
@@ -483,7 +483,7 @@ LRESULT listview_header_notify_proc(const HWND hListView, const LPARAM lParam)
 }
 
 /*
- * get_keyname - キー名を取得
+ * get_keyname - get key name
  */
 void get_keyname(const UINT modifiers, const UINT virtkey, TCHAR *ret)
 {
@@ -525,7 +525,7 @@ void get_keyname(const UINT modifiers, const UINT virtkey, TCHAR *ret)
 }
 
 /*
- * OptionNotifyProc - プロパティシートのイベントの通知
+ * OptionNotifyProc - notify property sheet events
  */
 LRESULT OptionNotifyProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -537,7 +537,7 @@ LRESULT OptionNotifyProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		SendMessage(hDlg, WM_COMMAND, IDOK, 0);
 		break;
 
-	case PSN_QUERYCANCEL:		// キャンセル
+	case PSN_QUERYCANCEL:		// Cancel
 		SendMessage(hDlg, WM_COMMAND, IDPCANCEL, 0);
 		break;
 
@@ -548,23 +548,23 @@ LRESULT OptionNotifyProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 
 /*
- * prop_sheet_proc - プロパティシートのコールバック
+ * prop_sheet_proc - property sheet callback
  */
 static int CALLBACK prop_sheet_proc(const HWND hDlg, const UINT msg, const LPARAM lParam)
 {
 	if (msg == PSCB_INITIALIZED) {
-		// ダークモードの設定
+		// Configure dark mode
 		dark_mode_set_dialog(hDlg);
 	}
 	return 0;
 }
 
 /*
- * ViewProperties - オプションの画面の表示
+ * ViewProperties - display options window
  */
 static int show_option(const HWND hWnd, const TCHAR *cmd_line)
 {
-#define sizeof_PROPSHEETHEADER		40	// 古いコモンコントロール対策
+#define sizeof_PROPSHEETHEADER		40	// Workaround for older common controls
 #define PROP_CNT_OPTION				9
 	PROPSHEETPAGE psp;
 	PROPSHEETHEADER psh;
@@ -574,47 +574,47 @@ static int show_option(const HWND hWnd, const TCHAR *cmd_line)
 	psp.dwFlags = PSP_DEFAULT;
 	psp.hInstance = hInst;
 
-	// 履歴
+	// History
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_HISTORY);
 	psp.pfnDlgProc = set_histroy_proc;
 	hpsp[0] = CreatePropertySheetPage(&psp);
 
-	// メニュー
+	// Menu
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_MENU);
 	psp.pfnDlgProc = set_menu_proc;
 	hpsp[1] = CreatePropertySheetPage(&psp);
 
-	// ビューア
+	// Viewer
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_VIEWER);
 	psp.pfnDlgProc = set_viewer_proc;
 	hpsp[2] = CreatePropertySheetPage(&psp);
 
-	// 動作
+	// Action
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_ACTION);
 	psp.pfnDlgProc = set_action_proc;
 	hpsp[3] = CreatePropertySheetPage(&psp);
 
-	// 形式
+	// Format
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_FORMAT);
 	psp.pfnDlgProc = set_format_proc;
 	hpsp[4] = CreatePropertySheetPage(&psp);
 
-	// フィルタ
+	// Filter
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_FILTER);
 	psp.pfnDlgProc = set_filter_proc;
 	hpsp[5] = CreatePropertySheetPage(&psp);
 
-	// ウィンドウ
+	// Window
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_WINDOW);
 	psp.pfnDlgProc = set_window_proc;
 	hpsp[6] = CreatePropertySheetPage(&psp);
 
-	// キー設定
+	// Key settings
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_SENDKEY);
 	psp.pfnDlgProc = set_sendkey_proc;
 	hpsp[7] = CreatePropertySheetPage(&psp);
 
-	// ツール
+	// Tool
 	psp.pszTemplate = MAKEINTRESOURCE(IDD_DIALOG_TOOL);
 	psp.pfnDlgProc = set_tool_proc;
 	hpsp[8] = CreatePropertySheetPage(&psp);
@@ -650,13 +650,13 @@ static int show_option(const HWND hWnd, const TCHAR *cmd_line)
 }
 
 /*
- * get_work_path - 作業ディレクトリの作成
+ * get_work_path - create working directory
  */
 static void get_work_path(const HINSTANCE hInstance)
 {
 	TCHAR *p, *r;
 
-	// アプリケーションのパスを取得
+	// Get application path
 	GetModuleFileName(hInstance, app_path, MAX_PATH - 1);
 	for (p = r = app_path; *p != TEXT('\0'); p++) {
 #ifndef UNICODE
@@ -671,6 +671,53 @@ static void get_work_path(const HINSTANCE hInstance)
 	}
 	*r = TEXT('\0');
 
+	// 1. Check general.ini (multi-user / profile settings)
+	TCHAR general_ini_path[MAX_PATH];
+	wsprintf(general_ini_path, TEXT("%s\\%s"), app_path, GENERAL_INI);
+	if (PathFileExists(general_ini_path) == TRUE) {
+		TCHAR user_name[BUF_SIZE];
+		TCHAR base_dir[MAX_PATH];
+		TCHAR buf[BUF_SIZE];
+		DWORD name_len = BUF_SIZE - 1;
+
+		if (GetUserName(user_name, &name_len) == FALSE) {
+			lstrcpy(user_name, DEFAULT_USER);
+		}
+		lstrcpy(base_dir, app_path);
+
+		profile_initialize(general_ini_path, TRUE);
+		profile_get_string(TEXT("GENERAL"), TEXT("User"), TEXT(""), buf, BUF_SIZE - 1, general_ini_path);
+		if (*buf != TEXT('\0')) {
+			lstrcpy(user_name, buf);
+		}
+		profile_get_string(TEXT("GENERAL"), TEXT("WorkDir"), TEXT(""), buf, BUF_SIZE - 1, general_ini_path);
+		if (*buf != TEXT('\0')) {
+			lstrcpy(base_dir, buf);
+		}
+		profile_free();
+
+		file_name_conv(user_name, TEXT('_'));
+		wsprintf(work_path, TEXT("%s\\%s"), base_dir, user_name);
+		CreateDirectory(work_path, NULL);
+		return;
+	}
+
+	// 2. Check for <app_path>\<user_name> directory (prioritize existing profile)
+	{
+		TCHAR user_name[BUF_SIZE];
+		DWORD name_len = BUF_SIZE - 1;
+		if (GetUserName(user_name, &name_len) != FALSE) {
+			TCHAR candidate_path[MAX_PATH];
+			file_name_conv(user_name, TEXT('_'));
+			wsprintf(candidate_path, TEXT("%s\\%s"), app_path, user_name);
+			if (PathFileExists(candidate_path) == TRUE) {
+				lstrcpy(work_path, candidate_path);
+				return;
+			}
+		}
+	}
+
+	// 3. Check portable setting in clcl_app.ini
 	int portable = 0;
 	TCHAR app_ini_path[MAX_PATH];
 	wsprintf(app_ini_path, TEXT("%s\\%s"), app_path, APP_INI);
@@ -681,17 +728,18 @@ static void get_work_path(const HINSTANCE hInstance)
 	}
 	if (portable == 1) {
 		lstrcpy(work_path, app_path);
+		return;
 	}
-	else {
-		if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, 0, work_path))) {
-			lstrcat(work_path, TEXT("\\CLCL"));
-			CreateDirectory(work_path, NULL);
-		}
+
+	// 4. Default: AppData\Local\CLCL
+	if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, 0, work_path))) {
+		lstrcat(work_path, TEXT("\\CLCL"));
+		CreateDirectory(work_path, NULL);
 	}
 }
 
 /*
- * WinMain - メイン
+ * WinMain - main entry point
  */
 int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow)
 {
@@ -704,7 +752,7 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdL
 
 	hInst = hInstance;
 
-	// 2重起動チェック
+	// Check for multiple instances
 	InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
 	SetSecurityDescriptorDacl(&sd, TRUE, 0, FALSE);	    
 	sa.nLength = sizeof(SECURITY_ATTRIBUTES);
@@ -719,9 +767,9 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdL
 		return 0;
 	}
 	
-	// メインウィンドウ検索
+	// Find main window
 	if ((CLCLWnd = FindWindow(MAIN_WND_CLASS, MAIN_WINDOW_TITLE)) != NULL) {
-		// バージョンチェック
+		// Version check
 		if (SendMessage(CLCLWnd, WM_GET_VERSION, 0, 0) != APP_VAR) {
 			MessageBox(NULL, message_get_res(IDS_OPTION_START_ERROR), ERROR_TITLE, MB_ICONERROR);
 			if (hMutex != NULL) {
@@ -729,18 +777,18 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdL
 			}
 			return 0;
 		}
-		// 設定保存要求
+		// Settings save request
 		SendMessage(CLCLWnd, WM_OPTION_SAVE, 0, 0);
-		// ホットキー解除要求
+		// Hotkey unregister request
 		SendMessage(CLCLWnd, WM_UNREGIST_HOTKEY, 0, 0);
 	}
 
-	// DPIの初期化
+	// Initialize DPI
 	InitDpi();
-	// ダークモードの初期化
+	// Initialize dark mode
 	dark_mode_init();
 
-	// 設定取得
+	// Get settings
 	get_work_path(hInstance);
 	if (ini_get_option(err_str) == FALSE) {
 		MessageBox(NULL, err_str, ERROR_TITLE, MB_ICONERROR);
@@ -750,32 +798,32 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdL
 		return 0;
 	}
 
-	// CommonControlの初期化
+	// Initialize CommonControls
 	InitCommonControls();
-	// キー選択の初期化
+	// Initialize key selection
 	init_selectkey(hInstance);
 #ifdef OP_XP_STYLE
-	// XPスタイルの初期化
+	// Initialize XP style
 	init_themes();
 #endif	// OP_XP_STYLE
 
 	p = lpCmdLine;
-	// オプション画面を表示
+	// Display options window
 	if (show_option(NULL, p) == 1) {
 		if ((CLCLWnd = FindWindow(MAIN_WND_CLASS, MAIN_WINDOW_TITLE)) != NULL) {
-			// 設定保存要求
+			// Settings save request
 			SendMessage(CLCLWnd, WM_OPTION_SAVE, 0, 0);
 		}
-		// 設定の保存
+		// Save settings
 		ini_put_option();
 
 		if (CLCLWnd != NULL) {
-			// 設定読み込み要求
+			// Settings load request
 			SendMessage(CLCLWnd, WM_OPTION_LOAD, 0, 0);
 		}
 	} else {
 		if ((CLCLWnd = FindWindow(MAIN_WND_CLASS, MAIN_WINDOW_TITLE)) != NULL) {
-			// ホットキー設定要求
+			// Hotkey setting request
 			SendMessage(CLCLWnd, WM_REGIST_HOTKEY, 0, 0);
 		}
 	}

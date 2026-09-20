@@ -87,8 +87,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <OutputFile>.\Debug\CLCL.exe</OutputFile>
-      <AdditionalDependencies>odbc32.lib;odbccp32.lib;Comctl32.lib;imm32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>odbc32.lib;odbccp32.lib;Comctl32.lib;imm32.lib;winsqlite3.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ModuleDefinitionFile>.\clcl.def</ModuleDefinitionFile>
+      <LargeAddressAware>true</LargeAddressAware>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(ProjectDir)\res\manifest.xml %(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -127,8 +128,9 @@
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <SubSystem>Windows</SubSystem>
       <OutputFile>.\Release\CLCL.exe</OutputFile>
-      <AdditionalDependencies>odbc32.lib;odbccp32.lib;Comctl32.lib;imm32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>odbc32.lib;odbccp32.lib;Comctl32.lib;imm32.lib;winsqlite3.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <ModuleDefinitionFile>.\clcl.def</ModuleDefinitionFile>
+      <LargeAddressAware>true</LargeAddressAware>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(ProjectDir)\res\manifest.xml %(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -142,7 +144,9 @@
     <ClCompile Include="Container.c" />
     <ClCompile Include="DarkMode.c" />
     <ClCompile Include="Data.c" />
+    <ClCompile Include="DbHistory.c" />
     <ClCompile Include="dpi.c" />
+    <ClCompile Include="Favorites.c" />
     <ClCompile Include="File.c" />
     <ClCompile Include="Filter.c" />
     <ClCompile Include="fmt_Bitmap.c" />
@@ -166,6 +170,7 @@
     <ClCompile Include="OleDragDrop.c" />
     <ClCompile Include="Profile.c" />
     <ClCompile Include="Regist.c" />
+    <ClCompile Include="Search.c" />
     <ClCompile Include="SelectFolder.c" />
     <ClCompile Include="SelectFormat.c" />
     <ClCompile Include="SendKey.c" />
@@ -199,7 +204,9 @@
     <ClInclude Include="Container.h" />
     <ClInclude Include="DarkMode.h" />
     <ClInclude Include="Data.h" />
+    <ClInclude Include="DbHistory.h" />
     <ClInclude Include="dpi.h" />
+    <ClInclude Include="Favorites.h" />
     <ClInclude Include="File.h" />
     <ClInclude Include="Filter.h" />
     <ClInclude Include="fmt_bitmap_view.h" />
@@ -221,6 +228,7 @@
     <ClInclude Include="Profile.h" />
     <ClInclude Include="Regist.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="Search.h" />
     <ClInclude Include="SelectFolder.h" />
     <ClInclude Include="SelectFormat.h" />
     <ClInclude Include="SendKey.h" />

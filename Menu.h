@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Menu.h
@@ -35,53 +35,57 @@
 /* Struct */
 // menu item
 typedef struct _MENU_ITEM_INFO {
-	UINT id;							// メニューID
-	UINT flag;							// メニューフラグ
-	LPCTSTR item;						// メニュー項目の内容
+	UINT id;							// Menu ID
+	UINT flag;							// Menu flag
+	LPCTSTR item;						// Menu item content
 
-	TCHAR *text;						// メニューに表示するテキスト
-	int text_x;							// テキストの位置
+	TCHAR *text;						// Text to display in menu
+	int text_x;							// Text position
 	int text_y;
 
-	HICON icon;							// メニューに表示するアイコン
+	HICON icon;							// Icon to display in menu
 	BOOL free_icon;
 
 	TCHAR *hkey;
 
-	BOOL show_format;					// 形式表示
-	BOOL show_bitmap;					// ビットマップ表示
+	BOOL show_format;					// Show format
+	BOOL show_bitmap;					// Show bitmap
 
-	DATA_INFO *set_di;					// データ情報
-	DATA_INFO *show_di;					// 表示するデータ情報
+	DATA_INFO *set_di;					// Data information
+	DATA_INFO *show_di;					// Data information to display
 
-	TOOL_INFO *ti;						// ツール情報
+	TOOL_INFO *ti;						// Tool information
 
-	struct _MENU_INFO *mi;				// 元となるMENU_INFO構造体
+	struct _MENU_INFO *mi;				// Base MENU_INFO structure
 
 	// popup
-	struct _MENU_ITEM_INFO *mii;		// ポップアップメニューの子アイテム 
-	int mii_cnt;						// ポップアップメニューの子アイテムの数
+	struct _MENU_ITEM_INFO *mii;		// Child item of popup menu
+	int mii_cnt;						// Number of child items in popup menu
+
+	BOOL is_folder;						// Folder item
+	BOOL is_folder_child;				// Inside folder submenu
+	BOOL is_favourites;					// Favourites item or folder
 } MENU_ITEM_INFO;
 
 // menu info
 typedef struct _MENU_INFO {
 	int content;						// MENU_CONTENT_
-	TCHAR *title;						// メニューに表示するタイトル
+	TCHAR *title;						// Title to display in menu
 
 	// icon
-	TCHAR *icon_path;					// メニューに表示するアイコンのパス (空の場合は本体)
-	int icon_index;						// メニューに表示するアイコンのインデックス
+	TCHAR *icon_path;					// Path of icon to display in menu (main executable if empty)
+	int icon_index;						// Index of icon to display in menu
 
 	// path
-	TCHAR *path;						// パス (MENU_CONTENT_REGIST, MENU_CONTENT_APP)
-	TCHAR *cmd;							// コマンドライン (MENU_CONTENT_APP)
+	TCHAR *path;						// Path (MENU_CONTENT_REGIST, MENU_CONTENT_APP)
+	TCHAR *cmd;							// Command line (MENU_CONTENT_APP)
 
-	int min;							// 履歴の表示開始値 (MENU_CONTENT_HISTORY)
-	int max;							// 履歴の表示終了値 (MENU_CONTENT_HISTORY)
+	int min;							// History display start value (MENU_CONTENT_HISTORY)
+	int max;							// History display end value (MENU_CONTENT_HISTORY)
 
 	// popup
-	struct _MENU_INFO *mi;				// ポップアップメニューの子アイテム (MENU_CONTENT_POPUP)
-	int mi_cnt;							// ポップアップメニューの子アイテムの数
+	struct _MENU_INFO *mi;				// Child item of popup menu (MENU_CONTENT_POPUP)
+	int mi_cnt;							// Number of child items in popup menu
 } MENU_INFO;
 
 /* Function Prototypes */
@@ -89,6 +93,7 @@ void menu_free(void);
 void menu_free_icons(void);
 void menu_set_dpi(const POINT *mpos);
 int menu_show(const HWND hWnd, const HMENU hMenu, const POINT *mpos);
+int menu_show_align(const HWND hWnd, const HMENU hMenu, const POINT *mpos, const UINT align_flags);
 MENU_ITEM_INFO *menu_get_info(const UINT id);
 TCHAR *menu_get_keyname(const UINT modifiers, const UINT virtkey);
 HMENU menu_create(const HWND hWnd, MENU_INFO *menu_info, const int menu_cnt,
@@ -97,6 +102,7 @@ void menu_destory(HMENU hMenu);
 BOOL menu_set_drawitem(MEASUREITEMSTRUCT *ms);
 BOOL menu_drawitem(const DRAWITEMSTRUCT *ds);
 LRESULT menu_accelerator(const HMENU hMenu, const TCHAR key);
+int menu_get_selectable_index_by_datainfo(const DATA_INFO *target_di);
 
 #endif
 /* End of source */

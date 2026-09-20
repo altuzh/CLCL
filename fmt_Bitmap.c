@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * fmt_Bitmap.c
@@ -35,7 +35,7 @@
 
 /* Global Variables */
 static HICON bmp_icon;
-// 読み込み済みのアイコンのサイズ
+// Loaded icon size
 static int bmp_icon_size;
 static HWND hBmpWnd;
 
@@ -46,7 +46,7 @@ extern OPTION_INFO option;
 static HICON bitmap_load_icon(const int icon_size);
 
 /*
- * bitmap_initialize - 初期化
+ * bitmap_initialize - Initialization
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_initialize(void)
 {
@@ -57,7 +57,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_initialize(void)
 }
 
 /*
- * bitmap_load_icon - 形式用のアイコンの読み込み
+ * bitmap_load_icon - Load icon for format
  */
 static HICON bitmap_load_icon(const int icon_size)
 {
@@ -76,7 +76,7 @@ static HICON bitmap_load_icon(const int icon_size)
 }
 
 /*
- * bitmap_get_icon - 形式用のアイコンを取得
+ * bitmap_get_icon - Get icon for format
  */
 __declspec(dllexport) HICON CALLBACK bitmap_get_icon(const int icon_size, BOOL *free_icon)
 {
@@ -85,7 +85,7 @@ __declspec(dllexport) HICON CALLBACK bitmap_get_icon(const int icon_size, BOOL *
 }
 
 /*
- * bitmap_free - 終了処理
+ * bitmap_free - Cleanup
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_free(void)
 {
@@ -99,7 +99,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_free(void)
 }
 
 /*
- * bitmap_initialize_item - アイテム情報の初期化
+ * bitmap_initialize_item - Initialize item info
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_initialize_item(DATA_INFO *di, const BOOL set_init_data)
 {
@@ -107,31 +107,56 @@ __declspec(dllexport) BOOL CALLBACK bitmap_initialize_item(DATA_INFO *di, const 
 }
 
 /*
- * bitmap_copy_data - データのコピー
+ * bitmap_copy_data - copy bitmap data
  */
 __declspec(dllexport) HANDLE CALLBACK bitmap_copy_data(const TCHAR *format_name, const HANDLE data, DWORD *ret_size)
 {
+	if (data == NULL) {
+		return NULL;
+	}
+	if (format_name == NULL || lstrcmpi(format_name, TEXT("BITMAP")) == 0) {
+		BYTE *to_mem;
+		HBITMAP ret;
+		if ((to_mem = bitmap_to_dib((HBITMAP)data, ret_size)) == NULL) {
+			return NULL;
+		}
+		ret = dib_to_bitmap(to_mem);
+		mem_free((void **)&to_mem);
+		return (HANDLE)ret;
+	}
 	return NULL;
 }
 
 /*
- * bitmap_data_to_bytes - データをバイト列に変換
+ * bitmap_data_to_bytes - convert bitmap data to byte array (DIB)
  */
 __declspec(dllexport) BYTE* CALLBACK bitmap_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 {
+	if (di == NULL || di->data == NULL) {
+		return NULL;
+	}
+	if (di->format_name == NULL || lstrcmpi(di->format_name, TEXT("BITMAP")) == 0) {
+		return bitmap_to_dib((HBITMAP)di->data, ret_size);
+	}
 	return NULL;
 }
 
 /*
- * bitmap_bytes_to_data - バイト列をデータに変換
+ * bitmap_bytes_to_data - convert byte array (DIB) to bitmap data (HBITMAP)
  */
 __declspec(dllexport) HANDLE CALLBACK bitmap_bytes_to_data(const TCHAR *format_name, const BYTE *data, DWORD *size)
 {
+	if (data == NULL) {
+		return NULL;
+	}
+	if (format_name == NULL || lstrcmpi(format_name, TEXT("BITMAP")) == 0) {
+		return (HANDLE)dib_to_bitmap(data);
+	}
 	return NULL;
 }
 
 /*
- * bitmap_get_file_info - コモンダイアログ情報の取得
+ * bitmap_get_file_info - Get common dialog info
  */
 __declspec(dllexport) int CALLBACK bitmap_get_file_info(const TCHAR *format_name, const DATA_INFO *di, OPENFILENAME *of, const BOOL mode)
 {
@@ -142,7 +167,7 @@ __declspec(dllexport) int CALLBACK bitmap_get_file_info(const TCHAR *format_name
 }
 
 /*
- * bitmap_data_to_file - データをファイルに保存
+ * bitmap_data_to_file - Save data to file
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_data_to_file(DATA_INFO *di, const TCHAR *file_name, const int filter_index, TCHAR *err_str)
 {
@@ -177,19 +202,19 @@ __declspec(dllexport) BOOL CALLBACK bitmap_data_to_file(DATA_INFO *di, const TCH
 			hbmp = (HBITMAP)di->data;
 		}
 		if (lstrcmpi(ext, TEXT(".png")) == 0) {
-			// PNGで保存
+			// Save as PNG
 			if (save_png(hbmp, file_name) == 0) {
 				return FALSE;
 			}
 		}
 		else {
-			// JPEGで保存
+			// Save as JPEG
 			if (save_jpeg(hbmp, file_name, 90) == 0) {
 				return FALSE;
 			}
 		}
 	} else {
-		// BMPで保存
+		// Save as BMP
 		if (lstrcmpi(di->format_name, TEXT("BITMAP")) != 0) {
 			if ((mem = GlobalLock(di->data)) == NULL) {
 				message_get_error(GetLastError(), err_str);
@@ -203,7 +228,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_data_to_file(DATA_INFO *di, const TCH
 				return FALSE;
 			}
 		}
-		// BITMAPファイルの作成
+		// Create BITMAP file
 		pbih = (PBITMAPINFOHEADER)mem;
 		if ((plt = pbih->biClrUsed) == 0) {
 			switch (pbih->biPlanes * pbih->biBitCount) {
@@ -241,7 +266,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_data_to_file(DATA_INFO *di, const TCH
 		CopyMemory(save_mem, &hdr, sizeof(BITMAPFILEHEADER));
 		CopyMemory(save_mem + sizeof(BITMAPFILEHEADER), mem, size);
 
-		// ファイルに書き込む
+		// Write to file
 		if (file_write_buf(file_name, save_mem, sizeof(BITMAPFILEHEADER) + size, err_str) == FALSE) {
 			mem_free(&save_mem);
 			if (lstrcmpi(di->format_name, TEXT("BITMAP")) != 0) {
@@ -264,7 +289,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_data_to_file(DATA_INFO *di, const TCH
 }
 
 /*
- * bitmap_file_to_data - ファイルからデータを作成
+ * bitmap_file_to_data - Create data from file
  */
 __declspec(dllexport) HANDLE CALLBACK bitmap_file_to_data(const TCHAR *file_name, const TCHAR *format_name, DWORD *ret_size, TCHAR *err_str)
 {
@@ -283,14 +308,14 @@ __declspec(dllexport) HANDLE CALLBACK bitmap_file_to_data(const TCHAR *file_name
 				DeleteObject(hbmp);
 				return NULL;
 			}
-			// コピー先確保
+			// Allocate destination buffer
 			if ((ret = GlobalAlloc(GHND, size)) == NULL) {
 				message_get_error(GetLastError(), err_str);
 				mem_free(&data);
 				DeleteObject(hbmp);
 				return NULL;
 			}
-			// コピー先ロック
+			// Lock destination buffer
 			if ((mem = GlobalLock(ret)) == NULL) {
 				message_get_error(GetLastError(), err_str);
 				GlobalFree(ret);
@@ -298,9 +323,9 @@ __declspec(dllexport) HANDLE CALLBACK bitmap_file_to_data(const TCHAR *file_name
 				DeleteObject(hbmp);
 				return NULL;
 			}
-			// コピー
+			// Copy
 			CopyMemory(mem, data, size);
-			// ロック解除
+			// Unlock
 			GlobalUnlock(ret);
 
 			if (ret_size != NULL) {
@@ -320,27 +345,27 @@ __declspec(dllexport) HANDLE CALLBACK bitmap_file_to_data(const TCHAR *file_name
 		}
 	}
 	else {
-		// ファイルの読み込み
+		// Read file
 		if ((data = file_read_buf(file_name, &size, err_str)) == NULL) {
 			return NULL;
 		}
 		if (lstrcmpi(format_name, TEXT("BITMAP")) != 0) {
-			// コピー先確保
+			// Allocate destination buffer
 			if ((ret = GlobalAlloc(GHND, size - sizeof(BITMAPFILEHEADER))) == NULL) {
 				message_get_error(GetLastError(), err_str);
 				mem_free(&data);
 				return NULL;
 			}
-			// コピー先ロック
+			// Lock destination buffer
 			if ((mem = GlobalLock(ret)) == NULL) {
 				message_get_error(GetLastError(), err_str);
 				GlobalFree(ret);
 				mem_free(&data);
 				return NULL;
 			}
-			// コピー
+			// Copy
 			CopyMemory(mem, data + sizeof(BITMAPFILEHEADER), size - sizeof(BITMAPFILEHEADER));
-			// ロック解除
+			// Unlock
 			GlobalUnlock(ret);
 
 		}
@@ -358,7 +383,7 @@ __declspec(dllexport) HANDLE CALLBACK bitmap_file_to_data(const TCHAR *file_name
 }
 
 /*
- * bitmap_free_data - データの解放
+ * bitmap_free_data - Free data
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_free_data(const TCHAR *format_name, HANDLE data)
 {
@@ -366,7 +391,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_free_data(const TCHAR *format_name, H
 }
 
 /*
- * bitmap_free_item - アイテム情報の解放
+ * bitmap_free_item - Free item info
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_free_item(DATA_INFO *di)
 {
@@ -374,7 +399,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_free_item(DATA_INFO *di)
 }
 
 /*
- * bitmap_get_menu_title - メニュータイトルの取得
+ * bitmap_get_menu_title - Get menu title
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_get_menu_title(DATA_INFO *di)
 {
@@ -382,7 +407,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_get_menu_title(DATA_INFO *di)
 }
 
 /*
- * bitmap_get_menu_icon - メニュータイトル
+ * bitmap_get_menu_icon - Get menu icon
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_get_menu_icon(DATA_INFO *di, const int icon_size)
 {
@@ -392,7 +417,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_get_menu_icon(DATA_INFO *di, const in
 }
 
 /*
- * bitmap_get_menu_bitmap - メニュー用ビットマップ
+ * bitmap_get_menu_bitmap - Get menu bitmap
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_get_menu_bitmap(DATA_INFO *di, const int width, const int height)
 {
@@ -419,7 +444,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_get_menu_bitmap(DATA_INFO *di, const 
 		hbmp = di->data;
 	}
 
-	// メニューに表示するビットマップの作成
+	// Create bitmap to display in menu
 	GetObject(hbmp, sizeof(BITMAP), &bmp);
 
 	hdc = GetDC(NULL);
@@ -456,7 +481,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_get_menu_bitmap(DATA_INFO *di, const 
 }
 
 /*
- * bitmap_get_tooltip_text - メニュー用ツールチップテキスト
+ * bitmap_get_tooltip_text - Get menu tooltip text
  */
 __declspec(dllexport) TCHAR* CALLBACK bitmap_get_tooltip_text(DATA_INFO *di)
 {
@@ -479,7 +504,7 @@ __declspec(dllexport) TCHAR* CALLBACK bitmap_get_tooltip_text(DATA_INFO *di)
 		hbmp = di->data;
 	}
 
-	// 画像情報取得
+	// Get image information
 	GetObject(hbmp, sizeof(BITMAP), &bmp);
 	if (di->size < 1024) {
 		wsprintf(buf, TEXT("%u x %u (%d bytes)"), bmp.bmWidth, bmp.bmHeight, di->size);
@@ -495,7 +520,7 @@ __declspec(dllexport) TCHAR* CALLBACK bitmap_get_tooltip_text(DATA_INFO *di)
 }
 
 /*
- * bitmap_window_create - データ表示ウィンドウの作成
+ * bitmap_window_create - Create data display window
  */
 __declspec(dllexport) HWND CALLBACK bitmap_window_create(const HWND parent_wnd)
 {
@@ -506,7 +531,7 @@ __declspec(dllexport) HWND CALLBACK bitmap_window_create(const HWND parent_wnd)
 }
 
 /*
- * bitmap_window_destroy - データ表示ウィンドウの破棄
+ * bitmap_window_destroy - Destroy data display window
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_window_destroy(const HWND hWnd)
 {
@@ -515,7 +540,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_window_destroy(const HWND hWnd)
 }
 
 /*
- * bitmap_window_show_data - データの表示
+ * bitmap_window_show_data - Display data
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_window_show_data(const HWND hWnd, DATA_INFO *di, const BOOL lock)
 {
@@ -524,7 +549,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_window_show_data(const HWND hWnd, DAT
 }
 
 /*
- * bitmap_window_save_data - データの保存
+ * bitmap_window_save_data - Save data
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_window_save_data(const HWND hWnd, DATA_INFO *di)
 {
@@ -532,7 +557,7 @@ __declspec(dllexport) BOOL CALLBACK bitmap_window_save_data(const HWND hWnd, DAT
 }
 
 /*
- * bitmap_window_hide_data - データの非表示
+ * bitmap_window_hide_data - Hide data
  */
 __declspec(dllexport) BOOL CALLBACK bitmap_window_hide_data(const HWND hWnd, DATA_INFO *di)
 {
