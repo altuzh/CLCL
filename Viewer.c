@@ -89,6 +89,66 @@ HTREEITEM history_treeitem;
 HTREEITEM regist_treeitem;
 DATA_INFO clip_di;
 
+static WNDPROC orig_tree_edit_proc = NULL;
+static HWND current_tree_edit_wnd = NULL;
+static HWND current_tree_wnd = NULL;
+
+static BOOL viewer_rename(const HWND hWnd, const HTREEITEM sel_item, TCHAR *title);
+
+static LRESULT CALLBACK treeview_edit_subclass_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	WNDPROC old_proc = orig_tree_edit_proc;
+	if (msg == WM_KILLFOCUS) {
+		if (current_tree_wnd != NULL && IsWindow(current_tree_wnd)) {
+			HWND hTree = current_tree_wnd;
+			current_tree_wnd = NULL;
+			SendMessage(hTree, TVM_ENDEDITLABELNOW, FALSE, 0);
+		}
+	} else if (msg == WM_NCDESTROY) {
+		if (orig_tree_edit_proc != NULL) {
+			SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)orig_tree_edit_proc);
+			orig_tree_edit_proc = NULL;
+			current_tree_edit_wnd = NULL;
+			current_tree_wnd = NULL;
+		}
+	}
+	if (old_proc != NULL) {
+		return CallWindowProc(old_proc, hWnd, msg, wParam, lParam);
+	}
+	return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static WNDPROC orig_list_edit_proc = NULL;
+static HWND current_list_edit_wnd = NULL;
+static HWND current_list_wnd = NULL;
+
+static LRESULT CALLBACK listview_edit_subclass_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	WNDPROC old_proc = orig_list_edit_proc;
+	if (msg == WM_KILLFOCUS) {
+		if (current_list_wnd != NULL && IsWindow(current_list_wnd)) {
+			HWND hList = current_list_wnd;
+			HWND hViewer = GetParent(GetParent(hList));
+			TCHAR buf[BUF_SIZE];
+			current_list_wnd = NULL;
+			if (hViewer != NULL && GetWindowText(hWnd, buf, BUF_SIZE) > 0) {
+				viewer_rename(hViewer, NULL, buf);
+			}
+		}
+	} else if (msg == WM_NCDESTROY) {
+		if (orig_list_edit_proc != NULL) {
+			SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)orig_list_edit_proc);
+			orig_list_edit_proc = NULL;
+			current_list_edit_wnd = NULL;
+			current_list_wnd = NULL;
+		}
+	}
+	if (old_proc != NULL) {
+		return CallWindowProc(old_proc, hWnd, msg, wParam, lParam);
+	}
+	return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
 static BOOL save_flag = TRUE;
 static BOOL DnD_mode;
 
@@ -247,7 +307,7 @@ static void set_enable_window_menu(const HWND hWnd)
 		enable = (hItem == history_treeitem || hItem == regist_treeitem || regist_treeitem == NULL) ? MF_GRAYED : MF_ENABLED;
 		EnableMenuItem(GetSubMenu(GetMenu(hWnd), WINDOW_MENU_EDIT), ID_MENUITEM_REGIST_ADD, enable);
 
-		enable = (treeview_get_rootitem(hTreeView, hItem) == clip_treeitem ||
+		enable = ((treeview_get_rootitem(hTreeView, hItem) == clip_treeitem && clip_di.child == NULL) ||
 			hItem == history_treeitem || hItem == regist_treeitem) ? MF_GRAYED : MF_ENABLED;
 		EnableMenuItem(GetSubMenu(GetMenu(hWnd), WINDOW_MENU_EDIT), ID_MENUITEM_UP, enable);
 		EnableMenuItem(GetSubMenu(GetMenu(hWnd), WINDOW_MENU_EDIT), ID_MENUITEM_DOWN, enable);
@@ -267,7 +327,7 @@ static void set_enable_window_menu(const HWND hWnd)
 		tb_enable = (treeview_get_rootitem(hTreeView, hItem) == clip_treeitem) ? FALSE : TRUE;
 		SendDlgItemMessage(hWnd, ID_TOOLBAR, TB_ENABLEBUTTON, ID_MENUITEM_NEW_ITEM_TB, (LPARAM)MAKELONG(tb_enable, 0));
 
-		tb_enable = (treeview_get_rootitem(hTreeView, hItem) == clip_treeitem ||
+		tb_enable = ((treeview_get_rootitem(hTreeView, hItem) == clip_treeitem && clip_di.child == NULL) ||
 			hItem == history_treeitem || hItem == regist_treeitem) ? FALSE : TRUE;
 		SendDlgItemMessage(hWnd, ID_TOOLBAR, TB_ENABLEBUTTON, ID_MENUITEM_DELETE_TB, (LPARAM)MAKELONG(tb_enable, 0));
 		SendDlgItemMessage(hWnd, ID_TOOLBAR, TB_ENABLEBUTTON, ID_MENUITEM_UP_TB, (LPARAM)MAKELONG(tb_enable, 0));
@@ -300,6 +360,13 @@ static void set_enadle_popup_menu(const HWND hWnd, const HMENU hMenu, const int 
 		enable = (clip_treeitem != hItem) ? MF_ENABLED : MF_GRAYED;
 		EnableMenuItem(GetSubMenu(hMenu, index), ID_MENUITEM_SET_FORMAT, enable);
 		EnableMenuItem(GetSubMenu(hMenu, index), ID_MENUITEM_SET_FILTER, enable);
+
+		if (GetMenuItemCount(GetSubMenu(hMenu, index)) <= 4) {
+			AppendMenu(GetSubMenu(hMenu, index), MF_SEPARATOR, 0, NULL);
+			AppendMenu(GetSubMenu(hMenu, index), MF_STRING, ID_MENUITEM_DELETE, message_get_res(IDS_TEXT_MENU_DELETE));
+		}
+		enable = (clip_di.child != NULL) ? MF_ENABLED : MF_GRAYED;
+		EnableMenuItem(GetSubMenu(hMenu, index), ID_MENUITEM_DELETE, enable);
 		return;
 
 	case POPUPMENU_HISTORY_LV:
@@ -1518,12 +1585,16 @@ static BOOL viewer_rename(const HWND hWnd, const HTREEITEM sel_item, TCHAR *titl
 		return FALSE;
 	}
 
-	if (sel_item == NULL && current_wnd == hListView) {
-		if (ListView_GetNextItem(hListView, -1, LVNI_FOCUSED) == -1) {
-			return FALSE;
+	if (hItem == NULL) {
+		if (current_wnd == hListView) {
+			if (ListView_GetNextItem(hListView, -1, LVNI_FOCUSED) == -1) {
+				return FALSE;
+			}
+			hItem = (HTREEITEM)listview_get_lparam(hListView,
+				ListView_GetNextItem(hListView, -1, LVNI_FOCUSED));
+		} else {
+			hItem = TreeView_GetSelection(hTreeView);
 		}
-		hItem = (HTREEITEM)listview_get_lparam(hListView,
-			ListView_GetNextItem(hListView, -1, LVNI_FOCUSED));
 		if (hItem == NULL) {
 			return FALSE;
 		}
@@ -1576,20 +1647,23 @@ static BOOL viewer_rename(const HWND hWnd, const HTREEITEM sel_item, TCHAR *titl
 		break;
 	}
 
+	treeview_set_text(hTreeView, hItem, title);
 	if (current_wnd == hListView) {
-		if (sel_item != NULL) {
-			// Update list view
-			SetTimer(hWnd, TIMER_LV_REFRESH, 1, NULL);
-		} else {
-			// Update tree view
-			treeview_set_text(hTreeView, hItem, title);
-		}
+		SetTimer(hWnd, TIMER_LV_REFRESH, 1, NULL);
 	}
 	if (treeview_get_rootitem(hTreeView, hItem) == regist_treeitem) {
 		// Save registered items
 		set_cursor(TRUE);
 		SendMessage(hWnd, WM_REGIST_SAVE, 0, 0);
+		SendMessage(main_wnd, WM_REGIST_CHANGED, 0, 0);
 		set_cursor(FALSE);
+	} else if (treeview_get_rootitem(hTreeView, hItem) == history_treeitem) {
+		if (option.history_save == 1 && option.history_always_save == 1) {
+			set_cursor(TRUE);
+			SendMessage(hWnd, WM_HISTORY_SAVE, 0, 0);
+			set_cursor(FALSE);
+		}
+		SendMessage(main_wnd, WM_HISTORY_CHANGED, 0, 0);
 	}
 	return TRUE;
 }
@@ -1730,18 +1804,57 @@ static void viewer_delete_item(const HWND hWnd, const HTREEITEM sel_item)
 			// Delete item from list view
 			ListView_DeleteItem(hListView, i);
 		}
+		{
+			HTREEITEM current_sel = TreeView_GetSelection(hTreeView);
+			if (treeview_get_rootitem(hTreeView, current_sel) == regist_treeitem) {
+				SendMessage(hWnd, WM_REGIST_SAVE, 0, 0);
+				SendMessage(main_wnd, WM_REGIST_CHANGED, 0, 0);
+			} else if (treeview_get_rootitem(hTreeView, current_sel) == history_treeitem) {
+				if (option.history_save == 1 && option.history_always_save == 1) {
+					SendMessage(hWnd, WM_HISTORY_SAVE, 0, 0);
+				}
+				SendMessage(main_wnd, WM_HISTORY_CHANGED, 0, 0);
+			}
+		}
 		SendMessage(hTreeView, WM_SETREDRAW, (WPARAM)TRUE, 0);
 		SendMessage(hListView, WM_SETREDRAW, (WPARAM)TRUE, 0);
 		UpdateWindow(hTreeView);
 		UpdateWindow(hListView);
 		set_cursor(FALSE);
 	} else {
+		HTREEITEM root_item;
+
 		SetFocus(hTreeView);
 
 		if ((hItem = sel_item) == NULL) {
 			hItem = TreeView_GetSelection(hTreeView);
 		}
-		if (treeview_get_rootitem(hTreeView, hItem) == clip_treeitem) {
+		if (hItem == NULL) {
+			return;
+		}
+		root_item = treeview_get_rootitem(hTreeView, hItem);
+		if (root_item == clip_treeitem) {
+			if (clip_di.child == NULL) {
+				return;
+			}
+			if (option.viewer_delete_confirm == 1 &&
+				MessageBox(hWnd, message_get_res(IDS_QUESTION_DELETE), WINDOW_TITLE, MB_ICONQUESTION | MB_YESNO) == IDNO) {
+				return;
+			}
+			set_cursor(TRUE);
+			if (OpenClipboard(hWnd)) {
+				EmptyClipboard();
+				CloseClipboard();
+			}
+			data_free(clip_di.child);
+			clip_di.child = NULL;
+			treeview_delete_child(hTreeView, clip_treeitem);
+			if (current_wnd == hListView) {
+				ListView_DeleteAllItems(hListView);
+			}
+			SendMessage(main_wnd, WM_VIEWER_CHANGE_CLIPBOARD, 0, 0);
+			SendMessage(hWnd, WM_VIEWER_REFRESH_STATUS, 0, 0);
+			set_cursor(FALSE);
 			return;
 		}
 		if (treeview_get_lparam(hTreeView, hItem) == 0) {
@@ -1763,6 +1876,15 @@ static void viewer_delete_item(const HWND hWnd, const HTREEITEM sel_item)
 		}
 		// Delete item from tree view
 		treeview_delete_item(hTreeView, hItem);
+		if (root_item == regist_treeitem) {
+			SendMessage(hWnd, WM_REGIST_SAVE, 0, 0);
+			SendMessage(main_wnd, WM_REGIST_CHANGED, 0, 0);
+		} else if (root_item == history_treeitem) {
+			if (option.history_save == 1 && option.history_always_save == 1) {
+				SendMessage(hWnd, WM_HISTORY_SAVE, 0, 0);
+			}
+			SendMessage(main_wnd, WM_HISTORY_CHANGED, 0, 0);
+		}
 		if (current_wnd == hListView) {
 			// Synchronize tree view and list view
 			treeview_to_listview(hTreeView, TreeView_GetSelection(hTreeView), hListView);
@@ -2017,6 +2139,7 @@ void treeview_to_listview(const HWND hTreeView, const HTREEITEM parent_item, con
 		hItem = TreeView_GetNextItem(hTreeView, hItem, TVGN_NEXT);
 	}
 	if (last_item == NULL) {
+		ListView_DeleteAllItems(hListView);
 		SendMessage(hListView, WM_SETREDRAW, (WPARAM)TRUE, 0);
 		UpdateWindow(hListView);
 		return;
@@ -3053,7 +3176,8 @@ static LRESULT CALLBACK viewer_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
 		case ID_MENUITEM_RENAME:
 			// Rename
-			if (GetFocus() == GetDlgItem(hWnd, ID_TREE)) {
+			if (GetFocus() == GetDlgItem(hWnd, ID_TREE) || lParam != 0 || current_wnd == GetDlgItem(hWnd, ID_TREE)) {
+				SetFocus(GetDlgItem(hWnd, ID_TREE));
 				TreeView_EditLabel(GetDlgItem(hWnd, ID_TREE),
 					((lParam != 0) ? (HTREEITEM)lParam : TreeView_GetSelection(GetDlgItem(hWnd, ID_TREE))));
 			} else {
@@ -3145,12 +3269,25 @@ static LRESULT CALLBACK viewer_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 			if (treeview_get_rootitem(GetDlgItem(hWnd, ID_TREE), ((TV_DISPINFO *)lParam)->item.hItem) == regist_treeitem &&
 				treeview_get_lparam(GetDlgItem(hWnd, ID_TREE), ((TV_DISPINFO *)lParam)->item.hItem) != 0 &&
 				((DATA_INFO *)treeview_get_lparam(GetDlgItem(hWnd, ID_TREE), ((TV_DISPINFO *)lParam)->item.hItem))->type != TYPE_DATA) {
+				HWND hTree = GetDlgItem(hWnd, ID_TREE);
+				HWND hEdit = TreeView_GetEditControl(hTree);
+				if (hEdit != NULL) {
+					current_tree_wnd = hTree;
+					current_tree_edit_wnd = hEdit;
+					orig_tree_edit_proc = (WNDPROC)SetWindowLongPtr(hEdit, GWLP_WNDPROC, (LONG_PTR)treeview_edit_subclass_proc);
+				}
 				SendMessage(hWnd, WM_ENABLE_ACCELERATOR, FALSE, 0);
 				return FALSE;
 			}
 			return TRUE;
 
 		case TVN_ENDLABELEDIT:
+			if (current_tree_edit_wnd != NULL && orig_tree_edit_proc != NULL) {
+				SetWindowLongPtr(current_tree_edit_wnd, GWLP_WNDPROC, (LONG_PTR)orig_tree_edit_proc);
+				orig_tree_edit_proc = NULL;
+				current_tree_edit_wnd = NULL;
+				current_tree_wnd = NULL;
+			}
 			SendMessage(hWnd, WM_ENABLE_ACCELERATOR, TRUE, 0);
 			return viewer_rename(hWnd, ((TV_DISPINFO *)lParam)->item.hItem, ((TV_DISPINFO *)lParam)->item.pszText);
 
@@ -3279,12 +3416,25 @@ static LRESULT CALLBACK viewer_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 		case LVN_BEGINLABELEDIT:
 			if (treeview_get_rootitem(GetDlgItem(hWnd, ID_TREE),
 				TreeView_GetSelection(GetDlgItem(hWnd, ID_TREE))) == regist_treeitem) {
+				HWND hList = GetDlgItem(GetDlgItem(hWnd, ID_CONTAINER), ID_LIST);
+				HWND hEdit = ListView_GetEditControl(hList);
+				if (hEdit != NULL) {
+					current_list_wnd = hList;
+					current_list_edit_wnd = hEdit;
+					orig_list_edit_proc = (WNDPROC)SetWindowLongPtr(hEdit, GWLP_WNDPROC, (LONG_PTR)listview_edit_subclass_proc);
+				}
 				SendMessage(hWnd, WM_ENABLE_ACCELERATOR, FALSE, 0);
 				return FALSE;
 			}
 			return TRUE;
 
 		case LVN_ENDLABELEDIT:
+			if (current_list_edit_wnd != NULL && orig_list_edit_proc != NULL) {
+				SetWindowLongPtr(current_list_edit_wnd, GWLP_WNDPROC, (LONG_PTR)orig_list_edit_proc);
+				orig_list_edit_proc = NULL;
+				current_list_edit_wnd = NULL;
+				current_list_wnd = NULL;
+			}
 			SendMessage(hWnd, WM_ENABLE_ACCELERATOR, TRUE, 0);
 			return viewer_rename(hWnd, NULL, ((LV_DISPINFO *)lParam)->item.pszText);
 
@@ -3586,16 +3736,31 @@ static LRESULT CALLBACK viewer_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 	case WM_VIEWER_SELECT_ITEM:
 		// Select tree item
 		{
-			HTREEITEM hItem;
+			HWND hTree = GetDlgItem(hWnd, ID_TREE);
+			HTREEITEM hItem = NULL;
 
-			if (history_treeitem != NULL &&
-				(hItem = treeview_lparam_to_item(GetDlgItem(hWnd, ID_TREE), history_treeitem, lParam)) != NULL) {
-				TreeView_SelectItem(GetDlgItem(hWnd, ID_TREE), hItem);
-				return TRUE;
+			if (lParam == 0 || (DATA_INFO *)lParam == &regist_data) {
+				if (regist_treeitem != NULL) {
+					hItem = regist_treeitem;
+				}
+			} else {
+				if (history_treeitem != NULL &&
+					(hItem = treeview_lparam_to_item(hTree, history_treeitem, lParam)) != NULL) {
+					// found in history
+				} else if (regist_treeitem != NULL &&
+					(hItem = treeview_lparam_to_item(hTree, regist_treeitem, lParam)) != NULL) {
+					// found in regist
+				}
 			}
-			if (regist_treeitem != NULL &&
-				(hItem = treeview_lparam_to_item(GetDlgItem(hWnd, ID_TREE), regist_treeitem, lParam)) != NULL) {
-				TreeView_SelectItem(GetDlgItem(hWnd, ID_TREE), hItem);
+			if (hItem != NULL) {
+				HTREEITEM parent = TreeView_GetParent(hTree, hItem);
+				while (parent != NULL) {
+					TreeView_Expand(hTree, parent, TVE_EXPAND);
+					parent = TreeView_GetParent(hTree, parent);
+				}
+				TreeView_SelectItem(hTree, hItem);
+				TreeView_EnsureVisible(hTree, hItem);
+				SetFocus(hTree);
 				return TRUE;
 			}
 		}

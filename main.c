@@ -4037,8 +4037,22 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 	case WM_VIEWER_SHOW:
 		// Show viewer
-		SendMessage(hWnd, WM_COMMAND, ID_MENUITEM_VIEWER, 0);
-		break;
+		if (hViewerWnd != NULL && hViewerWnd != (HWND)-1) {
+			if (IsIconic(hViewerWnd) != 0) {
+				ShowWindow(hViewerWnd, SW_RESTORE);
+			}
+			ShowWindow(hViewerWnd, SW_SHOW);
+			_SetForegroundWindow(hViewerWnd);
+		} else {
+			_SetForegroundWindow(hWnd);
+			hViewerWnd = (HWND)-1;
+			hViewerWnd = viewer_create(hWnd, SW_SHOW);
+			_SetForegroundWindow(hViewerWnd);
+		}
+		if (lParam != 0 && hViewerWnd != NULL && hViewerWnd != (HWND)-1) {
+			SendMessage(hViewerWnd, WM_VIEWER_SELECT_ITEM, 0, lParam);
+		}
+		return (LRESULT)hViewerWnd;
 
 	case WM_VIEWER_GET_HWND:
 		// Get viewer window handle

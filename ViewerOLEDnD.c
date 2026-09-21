@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * ViewerOLEDnD.c
@@ -97,9 +97,18 @@ BOOL viewer_ole_get_drag_effect(const HWND hWnd, const LPIDROPTARGET_NOTIFY pdtn
 		} else {
 			if ((di = (DATA_INFO *)treeview_get_lparam(hTreeView, hItem)) == NULL || di->type != TYPE_FOLDER) {
 				// フォルダ以外
-				TreeView_SelectDropTarget(hTreeView, NULL);
-				pdtn->dwEffect = DROPEFFECT_NONE;
-				g_mode = DRAG_MODE_NONE;
+				HTREEITEM parent = TreeView_GetParent(hTreeView, hItem);
+				if (parent != NULL && (parent == history_treeitem || parent == regist_treeitem || parent == clip_treeitem ||
+					((di = (DATA_INFO *)treeview_get_lparam(hTreeView, parent)) != NULL && di->type == TYPE_FOLDER))) {
+					hItem = parent;
+					TreeView_SelectDropTarget(hTreeView, hItem);
+					pdtn->dwEffect = DROPEFFECT_COPY | DROPEFFECT_LINK;
+					g_mode = DRAG_MODE_COPY;
+				} else {
+					TreeView_SelectDropTarget(hTreeView, NULL);
+					pdtn->dwEffect = DROPEFFECT_NONE;
+					g_mode = DRAG_MODE_NONE;
+				}
 			} else {
 				// フォルダ
 				TreeView_SelectDropTarget(hTreeView, hItem);
@@ -244,6 +253,9 @@ BOOL viewer_ole_create_drop_item(const HWND hWnd, const LPIDROPTARGET_NOTIFY pdt
 				return FALSE;
 			}
 		} else {
+			if ((pdtn->dwEffect & DROPEFFECT_MOVE) && drag_item != clip_treeitem) {
+				treeview_delete_item(hTreeView, drag_item);
+			}
 			TreeView_Expand(hTreeView, hItem, TVM_EXPAND);
 			if (TreeView_GetSelection(hTreeView) == hItem) {
 				// リストビュー更新
@@ -251,13 +263,25 @@ BOOL viewer_ole_create_drop_item(const HWND hWnd, const LPIDROPTARGET_NOTIFY pdt
 				listview_lparam_select(hListView, (LPARAM)ret_item);
 			}
 		}
-		if (treeview_get_rootitem(hTreeView, hItem) == regist_treeitem) {
-			// 登録アイテムの保存
-			SendMessage(hWnd, WM_REGIST_SAVE, 0, 0);
-		} else if (option.history_save == 1 && option.history_always_save == 1 &&
-			treeview_get_rootitem(hTreeView, hItem) == history_treeitem) {
-			// 履歴の保存
-			SendMessage(hWnd, WM_HISTORY_SAVE, 0, 0);
+		{
+			HWND hMainWnd = (HWND)SendMessage(hWnd, WM_VIEWER_GET_MAIN_HWND, 0, 0);
+			if (treeview_get_rootitem(hTreeView, hItem) == regist_treeitem ||
+				(drag_item != NULL && treeview_get_rootitem(hTreeView, drag_item) == regist_treeitem)) {
+				// 登録アイテムの保存
+				SendMessage(hWnd, WM_REGIST_SAVE, 0, 0);
+				if (hMainWnd != NULL) {
+					SendMessage(hMainWnd, WM_REGIST_CHANGED, 0, 0);
+				}
+			}
+			if (option.history_save == 1 && option.history_always_save == 1 &&
+				(treeview_get_rootitem(hTreeView, hItem) == history_treeitem ||
+				(drag_item != NULL && treeview_get_rootitem(hTreeView, drag_item) == history_treeitem))) {
+				// 履歴の保存
+				SendMessage(hWnd, WM_HISTORY_SAVE, 0, 0);
+				if (hMainWnd != NULL) {
+					SendMessage(hMainWnd, WM_HISTORY_CHANGED, 0, 0);
+				}
+			}
 		}
 		SendMessage(hWnd, WM_VIEWER_REFRESH_STATUS, 0, 0);
 		_SetForegroundWindow(hWnd);

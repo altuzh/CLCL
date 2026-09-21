@@ -826,6 +826,23 @@ BOOL favorites_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POI
 
 	if (!is_root) {
 		AppendMenu(hMenu, MF_STRING, ID_FAV_RENAME_SUBMENU, TEXT("Rename Submenu..."));
+	}
+
+	{
+		HBITMAP hBmpRegist = create_menu_bitmap_from_icon(hInst, IDI_ICON_REGIST, icon_size);
+		AppendMenu(hMenu, MF_STRING, ID_FAV_ORGANIZE, TEXT("&Organize Favourites..."));
+		if (hBmpRegist != NULL) {
+			MENUITEMINFO mii;
+			ZeroMemory(&mii, sizeof(mii));
+			mii.cbSize = sizeof(mii);
+			mii.fMask = MIIM_BITMAP;
+			mii.hbmpItem = hBmpRegist;
+			SetMenuItemInfo(hMenu, ID_FAV_ORGANIZE, FALSE, &mii);
+			DeleteObject(hBmpRegist);
+		}
+	}
+
+	if (!is_root) {
 		AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
 		AppendMenu(hMenu, MF_STRING, ID_FAV_DELETE_SUBMENU, TEXT("Delete Submenu"));
 	}
@@ -853,6 +870,8 @@ BOOL favorites_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POI
 			*deleted = TRUE;
 		}
 		SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
+	} else if (cmd == ID_FAV_ORGANIZE) {
+		favorites_show_organize(hWnd, is_root ? NULL : folder_di);
 	}
 
 	DestroyMenu(hMenu);
@@ -869,6 +888,7 @@ BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT 
 {
 	HMENU hMenu;
 	UINT cmd;
+	int icon_size;
 
 	if (fav_item == NULL) {
 		return FALSE;
@@ -882,6 +902,25 @@ BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT 
 		return FALSE;
 	}
 
+	icon_size = GetSystemMetrics(SM_CXSMICON);
+	if (icon_size <= 0) {
+		icon_size = 16;
+	}
+	{
+		HBITMAP hBmpRegist = create_menu_bitmap_from_icon(hInst, IDI_ICON_REGIST, icon_size);
+		AppendMenu(hMenu, MF_STRING, ID_FAV_ORGANIZE, TEXT("&Organize Favourites..."));
+		if (hBmpRegist != NULL) {
+			MENUITEMINFO mii;
+			ZeroMemory(&mii, sizeof(mii));
+			mii.cbSize = sizeof(mii);
+			mii.fMask = MIIM_BITMAP;
+			mii.hbmpItem = hBmpRegist;
+			SetMenuItemInfo(hMenu, ID_FAV_ORGANIZE, FALSE, &mii);
+			DeleteObject(hBmpRegist);
+		}
+	}
+
+	AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
 	AppendMenu(hMenu, MF_STRING, ID_FAV_DELETE_ITEM, TEXT("Delete\tDel"));
 
 	if (dark_mode_is_dark() == TRUE) {
@@ -903,10 +942,22 @@ BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT 
 			*deleted = TRUE;
 		}
 		SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
+	} else if (cmd == ID_FAV_ORGANIZE) {
+		favorites_show_organize(hWnd, fav_item);
 	}
 
 	DestroyMenu(hMenu);
 	return (cmd != 0);
+}
+
+/*
+ * favorites_show_organize - show viewer focused on favourites tree
+ */
+BOOL favorites_show_organize(const HWND hWnd, DATA_INFO *target_folder)
+{
+	LPARAM lp = (target_folder != NULL && target_folder != &regist_data) ? (LPARAM)target_folder : (LPARAM)&regist_data;
+	SendMessage(hWnd, WM_VIEWER_SHOW, 0, lp);
+	return TRUE;
 }
 
 /*
