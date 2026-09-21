@@ -85,12 +85,10 @@ jobs:
           path: Installer/out/*.exe
           if-no-files-found: error
 
-      - name: Publish GitHub Release (on tags)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create ${{ github.ref_name }} Installer/out/*.exe --title "CLCL ${{ github.ref_name }}" --generate-notes
+        run: powershell -ExecutionPolicy Bypass -File .\.github\scripts\publish-release.ps1
 
       - name: Prune Older Workflow Runs (Final Cleanup)
         if: always()
