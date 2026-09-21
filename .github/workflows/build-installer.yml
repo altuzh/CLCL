@@ -1,0 +1,79 @@
+name: Build Installer
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    name: Build & Package Installers
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup Inno Setup
+        run: |
+          choco install innosetup --no-progress --yes
+          echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Prune Older Workflow Runs (Pre-build)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: powershell -ExecutionPolicy Bypass -File .\.github\scripts\prune-runs.ps1
+
+      - name: Build Solution & Nakka Installer
+        run: |
+          msbuild CLCL.sln /p:Configuration=Release /p:Platform=x86 /p:PlatformToolset=v143 /v:m /m
+
+      - name: Build Inno Setup Installer
+        run: |
+          $iscc = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $iscc) {
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
+          }
+
+          if (-not $iscc) {
+            throw "ISCC.exe was not found."
+          }
+
+          Write-Host "Compiling Inno Setup installer with $iscc..."
+          & $iscc Installer/clcl.iss
+
+      - name: List Generated Installers
+        run: |
+          Get-ChildItem -Path Installer\out\ -Filter *.exe | Select-Object Name, Length, LastWriteTime
+
+      - name: Upload Installer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CLCL-Installers
+          path: Installer/out/*.exe
+          if-no-files-found: error
+
+      - name: Prune Older Workflow Runs (Final Cleanup)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: powershell -ExecutionPolicy Bypass -File .\.github\scripts\prune-runs.ps1
