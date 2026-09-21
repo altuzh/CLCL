@@ -27,3 +27,5 @@ See [.ai-context/PROJECT.md](file:///C:/Users/al/projects/CLCL/.ai-context/PROJE
 - **Empty Submenu Pruning**: If deleting the last item empties a folder, prune the folder from data and land the cursor smoothly on the root menu over the parent item (`active_submenu_item_rect`).
 - **Ghost Window Transparency**: `menu_ghost_wnd` (`CLCL_MenuGhost`) must remain transparent to mouse clicks (`WS_EX_TRANSPARENT` and `WM_NCHITTEST: return HTTRANSPARENT`) so hit-testing reaches underlying `#32768` menu windows.
 - **Delete Key Interception**: `menu_msg_filter_proc` (`WH_MSGFILTER`) must consume `VK_DELETE` (`return 1`) on both `WM_KEYDOWN` and `WM_KEYUP` to prevent Windows default popup menu dismissal.
+- **Cloud OAuth Client ID**: Always use Client ID `8a6ce5d366014eb4b2b0ab1f65926a6b` for Yandex OAuth. Never change it or revert to any other client ID.
+
