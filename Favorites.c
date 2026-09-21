@@ -39,6 +39,7 @@ extern BOOL save_regist(const HWND hWnd);
 #define ID_FAV_DELETE				40003
 #define ID_FAV_DELETE_SUBMENU		40004
 #define ID_FAV_DELETE_ITEM			40005
+#define ID_FAV_RENAME_SUBMENU		40006
 #define ID_FAV_FOLDER_BASE			41000
 #define ID_FAV_NEW_SUB_BASE			45000
 
@@ -261,6 +262,184 @@ BOOL favorites_show_new_folder_dialog(const HWND hWnd, DATA_INFO *parent_folder)
 	GlobalFree(hg);
 
 	return (ret == TRUE) ? TRUE : FALSE;
+}
+
+/*
+ * rename_folder_dlg_proc - dialog procedure for renaming an existing submenu
+ */
+static INT_PTR CALLBACK rename_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	DATA_INFO *folder_di;
+	RECT rc;
+	int width;
+	int margin, y, label_h, edit_h, btn_w, btn_h;
+	HFONT hFont;
+	TCHAR prompt[BUF_SIZE];
+	HWND hCtrl;
+
+	switch (uMsg) {
+	case WM_INITDIALOG:
+		SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)lParam);
+		folder_di = (DATA_INFO *)lParam;
+
+		GetClientRect(hDlg, &rc);
+		width = rc.right - rc.left;
+		margin = Scale(12);
+		y = Scale(10);
+		label_h = Scale(18);
+		edit_h = Scale(24);
+		btn_w = Scale(75);
+		btn_h = Scale(24);
+
+		hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+		// Prompt label
+		if (folder_di != NULL && folder_di->title != NULL) {
+			wsprintf(prompt, TEXT("Rename submenu \"%s\":"), folder_di->title);
+		} else {
+			lstrcpy(prompt, TEXT("Submenu Name:"));
+		}
+		hCtrl = CreateWindowEx(0, TEXT("STATIC"), prompt,
+			WS_CHILD | WS_VISIBLE | SS_LEFT,
+			margin, y, width - 2 * margin, label_h,
+			hDlg, (HMENU)IDC_FAV_STATIC_NAME_PROMPT, hInst, NULL);
+		SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+		y += label_h + Scale(6);
+
+		// Edit control
+		hCtrl = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"),
+			(folder_di != NULL && folder_di->title != NULL) ? folder_di->title : TEXT(""),
+			WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+			margin, y, width - 2 * margin, edit_h,
+			hDlg, (HMENU)IDC_FAV_EDIT_NAME, hInst, NULL);
+		SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+		SendMessage(hCtrl, EM_SETSEL, 0, -1);
+		y += edit_h + Scale(14);
+
+		// OK button
+		hCtrl = CreateWindowEx(0, TEXT("BUTTON"), TEXT("OK"),
+			WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+			width - 2 * btn_w - margin - Scale(8), y, btn_w, btn_h,
+			hDlg, (HMENU)IDOK, hInst, NULL);
+		SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+
+		// Cancel button
+		hCtrl = CreateWindowEx(0, TEXT("BUTTON"), TEXT("Cancel"),
+			WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+			width - btn_w - margin, y, btn_w, btn_h,
+			hDlg, (HMENU)IDCANCEL, hInst, NULL);
+		SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
+
+		dark_mode_set_dialog(hDlg);
+		SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
+		return FALSE;
+
+	case WM_COMMAND:
+		switch (LOWORD(wParam)) {
+		case IDOK:
+			{
+				TCHAR name_buf[BUF_SIZE];
+				TCHAR *start, *end;
+				DATA_INFO *parent;
+				DATA_INFO *head;
+				DATA_INFO *sibling;
+				TCHAR *new_title;
+
+				folder_di = (DATA_INFO *)GetWindowLongPtr(hDlg, GWLP_USERDATA);
+				if (folder_di == NULL) {
+					EndDialog(hDlg, FALSE);
+					return TRUE;
+				}
+
+				GetDlgItemText(hDlg, IDC_FAV_EDIT_NAME, name_buf, BUF_SIZE - 1);
+
+				// Trim leading and trailing whitespace
+				start = name_buf;
+				while (*start == TEXT(' ') || *start == TEXT('\t')) start++;
+				end = start + lstrlen(start) - 1;
+				while (end >= start && (*end == TEXT(' ') || *end == TEXT('\t') || *end == TEXT('\r') || *end == TEXT('\n'))) {
+					*end = TEXT('\0');
+					end--;
+				}
+
+				if (*start == TEXT('\0')) {
+					MessageBox(hDlg, TEXT("Please enter a submenu name."), TEXT("Rename Submenu"), MB_ICONINFORMATION);
+					SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
+					return TRUE;
+				}
+
+				// If unchanged, close with success
+				if (folder_di->title != NULL && lstrcmp(folder_di->title, start) == 0) {
+					EndDialog(hDlg, TRUE);
+					return TRUE;
+				}
+
+				// Check for sibling folder with duplicate name
+				parent = data_check(&regist_data, folder_di);
+				head = (parent != NULL) ? parent->child : regist_data.child;
+				for (sibling = head; sibling != NULL; sibling = sibling->next) {
+					if (sibling != folder_di && sibling->type == TYPE_FOLDER && sibling->title != NULL) {
+						if (lstrcmpi(sibling->title, start) == 0) {
+							MessageBox(hDlg, TEXT("A submenu with this name already exists."), TEXT("Rename Submenu"), MB_ICONWARNING);
+							SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
+							return TRUE;
+						}
+					}
+				}
+
+				new_title = alloc_copy(start);
+				if (new_title == NULL) {
+					return TRUE;
+				}
+				if (folder_di->title != NULL) {
+					mem_free((void **)&folder_di->title);
+				}
+				folder_di->title = new_title;
+
+				save_regist(hDlg);
+				EndDialog(hDlg, TRUE);
+				return TRUE;
+			}
+
+		case IDCANCEL:
+			EndDialog(hDlg, FALSE);
+			return TRUE;
+		}
+		break;
+
+	case WM_CLOSE:
+		EndDialog(hDlg, FALSE);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/*
+ * favorites_show_rename_folder_dialog - display Rename Submenu dialog
+ */
+BOOL favorites_show_rename_folder_dialog(const HWND hWnd, DATA_INFO *folder_di)
+{
+	HGLOBAL hg;
+	INT_PTR ret;
+
+	if (folder_di == NULL || folder_di->type != TYPE_FOLDER) {
+		return FALSE;
+	}
+
+	hg = create_dialog_template(L"Rename Submenu", Scale(200), Scale(85));
+	if (hg == NULL) {
+		return FALSE;
+	}
+	ret = DialogBoxIndirectParam(hInst, (DLGTEMPLATE *)GlobalLock(hg),
+		hWnd, rename_folder_dlg_proc, (LPARAM)folder_di);
+	GlobalUnlock(hg);
+	GlobalFree(hg);
+
+	if (ret == TRUE) {
+		SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
+		return TRUE;
+	}
+	return FALSE;
 }
 
 /*
@@ -646,6 +825,7 @@ BOOL favorites_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POI
 	}
 
 	if (!is_root) {
+		AppendMenu(hMenu, MF_STRING, ID_FAV_RENAME_SUBMENU, TEXT("Rename Submenu..."));
 		AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
 		AppendMenu(hMenu, MF_STRING, ID_FAV_DELETE_SUBMENU, TEXT("Delete Submenu"));
 	}
@@ -665,6 +845,8 @@ BOOL favorites_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POI
 
 	if (cmd == ID_FAV_NEW_SUBMENU_ROOT) {
 		favorites_show_new_folder_dialog(hWnd, is_root ? NULL : folder_di);
+	} else if (cmd == ID_FAV_RENAME_SUBMENU && !is_root) {
+		favorites_show_rename_folder_dialog(hWnd, folder_di);
 	} else if (cmd == ID_FAV_DELETE_SUBMENU && !is_root) {
 		data_delete(&regist_data.child, folder_di, TRUE);
 		if (deleted != NULL) {

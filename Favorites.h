@@ -29,6 +29,7 @@ BOOL favorites_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POI
 BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT pt, BOOL *deleted);
 BOOL favorites_show_add_dialog(const HWND hWnd, DATA_INFO *cb_item);
 BOOL favorites_show_new_folder_dialog(const HWND hWnd, DATA_INFO *parent_folder);
+BOOL favorites_show_rename_folder_dialog(const HWND hWnd, DATA_INFO *folder_di);
 
 #endif	// _INC_FAVORITES_H
 /* End of source */
