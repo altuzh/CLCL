@@ -1151,12 +1151,12 @@ static BOOL menu_set_item(const HDC hdc, const HMENU hMenu, MENU_ITEM_INFO *mii,
 	SIZE size;
 	int *item_heights;
 	int total_height = 0;
-	int data_height = 0;
 	int work_height;
 	int max_height;
 	int num_cols = 1;
-	int target_data_per_col = 0;
-	int col_data_height = 0;
+	int remaining_height = 0;
+	int remaining_cols = 1;
+	int target_col_height = 0;
 	int col_total_height = 0;
 	int cols_done = 0;
 	int item_height;
@@ -1192,9 +1192,6 @@ static BOOL menu_set_item(const HDC hdc, const HMENU hMenu, MENU_ITEM_INFO *mii,
 		}
 		item_heights[i] = item_height;
 		total_height += item_height;
-		if (!menu_is_trailing_commands(mii, i, cnt)) {
-			data_height += item_height;
-		}
 	}
 
 	// Determine column count and calculate boundaries
@@ -1214,10 +1211,11 @@ static BOOL menu_set_item(const HDC hdc, const HMENU hMenu, MENU_ITEM_INFO *mii,
 		if (num_cols < 2) {
 			num_cols = 2;
 		}
-		if (data_height > 0) {
-			target_data_per_col = (data_height + num_cols - 1) / num_cols;
-		} else {
-			target_data_per_col = (total_height + num_cols - 1) / num_cols;
+		remaining_height = total_height;
+		remaining_cols = num_cols;
+		target_col_height = (remaining_height + remaining_cols - 1) / remaining_cols;
+		if (target_col_height > max_height) {
+			target_col_height = max_height;
 		}
 	}
 
@@ -1226,25 +1224,39 @@ static BOOL menu_set_item(const HDC hdc, const HMENU hMenu, MENU_ITEM_INFO *mii,
 		item_height = item_heights[i];
 		menu_flag = 0;
 
-		if (option.menu_break == 1 && cols_done < num_cols - 1) {
+		if (option.menu_break == 1 && col_total_height > 0) {
 			BOOL is_trailing = menu_is_trailing_commands(mii, i, cnt);
-			if (!is_trailing) {
-				if ((target_data_per_col > 0 && col_data_height >= target_data_per_col) ||
-					col_total_height + item_height > max_height) {
-					if (col_total_height > 0) {
-						menu_flag = MF_MENUBARBREAK;
-						col_data_height = 0;
-						col_total_height = 0;
-						cols_done++;
+			BOOL should_break = FALSE;
+
+			if (col_total_height + item_height > max_height) {
+				should_break = TRUE;
+			} else if (!is_trailing && cols_done < num_cols - 1) {
+				if (target_col_height > 0 && col_total_height >= target_col_height) {
+					should_break = TRUE;
+				}
+			}
+
+			if (should_break) {
+				menu_flag = MF_MENUBARBREAK;
+				remaining_height -= col_total_height;
+				if (remaining_height < 0) {
+					remaining_height = 0;
+				}
+				col_total_height = 0;
+				cols_done++;
+				remaining_cols = num_cols - cols_done;
+				if (remaining_cols > 0) {
+					target_col_height = (remaining_height + remaining_cols - 1) / remaining_cols;
+					if (target_col_height > max_height) {
+						target_col_height = max_height;
 					}
+				} else {
+					target_col_height = 0;
 				}
 			}
 		}
 
 		col_total_height += item_height;
-		if (!menu_is_trailing_commands(mii, i, cnt)) {
-			col_data_height += item_height;
-		}
 
 		if ((mii + i)->flag & MF_POPUP) {
 			hPopupMenu = CreatePopupMenu();
