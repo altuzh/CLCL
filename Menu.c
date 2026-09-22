@@ -1157,6 +1157,9 @@ static BOOL menu_set_item(const HDC hdc, const HMENU hMenu, MENU_ITEM_INFO *mii,
 	int remaining_height = 0;
 	int remaining_cols = 1;
 	int target_col_height = 0;
+	int reserve_bottom = 0;
+	int line_height = 0;
+	int effective_remaining = 0;
 	int col_total_height = 0;
 	int cols_done = 0;
 	int item_height;
@@ -1211,9 +1214,21 @@ static BOOL menu_set_item(const HDC hdc, const HMENU hMenu, MENU_ITEM_INFO *mii,
 		if (num_cols < 2) {
 			num_cols = 2;
 		}
+		line_height = GetSystemMetrics(SM_CYMENU);
+		if (line_height <= 0) {
+			line_height = Scale(18);
+		}
+		reserve_bottom = line_height * 2;
+		if (reserve_bottom > total_height / (num_cols * 2)) {
+			reserve_bottom = total_height / (num_cols * 2);
+		}
 		remaining_height = total_height;
 		remaining_cols = num_cols;
-		target_col_height = (remaining_height + remaining_cols - 1) / remaining_cols;
+		effective_remaining = remaining_height - reserve_bottom;
+		if (effective_remaining < 0) {
+			effective_remaining = remaining_height;
+		}
+		target_col_height = (effective_remaining + remaining_cols - 1) / remaining_cols;
 		if (target_col_height > max_height) {
 			target_col_height = max_height;
 		}
@@ -1246,7 +1261,11 @@ static BOOL menu_set_item(const HDC hdc, const HMENU hMenu, MENU_ITEM_INFO *mii,
 				cols_done++;
 				remaining_cols = num_cols - cols_done;
 				if (remaining_cols > 0) {
-					target_col_height = (remaining_height + remaining_cols - 1) / remaining_cols;
+					effective_remaining = remaining_height - reserve_bottom;
+					if (effective_remaining < 0) {
+						effective_remaining = remaining_height;
+					}
+					target_col_height = (effective_remaining + remaining_cols - 1) / remaining_cols;
 					if (target_col_height > max_height) {
 						target_col_height = max_height;
 					}
