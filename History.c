@@ -25,12 +25,14 @@
 #include "Format.h"
 #include "Filter.h"
 #include "DbHistory.h"
+#include "DarkMode.h"
 
 /* Define */
 
 /* Global Variables */
 // Options
 extern OPTION_INFO option;
+extern DATA_INFO history_data;
 
 /* Local Function Prototypes */
 static BOOL history_compare(DATA_INFO *d1, DATA_INFO *d2);
@@ -643,5 +645,52 @@ BOOL history_add(DATA_INFO **root, DATA_INFO *new_item, const BOOL overlap_check
 		}
 	}
 	return TRUE;
+}
+
+/*
+ * history_show_folder_menu - display RMB context menu for date folder
+ */
+BOOL history_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POINT pt, BOOL *deleted)
+{
+	HMENU hMenu;
+	UINT cmd;
+
+	if (folder_di == NULL) {
+		return FALSE;
+	}
+	if (deleted != NULL) {
+		*deleted = FALSE;
+	}
+
+	hMenu = CreatePopupMenu();
+	if (hMenu == NULL) {
+		return FALSE;
+	}
+
+	AppendMenu(hMenu, MF_STRING, 1, TEXT("Delete Submenu"));
+
+	if (dark_mode_is_dark() == TRUE) {
+		MENUINFO mi;
+		ZeroMemory(&mi, sizeof(mi));
+		mi.cbSize = sizeof(mi);
+		mi.fMask = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
+		mi.hbrBack = dark_mode_get_brush(COLOR_MENU);
+		SetMenuInfo(hMenu, &mi);
+	}
+
+	_SetForegroundWindow(hWnd);
+	cmd = TrackPopupMenuEx(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
+		pt.x, pt.y, hWnd, NULL);
+
+	if (cmd == 1) {
+		data_delete(&history_data.child, folder_di, TRUE);
+		if (deleted != NULL) {
+			*deleted = TRUE;
+		}
+		SendMessage(hWnd, WM_HISTORY_CHANGED, 0, 0);
+	}
+
+	DestroyMenu(hMenu);
+	return (cmd != 0);
 }
 /* End of source */

@@ -176,8 +176,13 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (scenario == 1 || scenario == 4 || scenario == 6 || scenario == 7 || scenario >= 11) {
                 phase = scenario >= 11 ? 40 : 10;
                 if (scenario >= 11) {
-                    switch_target = folder->child->next;
-                    GetMenuItemRect(NULL, sub, 1, &switch_row);
+                    if (scenario == 16) {
+                        switch_target = folder->next;
+                        GetMenuItemRect(NULL, popup_menu, 1, &switch_row);
+                    } else {
+                        switch_target = folder->child->next;
+                        GetMenuItemRect(NULL, sub, 1, &switch_row);
+                    }
                     switch_point.x = switch_row.left + 4;
                     switch_point.y = switch_row.top + 7;
                 }
@@ -187,7 +192,7 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 key(hwnd, VK_DELETE);
             }
         } else if ((phase == 40 || phase == 43) && popup_menu == NULL && IsWindowVisible(idle_menu)) {
-            BOOL left = scenario == 11 || scenario == 14;
+            BOOL left = scenario == 11 || scenario == 14 || scenario == 16;
             UINT down = left ? WM_LBUTTONDOWN : WM_RBUTTONDOWN;
             UINT up = left ? WM_LBUTTONUP : WM_RBUTTONUP;
             RECT overlap;
@@ -210,8 +215,8 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             CHECK(context_mouse(hwnd, up, point), "drag-off release consumed without selecting");
             CHECK(menu_context_pick == NULL, "dragging off does not change context target");
             CHECK(context_mouse(hwnd, down, switch_point), "new clipboard item press consumed");
-            phase = left ? 45 : 41;
-            finished = left;
+            phase = scenario == 16 ? 46 : (left ? 45 : 41);
+            finished = scenario == 16 ? FALSE : left;
             test_cursor = switch_point;
             if (!context_mouse(hwnd, up, switch_point)) {
                 CHECK(FALSE, "new clipboard item release consumed");
@@ -241,6 +246,11 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             CHECK(IsWindowVisible(idle_menu) && (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0) == target_menu(folder),
                 "clipboard menu restored after switched action");
             CHECK(clipboard_selection == NULL, "RMB does not run LMB action");
+            finished = TRUE;
+            EndMenu();
+        } else if (phase == 46 && popup_menu && !menu_cursor_restore_needed) {
+            CHECK(IsWindowVisible(idle_menu), "main menu remained open after LMB on date folder");
+            CHECK(clipboard_selection == NULL, "LMB on date folder does not paste clipboard item");
             finished = TRUE;
             EndMenu();
         } else if ((phase == 10 || phase == 11) && popup_menu == NULL && IsWindowVisible(idle_menu)) {
@@ -467,6 +477,72 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     printf("PASS: SQLite multiple bitmap persistence across restart\n");
 }
 
+static void test_date_folder_deletion(void)
+{
+    TCHAR err_str[BUF_SIZE] = {0};
+    TCHAR temp_dir[MAX_PATH];
+    TCHAR db_file[MAX_PATH];
+    GetTempPath(MAX_PATH, temp_dir);
+    lstrcat(temp_dir, TEXT("clcl_test_date_del_dir"));
+    CreateDirectory(temp_dir, NULL);
+
+    db_history_close();
+
+    BOOL init_ok = db_history_init(temp_dir);
+    CHECK(init_ok, "db_history_init succeeds for date folder test");
+
+    HBITMAP bmp1 = create_solid_bitmap(16, 16, RGB(10, 20, 30));
+    HBITMAP bmp2 = create_solid_bitmap(16, 16, RGB(40, 50, 60));
+
+    DATA_INFO *item1 = data_create_item(TEXT("Item 1"), FALSE, err_str);
+    item1->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), (HANDLE)bmp1, 0, FALSE, err_str);
+    data_set_modified(item1);
+
+    DATA_INFO *item2 = data_create_item(TEXT("Item 2"), FALSE, err_str);
+    item2->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), (HANDLE)bmp2, 0, FALSE, err_str);
+    data_set_modified(item2);
+
+    BOOL s1 = db_history_save_item(item1);
+    BOOL s2 = db_history_save_item(item2);
+    CHECK(s1 && s2, "Items saved to DB with valid IDs");
+    CHECK(item1->param1 > 0 && item2->param1 > 0, "Item IDs populated in param1");
+
+    // Put items into a date folder
+    DATA_INFO *date_folder = data_create_folder(TEXT("2026-09-23"), err_str);
+    CHECK(date_folder != NULL, "Date folder created");
+    date_folder->child = item1;
+    item1->next = item2;
+    item2->next = NULL;
+
+    history_data.child = date_folder;
+
+    // Delete the date folder
+    BOOL del_ok = data_delete(&history_data.child, date_folder, TRUE);
+    CHECK(del_ok, "data_delete succeeds on date folder");
+    CHECK(history_data.child == NULL, "Date folder removed from history_data.child in memory");
+
+    // Verify both items were deleted from SQLite DB
+    DATA_INFO *loaded_root = NULL;
+    int loaded_count = db_history_load_recent(10, &loaded_root);
+    CHECK(loaded_count == 0, "SQLite DB is empty after date folder deletion");
+    if (loaded_root != NULL) {
+        data_free(loaded_root);
+    }
+
+    db_history_close();
+
+    // Clean up temporary database files
+    wsprintf(db_file, TEXT("%s\\history.db"), temp_dir);
+    DeleteFile(db_file);
+    wsprintf(db_file, TEXT("%s\\history.db-shm"), temp_dir);
+    DeleteFile(db_file);
+    wsprintf(db_file, TEXT("%s\\history.db-wal"), temp_dir);
+    DeleteFile(db_file);
+    RemoveDirectory(temp_dir);
+
+    printf("PASS: Date folder deletion removes folder and all contained SQLite items\n");
+}
+
 int main(void)
 {
     HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
@@ -498,7 +574,7 @@ int main(void)
     RegisterClass(&wc);
     owner = CreateWindow(wc.lpszClassName, TEXT("Menu regression"), WS_OVERLAPPED, 0, 0, 100, 100, NULL, NULL, hInst, NULL);
     history_data.type = regist_data.type = TYPE_ROOT;
-    for (scenario = 0; scenario < 16; scenario++) {
+    for (scenario = 0; scenario < 17; scenario++) {
     phase = ticks = 0;
     finished = FALSE;
     landing = NULL;
@@ -516,7 +592,11 @@ int main(void)
         history_data.child = folder;
         items[0].content = MENU_CONTENT_HISTORY;
         open_steps = 1;
-        if (scenario == 9 || scenario == 10 || scenario == 14 || scenario == 15) {
+        if (scenario == 16) {
+            folder->next = data_create_folder(TEXT("Second date"), error);
+            folder->next->child = data_create_item(TEXT("Third disposable item"), FALSE, error);
+            folder->next->child->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), NULL, 0, FALSE, error);
+        } else if (scenario == 9 || scenario == 10 || scenario == 14 || scenario == 15) {
             folder->child = NULL;
             data_free(folder);
             folder = &history_data;
@@ -560,6 +640,8 @@ int main(void)
     if (scenario == 11 || scenario == 14) {
         CHECK(clipboard_selection == switch_target, "LMB selects the newly clicked clipboard item");
         CHECK(folder->child->next == switch_target, "LMB preserves both clipboard items");
+    } else if (scenario == 16) {
+        CHECK(clipboard_selection == NULL, "LMB on date folder did not paste");
     }
     CHECK(menu_context_hits == NULL, "context hit targets released");
     KillTimer(owner, 77);
@@ -570,6 +652,7 @@ int main(void)
     DestroyWindow(owner);
     test_bitmap_serialization();
     test_sqlite_multiple_bitmap_persistence();
-    printf("%s: 16 native-menu scenarios + bitmap serialization + SQLite multiple bitmap persistence\n", failures ? "FAILED" : "PASS");
+    test_date_folder_deletion();
+    printf("%s: 17 native-menu scenarios + bitmap serialization + SQLite multiple bitmap persistence + date folder deletion\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

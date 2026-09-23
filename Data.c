@@ -144,6 +144,20 @@ DATA_INFO *data_item_copy(const DATA_INFO *di, const BOOL next_copy, const BOOL 
 	return new_di;
 }
 
+static void data_delete_db_items(DATA_INFO *di)
+{
+	DATA_INFO *cur;
+	for (cur = di; cur != NULL; cur = cur->next) {
+		if (cur->type == TYPE_ITEM && cur->param1 > 0) {
+			db_history_delete_item((int)cur->param1);
+			cur->param1 = 0;
+		}
+		if (cur->child != NULL) {
+			data_delete_db_items(cur->child);
+		}
+	}
+}
+
 /*
  * data_delete - delete item
  */
@@ -158,9 +172,13 @@ BOOL data_delete(DATA_INFO **root, DATA_INFO *del_di, const BOOL free_item)
 		*root = del_di->next;
 		del_di->next = NULL;
 		if (free_item == TRUE) {
-			if (db_history_is_open() && del_di->type == TYPE_ITEM && del_di->param1 > 0) {
-				db_history_delete_item((int)del_di->param1);
-				del_di->param1 = 0;
+			if (db_history_is_open()) {
+				if (del_di->type == TYPE_ITEM && del_di->param1 > 0) {
+					db_history_delete_item((int)del_di->param1);
+					del_di->param1 = 0;
+				} else if (del_di->type == TYPE_FOLDER && del_di->child != NULL) {
+					data_delete_db_items(del_di->child);
+				}
 			}
 			data_free(del_di);
 		}
@@ -172,9 +190,13 @@ BOOL data_delete(DATA_INFO **root, DATA_INFO *del_di, const BOOL free_item)
 			di->next = del_di->next;
 			del_di->next = NULL;
 			if (free_item == TRUE) {
-				if (db_history_is_open() && del_di->type == TYPE_ITEM && del_di->param1 > 0) {
-					db_history_delete_item((int)del_di->param1);
-					del_di->param1 = 0;
+				if (db_history_is_open()) {
+					if (del_di->type == TYPE_ITEM && del_di->param1 > 0) {
+						db_history_delete_item((int)del_di->param1);
+						del_di->param1 = 0;
+					} else if (del_di->type == TYPE_FOLDER && del_di->child != NULL) {
+						data_delete_db_items(del_di->child);
+					}
 				}
 				data_free(del_di);
 			}

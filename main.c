@@ -126,6 +126,7 @@ static DATA_INFO *menu_delete_target = NULL;
 #define RMB_ACTION_ADD_TO_FAVORITES	1
 #define RMB_ACTION_FAV_FOLDER_MENU	2
 #define RMB_ACTION_FAV_ITEM_MENU	3
+#define RMB_ACTION_DATE_FOLDER_MENU	4
 static int menu_rmb_action = RMB_ACTION_NONE;
 static DATA_INFO *menu_rmb_target_di = NULL;
 static POINT menu_rmb_pt = {0, 0};
@@ -1145,9 +1146,7 @@ static void menu_context_draw_highlight(HDC hdc)
 	}
 	// Replace the old selection captured in the ghost, then paint the new one.
 	for (hit = menu_context_hits; hit != NULL; hit = hit->next) {
-		if ((hit->item == menu_context_original || hit->item == menu_context_highlight) &&
-			(data_check(&history_data, hit->item->set_di) != NULL ||
-			 data_check(&regist_data, hit->item->set_di) != NULL)) {
+		if (hit->item == menu_context_original || hit->item == menu_context_highlight) {
 			DRAWITEMSTRUCT draw = {0};
 			draw.CtlType = ODT_MENU;
 			draw.itemID = hit->item->id;
@@ -1351,12 +1350,14 @@ static BOOL CALLBACK menu_context_capture_items(HWND hwnd, LPARAM unused)
 			continue;
 		}
 		item = (MENU_ITEM_INFO *)info.dwItemData;
-		if (item->set_di == NULL ||
-			(data_check(&history_data, item->set_di) == NULL &&
-			 data_check(&regist_data, item->set_di) == NULL) ||
-			item->set_di->type != TYPE_ITEM ||
-			!GetMenuItemRect(hwnd, menu, i, &row) ||
-			!IntersectRect(&row, &row, &bounds)) {
+		if (item == NULL ||
+			(!GetMenuItemRect(NULL, menu, i, &row) && !GetMenuItemRect(hwnd, menu, i, &row))) {
+			continue;
+		}
+		if (row.left < bounds.left || row.top < bounds.top) {
+			OffsetRect(&row, bounds.left, bounds.top);
+		}
+		if (!IntersectRect(&row, &row, &bounds)) {
 			continue;
 		}
 		hit = mem_alloc(sizeof(*hit));
@@ -1392,10 +1393,18 @@ static LRESULT CALLBACK menu_context_filter_proc(int code, WPARAM wParam, LPARAM
 		// A live context menu (including its cascading children) takes priority.
 		if (EnumThreadWindows(GetCurrentThreadId(), menu_context_outside_popup, (LPARAM)&msg->pt)) {
 			for (hit = menu_context_hits; hit != NULL; hit = hit->next) {
-				if (PtInRect(&hit->rect, msg->pt) &&
-					(data_check(&history_data, hit->item->set_di) != NULL ||
-					 data_check(&regist_data, hit->item->set_di) != NULL)) {
-					item = hit->item;
+				if (PtInRect(&hit->rect, msg->pt)) {
+					if (button == VK_RBUTTON) {
+						if ((hit->item->set_di != NULL &&
+							(data_check(&history_data, hit->item->set_di) != NULL ||
+							 data_check(&regist_data, hit->item->set_di) != NULL)) ||
+							hit->item->set_di == &regist_data ||
+							hit->item->is_favourites) {
+							item = hit->item;
+						}
+					} else {
+						item = hit->item;
+					}
 				}
 			}
 		}
@@ -1445,6 +1454,12 @@ static LRESULT CALLBACK menu_msg_filter_proc(int nCode, WPARAM wParam, LPARAM lP
 				mii = current_selected_mii;
 			}
 			if (mii != NULL) {
+				menu_context_clear_hits();
+				if (!EnumThreadWindows(GetCurrentThreadId(), menu_context_capture_items, 0)) {
+					menu_context_clear_hits();
+				}
+				menu_context_original = menu_context_highlight = mii;
+
 				if (mii->is_favourites && (mii->is_folder || (mii->flag & MF_POPUP))) {
 					// Right-click on Favourites root or a Favourites subfolder -> Folder context menu
 					if (!has_reopen_pos) {
@@ -1508,11 +1523,6 @@ static LRESULT CALLBACK menu_msg_filter_proc(int nCode, WPARAM wParam, LPARAM lP
 						return 1;
 					} else if (data_check(&history_data, di) != NULL && di->type == TYPE_ITEM) {
 						// Right-click on a Clipboard history item -> Add to Favorites
-						menu_context_clear_hits();
-						if (!EnumThreadWindows(GetCurrentThreadId(), menu_context_capture_items, 0)) {
-							menu_context_clear_hits();
-						}
-						menu_context_original = menu_context_highlight = mii;
 						if (!has_reopen_pos) {
 							HWND hRoot = (menu_root_wnd != NULL && IsWindow(menu_root_wnd)) ? menu_root_wnd : FindWindow(TEXT("#32768"), NULL);
 							if (hRoot != NULL) {
@@ -1535,14 +1545,23 @@ static LRESULT CALLBACK menu_msg_filter_proc(int nCode, WPARAM wParam, LPARAM lP
 						EndMenu();
 						return 1;
 					} else if (data_check(&history_data, di) != NULL && di->type == TYPE_FOLDER) {
-						// Right-click on a Date Folder in history: keep menu open and expand folder
-						if (hMenuWnd != NULL && IsWindow(hMenuWnd)) {
-							POINT client_pt = msg->pt;
-							ScreenToClient(hMenuWnd, &client_pt);
-							PostMessage(hMenuWnd, WM_MOUSEMOVE, 0, MAKELPARAM(client_pt.x, client_pt.y));
+						// Right-click on a Date Folder in history: Date folder context menu
+						if (!has_reopen_pos) {
+							HWND hRoot = (menu_root_wnd != NULL && IsWindow(menu_root_wnd)) ? menu_root_wnd : FindWindow(TEXT("#32768"), NULL);
+							if (hRoot != NULL) {
+								menu_record_reopen_position(hRoot);
+							}
 						}
-						mouse_event(MOUSEEVENTF_MOVE, 1, 0, 0, 0);
-						mouse_event(MOUSEEVENTF_MOVE, (DWORD)-1, 0, 0, 0);
+						menu_reopen_folder_title[0] = TEXT('\0');
+						menu_reopen_is_fav = FALSE;
+						menu_reopen_fav_folder = NULL;
+						menu_ghost_wnd = menu_ghost_show();
+						menu_rmb_action = RMB_ACTION_DATE_FOLDER_MENU;
+						menu_rmb_target_di = di;
+						menu_rmb_pt = msg->pt;
+						menu_reopen_requested = TRUE;
+						menu_folder_hover_posted = FALSE;
+						EndMenu();
 						return 1;
 					}
 				}
@@ -2065,26 +2084,49 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 			menu_delete_pending_item(hWnd);
 		}
 
-		if (menu_rmb_action == RMB_ACTION_ADD_TO_FAVORITES) {
+		if (menu_rmb_action == RMB_ACTION_ADD_TO_FAVORITES ||
+			menu_rmb_action == RMB_ACTION_DATE_FOLDER_MENU ||
+			menu_rmb_action == RMB_ACTION_FAV_FOLDER_MENU ||
+			menu_rmb_action == RMB_ACTION_FAV_ITEM_MENU) {
 			DATA_INFO *target = menu_rmb_target_di;
-			DATA_INFO *parent_folder;
+			DATA_INFO *parent_folder = NULL;
 			POINT pt = menu_rmb_pt;
 			BOOL deleted = FALSE;
+			BOOL is_target_fav = FALSE;
 			menu_rmb_action = RMB_ACTION_NONE;
 			menu_rmb_target_di = NULL;
 			for (;;) {
 				HHOOK context_hook;
 				parent_folder = data_check(&history_data, target);
 				if (parent_folder == NULL) {
-					parent_folder = data_check(&regist_data, target);
+					parent_folder = (target == &regist_data) ? &regist_data : data_check(&regist_data, target);
+					is_target_fav = TRUE;
+				} else {
+					is_target_fav = FALSE;
 				}
 				menu_reopen_folder_title[0] = TEXT('\0');
+				menu_reopen_is_fav = is_target_fav;
+				menu_reopen_fav_folder = (is_target_fav && parent_folder != &regist_data) ? parent_folder : NULL;
 				if (parent_folder != NULL && parent_folder != &history_data && parent_folder != &regist_data && parent_folder->title != NULL) {
 					lstrcpyn(menu_reopen_folder_title, parent_folder->title, BUF_SIZE);
 				}
 				menu_context_pressed = menu_context_pick = NULL;
 				context_hook = SetWindowsHookEx(WH_MSGFILTER, menu_context_filter_proc, NULL, GetCurrentThreadId());
-				favorites_show_add_menu(hWnd, target, pt, &deleted);
+
+				if (!is_target_fav) {
+					if (target != NULL && target->type == TYPE_FOLDER) {
+						history_show_folder_menu(hWnd, target, pt, &deleted);
+					} else {
+						favorites_show_add_menu(hWnd, target, pt, &deleted);
+					}
+				} else {
+					if (target == &regist_data || (target != NULL && target->type == TYPE_FOLDER)) {
+						favorites_show_folder_menu(hWnd, target, pt, &deleted);
+					} else {
+						favorites_show_item_menu(hWnd, target, pt, &deleted);
+					}
+				}
+
 				if (context_hook != NULL) {
 					UnhookWindowsHookEx(context_hook);
 				}
@@ -2096,6 +2138,43 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 			}
 			menu_context_clear_hits();
 			if (menu_context_pick != NULL && menu_context_left) {
+				BOOL is_folder = menu_context_pick->is_folder ||
+					(menu_context_pick->flag & MF_POPUP) ||
+					(menu_context_pick->set_di != NULL && menu_context_pick->set_di->type == TYPE_FOLDER) ||
+					menu_context_pick->set_di == &regist_data;
+
+				if (is_folder) {
+					DATA_INFO *target_folder = menu_context_pick->set_di;
+					BOOL is_fav = (target_folder == &regist_data) || menu_context_pick->is_favourites;
+					if (target_folder != NULL && !is_fav) {
+						if (data_check(&regist_data, target_folder) != NULL) {
+							is_fav = TRUE;
+						}
+					}
+					menu_reopen_folder_title[0] = TEXT('\0');
+					menu_reopen_is_fav = is_fav;
+					menu_reopen_fav_folder = NULL;
+					if (is_fav) {
+						if (target_folder != NULL && target_folder != &regist_data && target_folder->type == TYPE_FOLDER && target_folder->title != NULL) {
+							lstrcpyn(menu_reopen_folder_title, target_folder->title, BUF_SIZE);
+							menu_reopen_fav_folder = target_folder;
+						}
+					} else {
+						if (target_folder != NULL && target_folder->type == TYPE_FOLDER && target_folder->title != NULL) {
+							lstrcpyn(menu_reopen_folder_title, target_folder->title, BUF_SIZE);
+						} else if (menu_context_pick->text != NULL) {
+							lstrcpyn(menu_reopen_folder_title, menu_context_pick->text, BUF_SIZE);
+						}
+					}
+					menu_context_pick = NULL;
+					menu_cursor_restore_pt = pt;
+					menu_cursor_restore_needed = TRUE;
+					menu_reopen_requested = FALSE;
+					menu_folder_hover_posted = FALSE;
+					SetTimer(hWnd, ID_MENU_HOVER_SAFETY_TIMER, 800, NULL);
+					menu_free();
+					continue;
+				}
 				// Use the ordinary item-selection path, including Shift/Ctrl and paste.
 				ret = menu_context_pick->id;
 				menu_context_pick = NULL;
@@ -2110,46 +2189,22 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 				break;
 			}
 			menu_cursor_restore_pt = pt;
-			if (deleted && menu_prune_empty_parent(&history_data, parent_folder, FALSE)) {
-				SendMessage(hWnd, WM_HISTORY_CHANGED, 0, 0);
-			}
-			menu_cursor_restore_needed = TRUE;
-			menu_reopen_requested = FALSE;
-			menu_folder_hover_posted = FALSE;
-			SetTimer(hWnd, ID_MENU_HOVER_SAFETY_TIMER, 800, NULL);
-			menu_free();
-			continue;
-		}
-		if (menu_rmb_action == RMB_ACTION_FAV_FOLDER_MENU) {
-			DATA_INFO *target = menu_rmb_target_di;
-			DATA_INFO *parent_folder = (target != NULL) ? data_check(&regist_data, target) : NULL;
-			POINT pt = menu_rmb_pt;
-			BOOL deleted = FALSE;
-			menu_rmb_action = RMB_ACTION_NONE;
-			menu_rmb_target_di = NULL;
-			favorites_show_folder_menu(hWnd, target, pt, &deleted);
-			menu_cursor_restore_pt = pt;
-			if (deleted && menu_prune_empty_parent(&regist_data, parent_folder, TRUE)) {
-				SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
-			}
-			menu_cursor_restore_needed = TRUE;
-			menu_reopen_requested = FALSE;
-			menu_folder_hover_posted = FALSE;
-			SetTimer(hWnd, ID_MENU_HOVER_SAFETY_TIMER, 800, NULL);
-			menu_free();
-			continue;
-		}
-		if (menu_rmb_action == RMB_ACTION_FAV_ITEM_MENU) {
-			DATA_INFO *target = menu_rmb_target_di;
-			DATA_INFO *parent_folder = (target != NULL) ? data_check(&regist_data, target) : NULL;
-			POINT pt = menu_rmb_pt;
-			BOOL deleted = FALSE;
-			menu_rmb_action = RMB_ACTION_NONE;
-			menu_rmb_target_di = NULL;
-			favorites_show_item_menu(hWnd, target, pt, &deleted);
-			menu_cursor_restore_pt = pt;
-			if (deleted && menu_prune_empty_parent(&regist_data, parent_folder, TRUE)) {
-				SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
+			if (deleted) {
+				if (!is_target_fav) {
+					if (parent_folder != NULL && data_check(&history_data, parent_folder) == NULL) {
+						menu_reopen_folder_title[0] = TEXT('\0');
+						if (active_submenu_item_rect.right > active_submenu_item_rect.left) {
+							menu_cursor_restore_pt.x = active_submenu_item_rect.left + (active_submenu_item_rect.right - active_submenu_item_rect.left) / 2;
+							menu_cursor_restore_pt.y = active_submenu_item_rect.top + (active_submenu_item_rect.bottom - active_submenu_item_rect.top) / 2;
+						}
+					} else if (menu_prune_empty_parent(&history_data, parent_folder, FALSE)) {
+						SendMessage(hWnd, WM_HISTORY_CHANGED, 0, 0);
+					}
+				} else {
+					if (menu_prune_empty_parent(&regist_data, parent_folder, TRUE)) {
+						SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
+					}
+				}
 			}
 			menu_cursor_restore_needed = TRUE;
 			menu_reopen_requested = FALSE;
