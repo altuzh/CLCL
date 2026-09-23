@@ -77,7 +77,7 @@ static HGLOBAL create_dialog_template(LPCWSTR title, short cx, short cy)
 
 	pDlg = (DLGTEMPLATE *)p;
 	pDlg->style = DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_SETFONT;
-	pDlg->dwExtendedStyle = 0;
+	pDlg->dwExtendedStyle = WS_EX_TOPMOST;
 	pDlg->cdit = 0;
 	pDlg->x = 0;
 	pDlg->y = 0;
@@ -179,6 +179,9 @@ static INT_PTR CALLBACK new_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wParam,
 		SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
 
 		dark_mode_set_dialog(hDlg);
+		SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		SetForegroundWindow(hDlg);
+		BringWindowToTop(hDlg);
 		SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
 		return FALSE;
 
@@ -205,7 +208,7 @@ static INT_PTR CALLBACK new_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wParam,
 				}
 
 				if (*start == TEXT('\0')) {
-					MessageBox(hDlg, TEXT("Please enter a submenu name."), TEXT("New Submenu"), MB_ICONINFORMATION);
+					MessageBox(hDlg, TEXT("Please enter a submenu name."), TEXT("New Submenu"), MB_ICONINFORMATION | MB_TOPMOST);
 					SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
 					return TRUE;
 				}
@@ -216,7 +219,7 @@ static INT_PTR CALLBACK new_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wParam,
 				err_str[0] = TEXT('\0');
 				new_fld = regist_create_folder(dest_root, start, err_str);
 				if (new_fld == NULL) {
-					MessageBox(hDlg, TEXT("A submenu with this name already exists."), TEXT("New Submenu"), MB_ICONWARNING);
+					MessageBox(hDlg, TEXT("A submenu with this name already exists."), TEXT("New Submenu"), MB_ICONWARNING | MB_TOPMOST);
 					SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
 					return TRUE;
 				}
@@ -331,6 +334,9 @@ static INT_PTR CALLBACK rename_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wPar
 		SendMessage(hCtrl, WM_SETFONT, (WPARAM)hFont, FALSE);
 
 		dark_mode_set_dialog(hDlg);
+		SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+		SetForegroundWindow(hDlg);
+		BringWindowToTop(hDlg);
 		SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
 		return FALSE;
 
@@ -363,7 +369,7 @@ static INT_PTR CALLBACK rename_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wPar
 				}
 
 				if (*start == TEXT('\0')) {
-					MessageBox(hDlg, TEXT("Please enter a submenu name."), TEXT("Rename Submenu"), MB_ICONINFORMATION);
+					MessageBox(hDlg, TEXT("Please enter a submenu name."), TEXT("Rename Submenu"), MB_ICONINFORMATION | MB_TOPMOST);
 					SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
 					return TRUE;
 				}
@@ -380,7 +386,7 @@ static INT_PTR CALLBACK rename_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wPar
 				for (sibling = head; sibling != NULL; sibling = sibling->next) {
 					if (sibling != folder_di && sibling->type == TYPE_FOLDER && sibling->title != NULL) {
 						if (lstrcmpi(sibling->title, start) == 0) {
-							MessageBox(hDlg, TEXT("A submenu with this name already exists."), TEXT("Rename Submenu"), MB_ICONWARNING);
+							MessageBox(hDlg, TEXT("A submenu with this name already exists."), TEXT("Rename Submenu"), MB_ICONWARNING | MB_TOPMOST);
 							SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
 							return TRUE;
 						}
