@@ -217,9 +217,10 @@ static INT_PTR CALLBACK new_folder_dlg_proc(HWND hDlg, UINT uMsg, WPARAM wParam,
 					&ctx->parent_folder->child : &regist_data.child;
 
 				err_str[0] = TEXT('\0');
-				new_fld = regist_create_folder(dest_root, start, err_str);
+				new_fld = regist_create_folder_path(dest_root, start, err_str);
 				if (new_fld == NULL) {
-					MessageBox(hDlg, TEXT("A submenu with this name already exists."), TEXT("New Submenu"), MB_ICONWARNING | MB_TOPMOST);
+					MessageBox(hDlg, err_str[0] != TEXT('\0') ? err_str :
+						TEXT("Invalid path or submenu already exists."), TEXT("New Submenu"), MB_ICONWARNING | MB_TOPMOST);
 					SetFocus(GetDlgItem(hDlg, IDC_FAV_EDIT_NAME));
 					return TRUE;
 				}

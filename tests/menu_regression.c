@@ -181,7 +181,26 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             EndMenu();
             return 0;
         }
-        if (phase == 0 && IsWindowVisible(idle_menu)) {
+        if (scenario == 20 && phase == 0 && popup_menu && IsWindowVisible(menu_root_wnd)) {
+            GetMenuItemRect(NULL, popup_menu, 1, &rc);
+            test_cursor.x = rc.left + 4;
+            test_cursor.y = rc.top + 7;
+            before_delete = test_cursor;
+            SendMessage(menu_root_wnd, 0x01E5, 1, 0);
+            right_click(hwnd);
+            phase = 50;
+        } else if (scenario == 20 && phase == 50 && popup_menu == NULL && IsWindowVisible(idle_menu)) {
+            HMENU context = (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0);
+            CHECK(GetMenuItemCount(context) == 2, "Favourites root folder context opens");
+            finished = TRUE;
+            phase = 51;
+            key(hwnd, VK_ESCAPE);
+        } else if (scenario == 20 && phase == 51 && popup_menu && !menu_cursor_restore_needed) {
+            CHECK(test_cursor.x == before_delete.x && test_cursor.y == before_delete.y,
+                "Favourites root context keeps cursor on root row");
+            phase = 52;
+            EndMenu();
+        } else if (phase == 0 && IsWindowVisible(idle_menu)) {
             SendMessage(idle_menu, 0x01E5, 0, 0);
             key(hwnd, VK_RIGHT);
             if (--open_steps == 0) phase++;
@@ -469,6 +488,9 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     TCHAR err_str[BUF_SIZE] = {0};
     TCHAR temp_dir[MAX_PATH];
     TCHAR db_file[MAX_PATH];
+    TCHAR saved_path[MAX_PATH];
+    int saved_history_save = option.history_save;
+    int saved_history_max = option.history_max;
     GetTempPath(MAX_PATH, temp_dir);
     lstrcat(temp_dir, TEXT("clcl_test_db_dir"));
     CreateDirectory(temp_dir, NULL);
@@ -509,28 +531,30 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     // 3. Close database
     db_history_close();
 
-    // 4. Simulate app restart: re-initialize DB and load items
-    BOOL reinit_ok = db_history_init(temp_dir);
-    CHECK(reinit_ok, "db_history_init succeeds on simulated restart");
-
-    DATA_INFO *loaded_root = NULL;
-    int loaded_count = db_history_load_recent(10, &loaded_root);
-    CHECK(loaded_count == 3, "All 3 bitmap items survived restart in SQLite");
+    // 4. Simulate startup, including eager loading of history payloads.
+    lstrcpy(saved_path, work_path);
+    lstrcpy(work_path, temp_dir);
+    option.history_save = 1;
+    option.history_max = 30;
+    CHECK(load_history(NULL, 0), "startup history load succeeds");
 
     int verified = 0;
     DATA_INFO *cur;
-    for (cur = loaded_root; cur != NULL; cur = cur->next) {
+    for (cur = history_data.child; cur != NULL; cur = cur->next) {
         CHECK(cur->child != NULL, "loaded bitmap item has child format node");
         CHECK(cur->child != NULL && cur->child->format == CF_BITMAP, "child format is CF_BITMAP");
-        BOOL ensured = db_history_ensure_item_data(cur);
-        CHECK(ensured, "db_history_ensure_item_data succeeds on restart-loaded bitmap");
-        CHECK(cur->child != NULL && cur->child->data != NULL, "bitmap data handle is loaded into memory");
+        CHECK(cur->param2 != 0 && cur->child != NULL && cur->child->data != NULL,
+            "startup loaded bitmap data before menu creation");
         verified++;
     }
     CHECK(verified == 3, "verified all 3 loaded bitmap items");
 
-    data_free(loaded_root);
+    data_free(history_data.child);
+    history_data.child = NULL;
     db_history_close();
+    lstrcpy(work_path, saved_path);
+    option.history_save = saved_history_save;
+    option.history_max = saved_history_max;
 
     // Clean up temporary database files
     wsprintf(db_file, TEXT("%s\\history.db"), temp_dir);
@@ -610,6 +634,30 @@ static void test_date_folder_deletion(void)
     printf("PASS: Date folder deletion removes folder and all contained SQLite items\n");
 }
 
+static void test_favourite_folder_path(void)
+{
+    DATA_INFO *root = NULL, *leaf, *existing;
+    TCHAR mixed[] = TEXT("Parent/Child\\Grandchild");
+    TCHAR reuse[] = TEXT("Parent/Child/Another");
+    TCHAR duplicate[] = TEXT("Parent\\Child/Grandchild");
+    TCHAR invalid[] = TEXT("Parent//Invalid");
+    TCHAR error[BUF_SIZE] = {0};
+
+    leaf = regist_create_folder_path(&root, mixed, error);
+    CHECK(leaf != NULL && lstrcmp(leaf->title, TEXT("Grandchild")) == 0,
+        "mixed separators create deep favourite path");
+    CHECK(root != NULL && root->child != NULL && root->child->child == leaf,
+        "favourite path has nested parents");
+    existing = root->child;
+    CHECK(regist_create_folder_path(&root, reuse, error) != NULL && root->child == existing,
+        "favourite path reuses existing parents");
+    CHECK(regist_create_folder_path(&root, duplicate, error) == NULL,
+        "duplicate favourite path is rejected");
+    CHECK(regist_create_folder_path(&root, invalid, error) == NULL && root->next == NULL,
+        "empty favourite path segment is rejected without mutation");
+    data_free(root);
+}
+
 int main(void)
 {
     HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
@@ -641,7 +689,8 @@ int main(void)
     RegisterClass(&wc);
     owner = CreateWindow(wc.lpszClassName, TEXT("Menu regression"), WS_OVERLAPPED, 0, 0, 100, 100, NULL, NULL, hInst, NULL);
     history_data.type = regist_data.type = TYPE_ROOT;
-    for (scenario = 0; scenario < 20; scenario++) {
+    test_favourite_folder_path();
+    for (scenario = 0; scenario < 21; scenario++) {
     phase = ticks = 0;
     finished = FALSE;
     landing = NULL;
@@ -700,7 +749,7 @@ int main(void)
     }
     items[1].content = MENU_CONTENT_CANCEL;
     items[1].title = TEXT("Cancel");
-    if (scenario == 19) {
+    if (scenario == 19 || scenario == 20) {
         favourite_items.content = MENU_CONTENT_REGIST;
         items[1].content = MENU_CONTENT_POPUP;
         items[1].title = TEXT("Favourites");
@@ -732,6 +781,6 @@ int main(void)
     test_bitmap_serialization();
     test_sqlite_multiple_bitmap_persistence();
     test_date_folder_deletion();
-    printf("%s: 20 native-menu scenarios + bitmap serialization + SQLite multiple bitmap persistence + date folder deletion\n", failures ? "FAILED" : "PASS");
+    printf("%s: 21 native-menu scenarios + bitmap serialization + SQLite multiple bitmap persistence + date folder deletion\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

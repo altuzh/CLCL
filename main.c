@@ -1546,7 +1546,7 @@ static LRESULT CALLBACK menu_msg_filter_proc(int nCode, WPARAM wParam, LPARAM lP
 					}
 					menu_ghost_wnd = menu_ghost_show();
 					menu_rmb_action = RMB_ACTION_FAV_FOLDER_MENU;
-					menu_rmb_target_di = (mii->set_di != &regist_data) ? mii->set_di : NULL;
+					menu_rmb_target_di = mii->set_di != NULL ? mii->set_di : &regist_data;
 					menu_rmb_pt = msg->pt;
 					menu_reopen_requested = TRUE;
 					menu_folder_hover_posted = FALSE;
@@ -2187,7 +2187,9 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 					is_target_fav = FALSE;
 				}
 				menu_reopen_folder_title[0] = TEXT('\0');
-				menu_reopen_is_fav = is_target_fav;
+				// A direct RMB on the root stays on its row; a switched context
+				// keeps the already-open Favourites hierarchy.
+				menu_reopen_is_fav = is_target_fav && (target != &regist_data || menu_reopen_is_fav);
 				menu_reopen_fav_folder = (is_target_fav && parent_folder != &regist_data) ? parent_folder : NULL;
 				if (!is_target_fav && target != NULL && target->type == TYPE_FOLDER && target->title != NULL) {
 					lstrcpyn(menu_reopen_folder_title, target->title, BUF_SIZE);
@@ -2751,6 +2753,18 @@ static BOOL load_history(const HWND hWnd, const int load_flag)
 			}
 		}
 		history_restructure(&history_data.child, option.history_max);
+		if (db_history_is_open()) {
+			DATA_INFO *di, *item;
+			for (di = history_data.child; di != NULL; di = di->next) {
+				if (di->type == TYPE_FOLDER) {
+					for (item = di->child; item != NULL; item = item->next) {
+						if (item->type == TYPE_ITEM) db_history_ensure_item_data(item);
+					}
+				} else if (di->type == TYPE_ITEM) {
+					db_history_ensure_item_data(di);
+				}
+			}
+		}
 	}
 	return TRUE;
 }
@@ -2982,6 +2996,20 @@ static void load_tray_icon(void)
 	tray_icon_size = icon_size;
 }
 
+static void preload_menus(const HWND hWnd)
+{
+	int i;
+	for (i = 0; i < option.action_cnt; i++) {
+		ACTION_INFO *ai = option.action_info + i;
+		if (ai->enable != 0 && ai->action == ACTION_POPUPMEMU) {
+			HMENU menu = menu_create(hWnd, ai->menu_info, ai->menu_cnt,
+				history_data.child, regist_data.child);
+			if (menu != NULL) menu_destory(menu);
+			menu_free();
+		}
+	}
+}
+
 /*
  * winodw_initialize - initialize window
  */
@@ -3009,6 +3037,8 @@ static BOOL winodw_initialize(const HWND hWnd)
 	if (load_regist(hWnd) == FALSE) {
 		return FALSE;
 	}
+	// Prepare item titles, icons and previews before the first menu request.
+	preload_menus(hWnd);
 
 	// Create tooltip
 	hToolTip = tooltip_create(hInst);
@@ -3096,6 +3126,7 @@ static BOOL winodw_reset(const HWND hWnd)
 		_SetForegroundWindow(hWnd);
 		MessageBox(hWnd, err_str, ERROR_TITLE, MB_ICONERROR);
 	}
+	preload_menus(hWnd);
 
 	// Register hotkey
 	regist_hotkey(hWnd, TRUE);
