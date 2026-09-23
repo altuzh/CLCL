@@ -42,6 +42,7 @@ extern BOOL save_regist(const HWND hWnd);
 #define ID_FAV_RENAME_SUBMENU		40006
 #define ID_FAV_FOLDER_BASE			41000
 #define ID_FAV_NEW_SUB_BASE			45000
+#define ID_FAV_INSERT_BASE			46000
 
 #define MAX_FAV_FOLDERS				512
 static DATA_INFO *fav_folder_map[MAX_FAV_FOLDERS];
@@ -523,7 +524,7 @@ static HBITMAP create_menu_bitmap_from_icon(HINSTANCE hInstance, int icon_res_id
 /*
  * favorites_add_item_to_folder - deep-copy clipboard item into target folder in regist_data
  */
-static BOOL favorites_add_item_to_folder(const HWND hWnd, DATA_INFO *cb_item, DATA_INFO *target_folder)
+static BOOL favorites_add_item_to_folder(const HWND hWnd, DATA_INFO *cb_item, DATA_INFO *target_folder, DATA_INFO **insert_at)
 {
 	DATA_INFO **dest_root = (target_folder != NULL) ? &target_folder->child : &regist_data.child;
 	DATA_INFO *copy_di;
@@ -548,65 +549,81 @@ static BOOL favorites_add_item_to_folder(const HWND hWnd, DATA_INFO *cb_item, DA
 	// Remove window name so favorite has clean display
 	mem_free(&copy_di->window_name);
 
-	// Append to target folder
-	if (*dest_root == NULL) {
-		*dest_root = copy_di;
+	// A selected row supplies an insertion link; folder actions still append.
+	if (insert_at != NULL) {
+		dest_root = insert_at;
 	} else {
-		DATA_INFO *cur;
-		for (cur = *dest_root; cur->next != NULL; cur = cur->next)
+		for (; *dest_root != NULL; dest_root = &(*dest_root)->next)
 			;
-		cur->next = copy_di;
 	}
+	copy_di->next = *dest_root;
+	*dest_root = copy_di;
 
 	save_regist(hWnd);
 	return TRUE;
 }
 
-/*
- * favorites_build_submenus - recursively build cascading menus for folder hierarchy
- */
-static void favorites_build_submenus(HMENU hParentMenu, DATA_INFO *folder_head, HBITMAP hBmpFolder)
+/* Store insertion links in menu rows, without creating placeholder data. */
+static BOOL favorites_append_insert_row(HMENU menu, UINT *next_id, const TCHAR *title, DATA_INFO **insert_at)
+{
+	MENUITEMINFO info = {0};
+	TCHAR label[164];
+	int i, n = 0;
+	if (title == NULL || *title == TEXT('\0')) title = TEXT(" ");
+	for (i = 0; title[i] != TEXT('\0') && i < 80; i++) {
+		TCHAR ch = title[i];
+		if (ch == TEXT('&')) label[n++] = ch;
+		label[n++] = ch == TEXT('\r') || ch == TEXT('\n') || ch == TEXT('\t') ? TEXT(' ') : ch;
+	}
+	if (title[i] != TEXT('\0')) {
+		label[n++] = TEXT('.'); label[n++] = TEXT('.'); label[n++] = TEXT('.');
+	}
+	label[n] = TEXT('\0');
+	info.cbSize = sizeof(info);
+	info.fMask = MIIM_ID | MIIM_STRING | MIIM_DATA;
+	info.wID = (*next_id)++;
+	info.dwTypeData = label;
+	info.dwItemData = (ULONG_PTR)insert_at;
+	return InsertMenuItem(menu, (UINT)GetMenuItemCount(menu), TRUE, &info);
+}
+
+static DATA_INFO **favorites_find_insert_pos(HMENU menu, UINT command)
+{
+	int i;
+	for (i = 0; i < GetMenuItemCount(menu); i++) {
+		MENUITEMINFO info = {0};
+		DATA_INFO **insert_at;
+		info.cbSize = sizeof(info);
+		info.fMask = MIIM_ID | MIIM_DATA | MIIM_SUBMENU;
+		if (!GetMenuItemInfo(menu, i, TRUE, &info)) continue;
+		if (info.hSubMenu != NULL) {
+			insert_at = favorites_find_insert_pos(info.hSubMenu, command);
+			if (insert_at != NULL) return insert_at;
+		} else if (info.wID == command) {
+			return (DATA_INFO **)info.dwItemData;
+		}
+	}
+	return NULL;
+}
+
+/* Every folder expands to its ordered contents and selectable insertion slots. */
+static BOOL favorites_build_submenus(HMENU hParentMenu, DATA_INFO **folder_head, HBITMAP hBmpFolder, UINT *next_id)
 {
 	DATA_INFO *di;
 
-	for (di = folder_head; di != NULL; di = di->next) {
+	if (!favorites_append_insert_row(hParentMenu, next_id, TEXT(" "), folder_head)) return FALSE;
+	for (di = *folder_head; di != NULL; di = di->next) {
 		if (di->type != TYPE_FOLDER) {
-			continue;
-		}
-
-		if (fav_folder_cnt >= MAX_FAV_FOLDERS) {
-			break;
-		}
-
-		// Check if this folder has child folders
-		BOOL has_child_folders = FALSE;
-		DATA_INFO *cdi;
-		for (cdi = di->child; cdi != NULL; cdi = cdi->next) {
-			if (cdi->type == TYPE_FOLDER) {
-				has_child_folders = TRUE;
-				break;
-			}
-		}
-
-		if (!has_child_folders) {
-			// Leaf folder: direct menu item
-			int idx = fav_folder_cnt++;
-			fav_folder_map[idx] = di;
-			AppendMenu(hParentMenu, MF_STRING, ID_FAV_FOLDER_BASE + idx, di->title != NULL ? di->title : TEXT("(Folder)"));
-			if (hBmpFolder != NULL) {
-				MENUITEMINFO mii;
-				ZeroMemory(&mii, sizeof(mii));
-				mii.cbSize = sizeof(mii);
-				mii.fMask = MIIM_BITMAP;
-				mii.hbmpItem = hBmpFolder;
-				SetMenuItemInfo(hParentMenu, ID_FAV_FOLDER_BASE + idx, FALSE, &mii);
-			}
+			if (!favorites_append_insert_row(hParentMenu, next_id, data_get_title(di), &di->next)) return FALSE;
 		} else {
-			// Branch folder: cascading submenu
-			HMENU hSub = CreatePopupMenu();
-			int idx = fav_folder_cnt++;
-			fav_folder_map[idx] = di;
+			HMENU hSub;
+			int idx;
 			TCHAR buf[BUF_SIZE];
+			if (fav_folder_cnt >= MAX_FAV_FOLDERS) return FALSE;
+			hSub = CreatePopupMenu();
+			if (hSub == NULL) return FALSE;
+			idx = fav_folder_cnt++;
+			fav_folder_map[idx] = di;
 
 			// "Add to <Folder>" item
 			wsprintf(buf, TEXT("Add to \"%s\""), di->title != NULL ? di->title : TEXT("Folder"));
@@ -622,8 +639,10 @@ static void favorites_build_submenus(HMENU hParentMenu, DATA_INFO *folder_head, 
 
 			AppendMenu(hSub, MF_SEPARATOR, 0, NULL);
 
-			// Recursively add child folders
-			favorites_build_submenus(hSub, di->child, hBmpFolder);
+			if (!favorites_build_submenus(hSub, &di->child, hBmpFolder, next_id)) {
+				DestroyMenu(hSub);
+				return FALSE;
+			}
 
 			AppendMenu(hSub, MF_SEPARATOR, 0, NULL);
 
@@ -640,7 +659,10 @@ static void favorites_build_submenus(HMENU hParentMenu, DATA_INFO *folder_head, 
 			}
 
 			// Attach to parent menu
-			AppendMenu(hParentMenu, MF_POPUP, (UINT_PTR)hSub, di->title != NULL ? di->title : TEXT("(Folder)"));
+			if (!AppendMenu(hParentMenu, MF_POPUP, (UINT_PTR)hSub, di->title != NULL ? di->title : TEXT("(Folder)"))) {
+				DestroyMenu(hSub);
+				return FALSE;
+			}
 			if (hBmpFolder != NULL) {
 				MENUITEMINFO mii;
 				ZeroMemory(&mii, sizeof(mii));
@@ -650,7 +672,9 @@ static void favorites_build_submenus(HMENU hParentMenu, DATA_INFO *folder_head, 
 				SetMenuItemInfo(hParentMenu, (UINT)GetMenuItemCount(hParentMenu) - 1, TRUE, &mii);
 			}
 		}
+		if (!favorites_append_insert_row(hParentMenu, next_id, TEXT(" "), &di->next)) return FALSE;
 	}
+	return TRUE;
 }
 
 /*
@@ -664,8 +688,7 @@ BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt
 	HBITMAP hBmpFolder = NULL;
 	int icon_size;
 	int cmd;
-	BOOL has_subfolders = FALSE;
-	DATA_INFO *cdi;
+	UINT next_id = ID_FAV_INSERT_BASE;
 
 	if (cb_item == NULL) {
 		return FALSE;
@@ -708,16 +731,15 @@ BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt
 		SetMenuItemInfo(hFavSubMenu, ID_FAV_ROOT, FALSE, &mii);
 	}
 
-	// 2. Submenus under regist_data.child
-	for (cdi = regist_data.child; cdi != NULL; cdi = cdi->next) {
-		if (cdi->type == TYPE_FOLDER) {
-			has_subfolders = TRUE;
-			break;
-		}
-	}
-	if (has_subfolders) {
-		AppendMenu(hFavSubMenu, MF_SEPARATOR, 0, NULL);
-		favorites_build_submenus(hFavSubMenu, regist_data.child, hBmpFolder);
+	// 2. Favourite contents and insertion slots, including an empty root.
+	AppendMenu(hFavSubMenu, MF_SEPARATOR, 0, NULL);
+	if (!favorites_build_submenus(hFavSubMenu, &regist_data.child, hBmpFolder, &next_id)) {
+		DestroyMenu(hFavSubMenu);
+		DestroyMenu(hMenu);
+		if (hBmpRegist != NULL) DeleteObject(hBmpRegist);
+		if (hBmpFolder != NULL) DeleteObject(hBmpFolder);
+		MessageBox(hWnd, TEXT("Unable to show all favourite destinations."), TEXT("Error"), MB_ICONERROR);
+		return FALSE;
 	}
 
 	// 3. New Submenu...
@@ -761,18 +783,21 @@ BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt
 		pt.x, pt.y, hWnd, NULL);
 
 	if (cmd == ID_FAV_ROOT) {
-		favorites_add_item_to_folder(hWnd, cb_item, NULL);
+		favorites_add_item_to_folder(hWnd, cb_item, NULL, NULL);
+	} else if (cmd >= ID_FAV_INSERT_BASE && (UINT)cmd < next_id) {
+		DATA_INFO **insert_at = favorites_find_insert_pos(hFavSubMenu, (UINT)cmd);
+		if (insert_at != NULL) favorites_add_item_to_folder(hWnd, cb_item, NULL, insert_at);
 	} else if (cmd >= ID_FAV_FOLDER_BASE && cmd < ID_FAV_FOLDER_BASE + fav_folder_cnt) {
 		DATA_INFO *target_fld = fav_folder_map[cmd - ID_FAV_FOLDER_BASE];
-		favorites_add_item_to_folder(hWnd, cb_item, target_fld);
+		favorites_add_item_to_folder(hWnd, cb_item, target_fld, NULL);
 	} else if (cmd == ID_FAV_NEW_SUBMENU_ROOT) {
 		if (favorites_show_new_folder_dialog(hWnd, NULL) == TRUE && last_created_folder != NULL) {
-			favorites_add_item_to_folder(hWnd, cb_item, last_created_folder);
+			favorites_add_item_to_folder(hWnd, cb_item, last_created_folder, NULL);
 		}
 	} else if (cmd >= ID_FAV_NEW_SUB_BASE && cmd < ID_FAV_NEW_SUB_BASE + fav_folder_cnt) {
 		DATA_INFO *parent_fld = fav_folder_map[cmd - ID_FAV_NEW_SUB_BASE];
 		if (favorites_show_new_folder_dialog(hWnd, parent_fld) == TRUE && last_created_folder != NULL) {
-			favorites_add_item_to_folder(hWnd, cb_item, last_created_folder);
+			favorites_add_item_to_folder(hWnd, cb_item, last_created_folder, NULL);
 		}
 	} else if (cmd == ID_FAV_DELETE) {
 		data_delete(&history_data.child, cb_item, TRUE);

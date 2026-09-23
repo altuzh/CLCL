@@ -25,6 +25,7 @@ static POINT switch_point;
 static RECT switch_row;
 static RECT latest_root_bounds;
 static DATA_INFO *switch_target, *clipboard_selection;
+static int insert_case, insert_phase, insert_ticks;
 
 int menu_show_align(HWND owner, HMENU menu, const POINT *pos, UINT align);
 int test_menu_show_align(HWND owner, HMENU menu, const POINT *pos, UINT align)
@@ -160,6 +161,55 @@ static void check_context_highlight(void)
     ReleaseDC(NULL, screen);
 }
 
+static void test_insert_menu_step(HWND hwnd)
+{
+    HMENU menu;
+    int index = 0;
+    TCHAR label[128];
+    if (++insert_ticks > 30) {
+        CHECK(FALSE, "favourite insertion menu timed out");
+        KillTimer(hwnd, 78);
+        EndMenu();
+        return;
+    }
+    if (!IsWindowVisible(idle_menu)) return;
+    menu = (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0);
+    if (insert_case == 6) {
+        EndMenu();
+        return;
+    }
+    if (insert_phase == 1 && insert_case != 7) {
+        const TCHAR *target = insert_case == 4 ? TEXT("Root anchor") : TEXT("Outer");
+        for (index = 0; index < GetMenuItemCount(menu); index++) {
+            GetMenuString(menu, index, label, 128, MF_BYPOSITION);
+            if (lstrcmp(label, target) == 0) break;
+        }
+        CHECK(index < GetMenuItemCount(menu), "favourite destination is shown in root");
+    } else if (insert_phase == 2) {
+        const TCHAR *target = insert_case == 3 ? TEXT("Empty") : TEXT("Nested");
+        for (index = 0; index < GetMenuItemCount(menu); index++) {
+            GetMenuString(menu, index, label, 128, MF_BYPOSITION);
+            if (lstrcmp(label, target) == 0) break;
+        }
+        CHECK(index < GetMenuItemCount(menu), "nested and empty folders expand");
+    } else if (insert_phase == 3 || (insert_phase == 1 && insert_case == 7)) {
+        MENUITEMINFO info = {0};
+        index = insert_case == 0 ? 3 : insert_case == 2 ? 4 : insert_case == 5 ? 6 : 2;
+        info.cbSize = sizeof(info);
+        info.fMask = MIIM_STATE | MIIM_FTYPE;
+        CHECK(GetMenuItemInfo(menu, index, TRUE, &info) &&
+            !(info.fState & MFS_DISABLED) && !(info.fType & MFT_SEPARATOR),
+            "favourite item and placeholder rows are selectable");
+        GetMenuString(menu, index, label, 128, MF_BYPOSITION);
+        CHECK(lstrcmp(label, insert_case == 0 ? TEXT("First && existing") : TEXT(" ")) == 0,
+            "favourite label is literal and placeholder is blank");
+    }
+    SendMessage(idle_menu, 0x01E5, index, 0);
+    key(hwnd, insert_phase == 3 || (insert_phase == 1 && (insert_case == 4 || insert_case == 7)) ?
+        VK_RETURN : VK_RIGHT);
+    insert_phase++;
+}
+
 static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_ITEM_TO_CLIPBOARD) {
@@ -171,6 +221,10 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_ENTERIDLE && wp == MSGF_MENU) {
         idle_menu = (HWND)lp;
         if (popup_menu && idle_menu == menu_root_wnd) GetWindowRect(idle_menu, &latest_root_bounds);
+    }
+    if (msg == WM_TIMER && wp == 78) {
+        test_insert_menu_step(hwnd);
+        return 0;
     }
     if (msg == WM_TIMER && wp == 77) {
         RECT rc;
@@ -658,6 +712,69 @@ static void test_favourite_folder_path(void)
     data_free(root);
 }
 
+static void test_favourite_insertions(HWND owner)
+{
+    TCHAR error[BUF_SIZE] = {0};
+    POINT pt = {300, 200};
+    for (insert_case = 0; insert_case < 8; insert_case++) {
+        DATA_INFO *outer = data_create_folder(TEXT("Outer"), error);
+        DATA_INFO *nested = data_create_folder(TEXT("Nested"), error);
+        DATA_INFO *empty = data_create_folder(TEXT("Empty"), error);
+        DATA_INFO *first = data_create_item(TEXT("First & existing"), FALSE, error);
+        DATA_INFO *second = data_create_item(TEXT("Second existing"), FALSE, error);
+        DATA_INFO *anchor = data_create_item(TEXT("Root anchor"), FALSE, error);
+        DATA_INFO *source = data_create_item(TEXT("Clipboard copy"), FALSE, error);
+        DATA_INFO **slot, *old_next, *copy;
+        BOOL deleted = FALSE, selected;
+        HGLOBAL payload = GlobalAlloc(GMEM_MOVEABLE, sizeof(TEXT("Clipboard payload")));
+        lstrcpy((TCHAR *)GlobalLock(payload), TEXT("Clipboard payload"));
+        GlobalUnlock(payload);
+        source->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), payload,
+            sizeof(TEXT("Clipboard payload")), FALSE, error);
+        source->window_name = alloc_copy(TEXT("Clipboard source window"));
+        regist_data.child = outer;
+        outer->next = anchor;
+        outer->child = nested;
+        nested->next = empty;
+        nested->child = first;
+        first->next = second;
+        slot = insert_case == 1 ? &nested->child : insert_case == 3 ? &empty->child :
+            insert_case == 4 ? &anchor->next : insert_case == 5 ? &second->next : &first->next;
+        if (insert_case == 7) {
+            data_free(regist_data.child);
+            regist_data.child = NULL;
+            slot = &regist_data.child;
+        }
+        old_next = *slot;
+        insert_phase = insert_ticks = 0;
+        idle_menu = NULL;
+        SetTimer(owner, 78, 100, NULL);
+        selected = favorites_show_add_menu(owner, source, pt, &deleted);
+        KillTimer(owner, 78);
+        CHECK(!deleted, "adding a favourite preserves the clipboard item");
+        if (insert_case == 6) {
+            CHECK(!selected && *slot == old_next, "cancel leaves favourites unchanged");
+        } else {
+            copy = *slot;
+            CHECK(selected && copy != NULL && copy != old_next && copy != source,
+                "selected destination receives a new favourite");
+            if (copy != NULL && copy != old_next) {
+                CHECK(copy->next == old_next, "favourite is inserted at chosen position");
+                CHECK(lstrcmp(copy->title, source->title) == 0 && copy->window_name == NULL,
+                    "inserted favourite retains title without source window name");
+                CHECK(copy->child && copy->child->data && copy->child->data != payload,
+                    "insertion deep copies clipboard content");
+            }
+        }
+        CHECK(source->next == NULL && source->child->data == payload && source->window_name != NULL,
+            "source clipboard item remains unchanged");
+        data_free(regist_data.child);
+        regist_data.child = NULL;
+        data_free(source);
+    }
+    printf("PASS: Favourite insertion into existing rows, blank slots, nested and empty folders, root and cancellation\n");
+}
+
 int main(void)
 {
     HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
@@ -777,6 +894,7 @@ int main(void)
     data_free(regist_data.child);
     history_data.child = regist_data.child = NULL;
     }
+    test_favourite_insertions(owner);
     DestroyWindow(owner);
     test_bitmap_serialization();
     test_sqlite_multiple_bitmap_persistence();
