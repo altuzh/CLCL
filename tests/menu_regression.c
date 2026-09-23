@@ -23,6 +23,7 @@ static HWND idle_menu;
 static POINT before_delete;
 static POINT switch_point;
 static RECT switch_row;
+static RECT latest_root_bounds;
 static DATA_INFO *switch_target, *clipboard_selection;
 
 int menu_show_align(HWND owner, HMENU menu, const POINT *pos, UINT align);
@@ -99,6 +100,8 @@ static BOOL context_mouse(HWND owner, UINT message, POINT point)
 static void check_context_highlight(void)
 {
     MENU_CONTEXT_HIT *hit;
+    MENU_ITEM_INFO *old_item = NULL;
+    DRAWITEMSTRUCT draw = {0};
     RECT old_row = {0}, new_row = {0};
     HDC screen, source, canvas;
     HBITMAP bitmap, prior, source_prior;
@@ -106,9 +109,12 @@ static void check_context_highlight(void)
     int old_x, old_y, new_x, new_y;
     CHECK(menu_context_highlight && menu_context_highlight->set_di == switch_target,
         "highlight tracks the newly right-clicked clipboard item");
-    CHECK(menu_context_original != menu_context_highlight, "old and new highlighted items differ");
+    CHECK(menu_context_original == menu_context_highlight, "replacement snapshot starts on new selection");
     for (hit = menu_context_hits; hit; hit = hit->next) {
-        if (hit->item == menu_context_original) old_row = hit->rect;
+        if (hit->item->set_di == folder->child) {
+            old_row = hit->rect;
+            old_item = hit->item;
+        }
         if (hit->item == menu_context_highlight) new_row = hit->rect;
     }
     CHECK(!IsRectEmpty(&old_row) && !IsRectEmpty(&new_row), "both highlighted rows were captured");
@@ -128,7 +134,20 @@ static void check_context_highlight(void)
     new_y = (new_row.top + new_row.bottom) / 2 - menu_ghost_rect.top;
     old_before = GetPixel(canvas, old_x, old_y);
     new_before = GetPixel(canvas, new_x, new_y);
-    menu_context_draw_highlight(canvas);
+    draw.CtlType = ODT_MENU;
+    draw.hDC = canvas;
+    draw.itemID = old_item->id;
+    draw.itemData = (ULONG_PTR)old_item;
+    draw.itemState = ODS_SELECTED;
+    draw.rcItem = old_row;
+    OffsetRect(&draw.rcItem, -menu_ghost_rect.left, -menu_ghost_rect.top);
+    menu_drawitem(&draw);
+    draw.itemID = menu_context_highlight->id;
+    draw.itemData = (ULONG_PTR)menu_context_highlight;
+    draw.itemState = 0;
+    draw.rcItem = new_row;
+    OffsetRect(&draw.rcItem, -menu_ghost_rect.left, -menu_ghost_rect.top);
+    menu_drawitem(&draw);
     old_after = GetPixel(canvas, old_x, old_y);
     new_after = GetPixel(canvas, new_x, new_y);
     CHECK(old_after != old_before, "old clipboard highlight is cleared");
@@ -149,8 +168,10 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     if (msg == WM_CREATE || msg == WM_DESTROY || msg == WM_HISTORY_CHANGED || msg == WM_REGIST_CHANGED)
         return 0; /* Never invoke application startup, persistence, or shutdown. */
-    if (msg == WM_ENTERIDLE && wp == MSGF_MENU)
+    if (msg == WM_ENTERIDLE && wp == MSGF_MENU) {
         idle_menu = (HWND)lp;
+        if (popup_menu && idle_menu == menu_root_wnd) GetWindowRect(idle_menu, &latest_root_bounds);
+    }
     if (msg == WM_TIMER && wp == 77) {
         RECT rc;
         HMENU sub = popup_menu ? target_menu(scenario == 6 || scenario == 7 ? landing : folder) : NULL;
@@ -176,8 +197,8 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (scenario == 1 || scenario == 4 || scenario == 6 || scenario == 7 || scenario >= 11) {
                 phase = scenario >= 11 ? 40 : 10;
                 if (scenario >= 11) {
-                    if (scenario == 16) {
-                        switch_target = folder->next;
+                    if (scenario >= 16) {
+                        switch_target = scenario == 19 ? &regist_data : folder->next;
                         GetMenuItemRect(NULL, popup_menu, 1, &switch_row);
                     } else {
                         switch_target = folder->child->next;
@@ -185,6 +206,20 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     }
                     switch_point.x = switch_row.left + 4;
                     switch_point.y = switch_row.top + 7;
+                    if (scenario >= 17) switch_point.y = switch_row.bottom - 2;
+                }
+                if (scenario >= 17) {
+                    GetMenuItemRect(NULL, popup_menu, 0, &rc);
+                    test_cursor.x = rc.left + 4;
+                    test_cursor.y = rc.top + 7;
+                    SendMessage(menu_root_wnd, 0x01E5, 0, 0);
+                    {
+                        MENUITEMINFO info = {0};
+                        info.cbSize = sizeof(info);
+                        info.fMask = MIIM_DATA;
+                        GetMenuItemInfo(popup_menu, 0, TRUE, &info);
+                        current_selected_mii = (MENU_ITEM_INFO *)info.dwItemData;
+                    }
                 }
                 right_click(hwnd);
             } else {
@@ -198,6 +233,10 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RECT overlap;
             POINT point;
             GetWindowRect(idle_menu, &rc);
+            if (scenario >= 17) {
+                CHECK(GetMenuItemCount((HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0)) == 1,
+                    "initial context belongs to date folder");
+            }
             if (IntersectRect(&overlap, &rc, &switch_row)) {
                 point.x = overlap.left + 1;
                 point.y = overlap.top + 1;
@@ -226,6 +265,29 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         } else if (phase == 41 && popup_menu == NULL && IsWindowVisible(idle_menu)) {
             HMENU context = (HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0);
             CHECK(menu_context_pick == NULL, "replacement context menu has started");
+            if (scenario >= 17) {
+                MENU_CONTEXT_HIT *hit;
+                BOOL found_child = FALSE;
+                CHECK(menu_context_highlight && menu_context_highlight->set_di == switch_target,
+                    "new context target selected after date context");
+                for (hit = menu_context_hits; hit; hit = hit->next) {
+                    CHECK(hit->item->set_di != folder->child && hit->item->set_di != folder->child->next,
+                        "previous date subitems absent from replacement snapshot");
+                    if (hit->item->set_di == switch_target->child) found_child = TRUE;
+                }
+                if (scenario == 17) {
+                    CHECK(EqualRect(&menu_ghost_rect, &latest_root_bounds),
+                        "clipboard context snapshot contains only root panel");
+                } else {
+                    CHECK(found_child, "new date or Favourites items visible before context menu");
+                }
+                CHECK(test_cursor.x == switch_point.x && test_cursor.y == switch_point.y,
+                    "context switch does not move cursor");
+                finished = TRUE;
+                phase = 47;
+                key(hwnd, VK_ESCAPE);
+                return 0;
+            }
             check_context_highlight();
             SendMessage(idle_menu, 0x01E5, scenario == 13 ? 0 : GetMenuItemCount(context) - 1, 0);
             key(hwnd, scenario == 13 ? VK_RIGHT : VK_RETURN);
@@ -247,6 +309,11 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 "clipboard menu restored after switched action");
             CHECK(clipboard_selection == NULL, "RMB does not run LMB action");
             finished = TRUE;
+            EndMenu();
+        } else if (phase == 47 && popup_menu && !menu_cursor_restore_needed) {
+            CHECK((HMENU)SendMessage(idle_menu, MN_GETHMENU, 0, 0) ==
+                (scenario == 17 ? popup_menu : target_menu(switch_target)),
+                "dismissed context returns to new target hierarchy");
             EndMenu();
         } else if (phase == 46 && popup_menu && !menu_cursor_restore_needed) {
             CHECK(IsWindowVisible(idle_menu), "main menu remained open after LMB on date folder");
@@ -574,7 +641,7 @@ int main(void)
     RegisterClass(&wc);
     owner = CreateWindow(wc.lpszClassName, TEXT("Menu regression"), WS_OVERLAPPED, 0, 0, 100, 100, NULL, NULL, hInst, NULL);
     history_data.type = regist_data.type = TYPE_ROOT;
-    for (scenario = 0; scenario < 17; scenario++) {
+    for (scenario = 0; scenario < 20; scenario++) {
     phase = ticks = 0;
     finished = FALSE;
     landing = NULL;
@@ -592,7 +659,10 @@ int main(void)
         history_data.child = folder;
         items[0].content = MENU_CONTENT_HISTORY;
         open_steps = 1;
-        if (scenario == 16) {
+        if (scenario == 17) {
+            folder->next = data_create_item(TEXT("Root clipboard item"), FALSE, error);
+            folder->next->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), NULL, 0, FALSE, error);
+        } else if (scenario == 16 || scenario == 18) {
             folder->next = data_create_folder(TEXT("Second date"), error);
             folder->next->child = data_create_item(TEXT("Third disposable item"), FALSE, error);
             folder->next->child->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), NULL, 0, FALSE, error);
@@ -630,6 +700,15 @@ int main(void)
     }
     items[1].content = MENU_CONTENT_CANCEL;
     items[1].title = TEXT("Cancel");
+    if (scenario == 19) {
+        favourite_items.content = MENU_CONTENT_REGIST;
+        items[1].content = MENU_CONTENT_POPUP;
+        items[1].title = TEXT("Favourites");
+        items[1].mi = &favourite_items;
+        items[1].mi_cnt = 1;
+        regist_data.child = data_create_item(TEXT("Favourite clipboard item"), FALSE, error);
+        regist_data.child->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), NULL, 0, FALSE, error);
+    }
     action.menu_info = items;
     action.menu_cnt = 2;
     action.paste = (scenario == 11 || scenario == 14) ? 1 : 0;
@@ -653,6 +732,6 @@ int main(void)
     test_bitmap_serialization();
     test_sqlite_multiple_bitmap_persistence();
     test_date_folder_deletion();
-    printf("%s: 17 native-menu scenarios + bitmap serialization + SQLite multiple bitmap persistence + date folder deletion\n", failures ? "FAILED" : "PASS");
+    printf("%s: 20 native-menu scenarios + bitmap serialization + SQLite multiple bitmap persistence + date folder deletion\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

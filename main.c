@@ -20,8 +20,10 @@
 #include <tchar.h>
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <dwmapi.h>
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 #include "General.h"
 #include "Memory.h"
@@ -141,6 +143,7 @@ static MENU_ITEM_INFO *menu_context_pressed, *menu_context_pick;
 static MENU_ITEM_INFO *menu_context_original, *menu_context_highlight;
 static UINT menu_context_button;
 static BOOL menu_context_left;
+static DATA_INFO *menu_context_reopen_target;
 static BOOL menu_reopen_requested = FALSE;
 static MENU_ITEM_INFO *current_selected_mii = NULL;
 static HWND main_window_handle = NULL;
@@ -180,6 +183,8 @@ static BOOL menu_prune_empty_parent(DATA_INFO *root, DATA_INFO *parent_folder, c
 static void menu_record_reopen_position(HWND menu_wnd);
 static BOOL menu_delete_current_item(void);
 static LRESULT CALLBACK menu_msg_filter_proc(int nCode, WPARAM wParam, LPARAM lParam);
+static void menu_context_clear_hits(void);
+static BOOL CALLBACK menu_context_capture_items(HWND hwnd, LPARAM unused);
 static BOOL tray_hover_active = FALSE;
 static DWORD tray_hover_start_tick = 0;
 static POINT tray_hover_pos = {0, 0};
@@ -799,6 +804,43 @@ static void menu_position_cursor_in_submenu(HWND hwndSub)
 	if (!GetWindowRect(hwndSub, &rcSub) || IsRectEmpty(&rcSub)) {
 		return;
 	}
+	if (menu_context_reopen_target != NULL) {
+		DATA_INFO *target = menu_context_reopen_target;
+		MENU_CONTEXT_HIT *hit;
+		MENU_ITEM_INFO *selected = NULL;
+		BOOL is_fav = target == &regist_data || data_check(&regist_data, target) != NULL;
+		BOOL is_folder = target == &regist_data || target->type == TYPE_FOLDER;
+		idx = menu_find_data_index(actual, target);
+		if (idx >= 0) {
+			SendMessage(hwndSub, 0x01E5 /* MN_SELECTITEM */, (WPARAM)idx, 0);
+		}
+		// Discard the previous hierarchy before capturing the newly laid-out menus.
+		menu_ghost_hide();
+		if (!EnumThreadWindows(GetCurrentThreadId(), menu_context_capture_items, 0)) {
+			menu_context_clear_hits();
+		}
+		for (hit = menu_context_hits; hit != NULL; hit = hit->next) {
+			if (hit->item->set_di == target || (target == &regist_data && hit->item->is_favourites &&
+				hit->item->set_di == NULL)) {
+				selected = hit->item;
+				break;
+			}
+		}
+		menu_context_reopen_target = NULL;
+		if (selected != NULL) {
+			menu_context_original = menu_context_highlight = selected;
+			menu_ghost_wnd = menu_ghost_show();
+			menu_rmb_action = is_fav ? (is_folder ? RMB_ACTION_FAV_FOLDER_MENU : RMB_ACTION_FAV_ITEM_MENU) :
+				(is_folder ? RMB_ACTION_DATE_FOLDER_MENU : RMB_ACTION_ADD_TO_FAVORITES);
+			menu_rmb_target_di = target->type == TYPE_DATA ?
+				data_check(is_fav ? &regist_data : &history_data, target) : target;
+			menu_cursor_restore_needed = FALSE;
+			menu_reopen_requested = TRUE;
+			KillTimer(main_window_handle, ID_MENU_HOVER_SAFETY_TIMER);
+			EndMenu();
+			return;
+		}
+	}
 	// Keep the pointer unchanged unless the menu shrank or its parent became
 	// the landing menu. Clamp to a real row, not a border or scroll arrow.
 	pt = menu_cursor_restore_pt;
@@ -918,24 +960,20 @@ static void menu_record_reopen_position(HWND menu_wnd)
 		UINT align = 0;
 		POINT reopen_pt;
 
-		if (menu_wnd_rect.right >= rcWork.right - Scale(64)) {
+		if (menu_wnd_rect.right >= rcWork.right - Scale(64) || menu_wnd_rect.right >= mi.rcMonitor.right - Scale(64)) {
 			align |= TPM_RIGHTALIGN;
-			reopen_pt.x = (menu_wnd_rect.right >= rcWork.right - Scale(8) || menu_wnd_rect.right > rcWork.right) ?
-				rcWork.right : menu_wnd_rect.right;
+			reopen_pt.x = menu_wnd_rect.right;
 		} else {
 			align |= TPM_LEFTALIGN;
-			reopen_pt.x = (menu_wnd_rect.left <= rcWork.left + Scale(8) || menu_wnd_rect.left < rcWork.left) ?
-				rcWork.left : menu_wnd_rect.left;
+			reopen_pt.x = menu_wnd_rect.left;
 		}
 
-		if (menu_wnd_rect.bottom >= rcWork.bottom - Scale(64)) {
+		if (menu_wnd_rect.bottom >= rcWork.bottom - Scale(64) || menu_wnd_rect.bottom >= mi.rcMonitor.bottom - Scale(64)) {
 			align |= TPM_BOTTOMALIGN;
-			reopen_pt.y = (menu_wnd_rect.bottom >= rcWork.bottom - Scale(8) || menu_wnd_rect.bottom > rcWork.bottom) ?
-				rcWork.bottom : menu_wnd_rect.bottom;
+			reopen_pt.y = menu_wnd_rect.bottom;
 		} else {
 			align |= TPM_TOPALIGN;
-			reopen_pt.y = (menu_wnd_rect.top <= rcWork.top + Scale(8) || menu_wnd_rect.top < rcWork.top) ?
-				rcWork.top : menu_wnd_rect.top;
+			reopen_pt.y = menu_wnd_rect.top;
 		}
 
 		menu_reopen_align = align;
@@ -1061,8 +1099,8 @@ static MENU_ITEM_INFO *menu_get_item_from_point(const POINT pt)
 	HWND hWndMenu = WindowFromPoint(pt);
 	TCHAR cls[32] = {0};
 	MENUITEMINFO minfo;
+	HMENU hMenu;
 	int idx;
-	int count, i, subCount, s;
 
 	if (hWndMenu == NULL) {
 		if (current_selected_mii != NULL) {
@@ -1088,53 +1126,15 @@ static MENU_ITEM_INFO *menu_get_item_from_point(const POINT pt)
 	minfo.cbSize = sizeof(minfo);
 	minfo.fMask = MIIM_DATA;
 
-	// 1. Try current_menu_handle if valid
-	if (current_menu_handle != NULL) {
-		idx = menu_item_from_point_ex(hWndMenu, current_menu_handle, pt);
-		if (idx >= 0 && GetMenuItemInfo(current_menu_handle, idx, TRUE, &minfo) && minfo.dwItemData != 0) {
+	// The window under the pointer owns the row. A previously selected submenu
+	// can report an overlapping row when queried with a different menu window.
+	hMenu = (HMENU)SendMessage(hWndMenu, MN_GETHMENU, 0, 0);
+	if (hMenu != NULL) {
+		idx = menu_item_from_point_ex(hWndMenu, hMenu, pt);
+		if (idx >= 0 && GetMenuItemInfo(hMenu, idx, TRUE, &minfo) && minfo.dwItemData != 0) {
 			return (MENU_ITEM_INFO *)minfo.dwItemData;
 		}
 	}
-
-	// 2. Search all submenus of popup_menu (including date folders and favourites submenus)
-	if (popup_menu != NULL) {
-		count = GetMenuItemCount(popup_menu);
-		for (i = 0; i < count; i++) {
-			HMENU hSub = GetSubMenu(popup_menu, i);
-			if (hSub != NULL) {
-				idx = menu_item_from_point_ex(hWndMenu, hSub, pt);
-				if (idx >= 0 && GetMenuItemInfo(hSub, idx, TRUE, &minfo) && minfo.dwItemData != 0) {
-					return (MENU_ITEM_INFO *)minfo.dwItemData;
-				}
-				// Also search nested submenus (e.g. Favourites subfolders)
-				subCount = GetMenuItemCount(hSub);
-				for (s = 0; s < subCount; s++) {
-					HMENU hSubSub = GetSubMenu(hSub, s);
-					if (hSubSub != NULL) {
-						idx = menu_item_from_point_ex(hWndMenu, hSubSub, pt);
-						if (idx >= 0 && GetMenuItemInfo(hSubSub, idx, TRUE, &minfo) && minfo.dwItemData != 0) {
-							return (MENU_ITEM_INFO *)minfo.dwItemData;
-						}
-					}
-				}
-			}
-		}
-
-		// 3. Try popup_menu (root menu)
-		idx = menu_item_from_point_ex(hWndMenu, popup_menu, pt);
-		if (idx >= 0 && GetMenuItemInfo(popup_menu, idx, TRUE, &minfo) && minfo.dwItemData != 0) {
-			return (MENU_ITEM_INFO *)minfo.dwItemData;
-		}
-	}
-
-	// 4. Fallback to current_selected_mii or current_menu_id
-	if (current_selected_mii != NULL) {
-		return current_selected_mii;
-	}
-	if (current_menu_id >= ID_MENUITEM_DATA) {
-		return menu_get_info(current_menu_id);
-	}
-
 	return NULL;
 }
 
@@ -1204,11 +1204,37 @@ static BOOL CALLBACK menu_enum_windows_proc(HWND hwnd, LPARAM lParam)
 			lstrcmp(cls, TEXT("#32768")) == 0) {
 			RECT *pRect = (RECT *)lParam;
 			RECT rc;
+			RedrawWindow(hwnd, NULL, NULL,
+				RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
 			GetWindowRect(hwnd, &rc);
 			if (IsRectEmpty(pRect)) {
 				*pRect = rc;
 			} else {
 				UnionRect(pRect, pRect, &rc);
+			}
+		}
+	}
+	return TRUE;
+}
+
+/*
+ * menu_ghost_prep_submenus - prepare submenu background area for owner-draw painting
+ */
+static BOOL CALLBACK menu_ghost_prep_submenus(HWND hwnd, LPARAM lParam)
+{
+	if (IsWindowVisible(hwnd) && hwnd != menu_root_wnd) {
+		TCHAR cls[32] = {0};
+		if (GetClassName(hwnd, cls, sizeof(cls) / sizeof(TCHAR)) > 0 &&
+			lstrcmp(cls, TEXT("#32768")) == 0) {
+			HDC hdcMem = (HDC)lParam;
+			RECT rcClient;
+			GetClientRect(hwnd, &rcClient);
+			MapWindowPoints(hwnd, NULL, (LPPOINT)&rcClient, 2);
+			OffsetRect(&rcClient, -menu_ghost_rect.left, -menu_ghost_rect.top);
+			HBRUSH hBr = CreateSolidBrush(dark_mode_is_dark() ? RGB(58, 58, 58) : RGB(255, 255, 255));
+			if (hBr != NULL) {
+				FillRect(hdcMem, &rcClient, hBr);
+				DeleteObject(hBr);
 			}
 		}
 	}
@@ -1239,6 +1265,10 @@ static HWND menu_ghost_show(void)
 	if (w <= 0 || h <= 0) {
 		return NULL;
 	}
+	// Owner-draw completion precedes desktop composition. Present every menu
+	// panel before BitBlt can freeze an unpainted submenu into the ghost.
+	GdiFlush();
+	DwmFlush();
 
 	if (!registered) {
 		WNDCLASS wc;
@@ -1266,10 +1296,28 @@ static HWND menu_ghost_show(void)
 		return NULL;
 	}
 
+	menu_ghost_rect = rc;
 	menu_ghost_bmp = CreateCompatibleBitmap(hdcScreen, w, h);
 	if (menu_ghost_bmp != NULL) {
+		MENU_CONTEXT_HIT *hit;
 		hOld = (HBITMAP)SelectObject(hdcMem, menu_ghost_bmp);
-		BitBlt(hdcMem, 0, 0, w, h, hdcScreen, rc.left, rc.top, SRCCOPY);
+		BitBlt(hdcMem, 0, 0, w, h, hdcScreen, rc.left, rc.top, SRCCOPY | CAPTUREBLT);
+		if (menu_context_hits != NULL) {
+			EnumThreadWindows(GetCurrentThreadId(), menu_ghost_prep_submenus, (LPARAM)hdcMem);
+			for (hit = menu_context_hits; hit != NULL; hit = hit->next) {
+				if (hit->item != NULL && (hit->item->is_folder_child || hit->item == menu_context_highlight)) {
+					DRAWITEMSTRUCT draw = {0};
+					draw.CtlType = ODT_MENU;
+					draw.itemID = hit->item->id;
+					draw.itemData = (ULONG_PTR)hit->item;
+					draw.itemState = (hit->item == menu_context_highlight) ? ODS_SELECTED : 0;
+					draw.hDC = hdcMem;
+					draw.rcItem = hit->rect;
+					OffsetRect(&draw.rcItem, -rc.left, -rc.top);
+					menu_drawitem(&draw);
+				}
+			}
+		}
 		SelectObject(hdcMem, hOld);
 	}
 	DeleteDC(hdcMem);
@@ -1279,7 +1327,6 @@ static HWND menu_ghost_show(void)
 		return NULL;
 	}
 
-	menu_ghost_rect = rc;
 	hWndGhost = CreateWindowEx(
 		WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TRANSPARENT,
 		TEXT("CLCL_MenuGhost"),
@@ -1310,6 +1357,7 @@ static void menu_ghost_hide(void)
 		menu_ghost_bmp = NULL;
 	}
 	SetRectEmpty(&menu_ghost_rect);
+	menu_context_clear_hits();
 }
 
 /*
@@ -1454,6 +1502,24 @@ static LRESULT CALLBACK menu_msg_filter_proc(int nCode, WPARAM wParam, LPARAM lP
 				mii = current_selected_mii;
 			}
 			if (mii != NULL) {
+				if ((mii->is_favourites && (mii->is_folder || (mii->flag & MF_POPUP))) ||
+					(mii->set_di != NULL && data_check(&history_data, mii->set_di) != NULL && mii->set_di->type == TYPE_FOLDER)) {
+					HWND hTargetWnd = (hMenuWnd != NULL && IsWindow(hMenuWnd)) ? hMenuWnd :
+						((menu_root_wnd != NULL && IsWindow(menu_root_wnd)) ? menu_root_wnd : FindWindow(TEXT("#32768"), NULL));
+					if (hTargetWnd != NULL && IsWindow(hTargetWnd)) {
+						HMENU hCurMenu = (HMENU)SendMessage(hTargetWnd, MN_GETHMENU, 0, 0);
+						if (hCurMenu != NULL) {
+							int idx = MenuItemFromPoint(hTargetWnd, hCurMenu, msg->pt);
+							if (idx < 0 && mii->set_di != NULL) {
+								idx = menu_find_data_index(hCurMenu, mii->set_di);
+							}
+							if (idx >= 0) {
+								SendMessage(hTargetWnd, 0x01E5 /* MN_SELECTITEM */, (WPARAM)idx, 0);
+								SendMessage(hTargetWnd, 0x01E3 /* MN_OPENHIERARCHY */, 0, 0);
+							}
+						}
+					}
+				}
 				menu_context_clear_hits();
 				if (!EnumThreadWindows(GetCurrentThreadId(), menu_context_capture_items, 0)) {
 					menu_context_clear_hits();
@@ -1570,6 +1636,8 @@ static LRESULT CALLBACK menu_msg_filter_proc(int nCode, WPARAM wParam, LPARAM lP
 				TCHAR cls[32] = {0};
 				GetClassName(hMenuWnd, cls, sizeof(cls) / sizeof(TCHAR));
 				if (lstrcmp(cls, TEXT("#32768")) == 0) {
+					// An unhandled right-click must not leave the menu ignoring input.
+					EndMenu();
 					return 1;
 				}
 			}
@@ -2001,11 +2069,13 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 	menu_reopen_align = TPM_TOPALIGN | TPM_LEFTALIGN;
 	menu_reopen_fav_folder = NULL;
 	menu_reopen_fav_ancestor = NULL;
+	menu_context_reopen_target = NULL;
 	SetRectEmpty(&favourites_menu_item_rect);
 
 	for (;;) {
 		const POINT *show_pos = (has_reopen_pos == TRUE) ? &menu_reopen_pos : ((caret_flag == TRUE) ? &fi.cpos : NULL);
-		const UINT show_align = (has_reopen_pos == TRUE) ? menu_reopen_align : (TPM_TOPALIGN | TPM_LEFTALIGN);
+		const UINT show_align = ((has_reopen_pos == TRUE) ? menu_reopen_align : (TPM_TOPALIGN | TPM_LEFTALIGN)) |
+			(menu_context_reopen_target != NULL ? TPM_NOANIMATION : 0);
 
 		// Adjust to DPI of display monitor
 		menu_set_dpi(show_pos);
@@ -2013,6 +2083,8 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 		popup_menu = menu_create(hWnd, ai->menu_info, ai->menu_cnt, history_data.child, regist_data.child);
 		if (popup_menu == NULL) {
 			menu_free();
+			KillTimer(hWnd, ID_MENU_HOVER_SAFETY_TIMER);
+			menu_ghost_hide();
 			has_reopen_pos = FALSE;
 			menu_reopen_align = TPM_TOPALIGN | TPM_LEFTALIGN;
 			return FALSE;
@@ -2021,11 +2093,21 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 			menu_destory(popup_menu);
 			popup_menu = NULL;
 			menu_free();
+			KillTimer(hWnd, ID_MENU_HOVER_SAFETY_TIMER);
+			menu_ghost_hide();
 			has_reopen_pos = FALSE;
 			menu_reopen_align = TPM_TOPALIGN | TPM_LEFTALIGN;
 			return FALSE;
 		}
 
+		// A clipboard row can be flattened onto the root despite having a date parent.
+		if (menu_context_reopen_target != NULL && menu_context_reopen_target->type != TYPE_FOLDER &&
+			menu_context_reopen_target != &regist_data &&
+			menu_find_data_index(popup_menu, menu_context_reopen_target) >= 0) {
+			menu_reopen_folder_title[0] = TEXT('\0');
+			menu_reopen_is_fav = FALSE;
+			menu_reopen_fav_folder = NULL;
+		}
 		// Show menu
 		attached = menu_attach_begin(hWnd, fi.active_wnd, attach);
 		if (attached == FALSE) {
@@ -2107,7 +2189,9 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 				menu_reopen_folder_title[0] = TEXT('\0');
 				menu_reopen_is_fav = is_target_fav;
 				menu_reopen_fav_folder = (is_target_fav && parent_folder != &regist_data) ? parent_folder : NULL;
-				if (parent_folder != NULL && parent_folder != &history_data && parent_folder != &regist_data && parent_folder->title != NULL) {
+				if (!is_target_fav && target != NULL && target->type == TYPE_FOLDER && target->title != NULL) {
+					lstrcpyn(menu_reopen_folder_title, target->title, BUF_SIZE);
+				} else if (parent_folder != NULL && parent_folder != &history_data && parent_folder != &regist_data && parent_folder->title != NULL) {
 					lstrcpyn(menu_reopen_folder_title, parent_folder->title, BUF_SIZE);
 				}
 				menu_context_pressed = menu_context_pick = NULL;
@@ -2135,24 +2219,39 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 				}
 				target = menu_context_pick->set_di;
 				pt = menu_rmb_pt;
+				if (target == NULL && menu_context_pick->is_favourites) {
+					target = &regist_data;
+				}
+				if (target != NULL) {
+					menu_context_reopen_target = target;
+					break;
+				}
 			}
 			menu_context_clear_hits();
-			if (menu_context_pick != NULL && menu_context_left) {
+			if (menu_context_pick != NULL && (menu_context_left || menu_context_reopen_target != NULL)) {
 				BOOL is_folder = menu_context_pick->is_folder ||
 					(menu_context_pick->flag & MF_POPUP) ||
 					(menu_context_pick->set_di != NULL && menu_context_pick->set_di->type == TYPE_FOLDER) ||
 					menu_context_pick->set_di == &regist_data;
 
-				if (is_folder) {
-					DATA_INFO *target_folder = menu_context_pick->set_di;
+				if (is_folder || menu_context_reopen_target != NULL) {
+					DATA_INFO *target_folder = menu_context_reopen_target != NULL ?
+						menu_context_reopen_target : menu_context_pick->set_di;
 					BOOL is_fav = (target_folder == &regist_data) || menu_context_pick->is_favourites;
 					if (target_folder != NULL && !is_fav) {
 						if (data_check(&regist_data, target_folder) != NULL) {
 							is_fav = TRUE;
 						}
 					}
+					if (menu_context_reopen_target != NULL &&
+						((target_folder->type != TYPE_FOLDER && target_folder != &regist_data) || target_folder->child == NULL)) {
+						target_folder = data_check(is_fav ? &regist_data : &history_data, target_folder);
+						while (target_folder != NULL && target_folder->type != TYPE_FOLDER && target_folder->type != TYPE_ROOT) {
+							target_folder = data_check(is_fav ? &regist_data : &history_data, target_folder);
+						}
+					}
 					menu_reopen_folder_title[0] = TEXT('\0');
-					menu_reopen_is_fav = is_fav;
+					menu_reopen_is_fav = is_fav && target_folder != NULL;
 					menu_reopen_fav_folder = NULL;
 					if (is_fav) {
 						if (target_folder != NULL && target_folder != &regist_data && target_folder->type == TYPE_FOLDER && target_folder->title != NULL) {
@@ -2162,7 +2261,7 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 					} else {
 						if (target_folder != NULL && target_folder->type == TYPE_FOLDER && target_folder->title != NULL) {
 							lstrcpyn(menu_reopen_folder_title, target_folder->title, BUF_SIZE);
-						} else if (menu_context_pick->text != NULL) {
+						} else if (menu_context_reopen_target == NULL && menu_context_pick->text != NULL) {
 							lstrcpyn(menu_reopen_folder_title, menu_context_pick->text, BUF_SIZE);
 						}
 					}
@@ -3330,6 +3429,7 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 		// Hide tooltip
 		tooltip_hide(hToolTip);
 		if (!menu_delete_requested && !menu_reopen_requested) {
+			menu_context_reopen_target = NULL;
 			SetRectEmpty(&menu_wnd_rect);
 			SetRectEmpty(&menu_sel_rect);
 			has_reopen_pos = FALSE;
@@ -3372,14 +3472,18 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 		if ((HWND)wParam == hClipNextWnd && (HWND)lParam != hWnd) {
 			hClipNextWnd = (HWND)lParam;
 		} else if (hClipNextWnd != NULL && hClipNextWnd != hWnd) {
-			SendMessage(hClipNextWnd, msg, wParam, lParam);
+			DWORD_PTR result;
+			SendMessageTimeout(hClipNextWnd, msg, wParam, lParam,
+				SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &result);
 		}
 		break;
 
 	case WM_DRAWCLIPBOARD:
 		// Clipboard monitoring
 		if (hClipNextWnd != NULL && hClipNextWnd != hWnd) {
-			SendMessage(hClipNextWnd, msg, wParam, lParam);
+			DWORD_PTR result;
+			SendMessageTimeout(hClipNextWnd, msg, wParam, lParam,
+				SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &result);
 		}
 		if (clip_flag == TRUE) {
 			// Do not add to history
@@ -3598,6 +3702,10 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 		case ID_MENU_HOVER_SAFETY_TIMER:
 			KillTimer(hWnd, ID_MENU_HOVER_SAFETY_TIMER);
+			menu_context_reopen_target = NULL;
+			if (popup_menu != NULL && menu_cursor_restore_needed) {
+				EndMenu();
+			}
 			if (menu_ghost_wnd != NULL) {
 				menu_ghost_hide();
 			}

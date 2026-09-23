@@ -26,6 +26,6 @@ See [.ai-context/PROJECT.md](file:///C:/Users/al/projects/CLCL/.ai-context/PROJE
 - **In-Place Submenu Positioning**: When a submenu appears after deletion, keep the cursor positioned in-place over the remaining items via `menu_position_cursor_in_submenu`.
 - **Empty Submenus**: Prune empty History folders only. Preserve user-created Favourites folders when their last item is deleted; return to the parent menu over the retained folder (`active_submenu_item_rect`). Delete a Favourites folder only when explicitly requested.
 - **Ghost Window Transparency**: `menu_ghost_wnd` (`CLCL_MenuGhost`) must remain transparent to mouse clicks (`WS_EX_TRANSPARENT` and `WM_NCHITTEST: return HTTRANSPARENT`) so hit-testing reaches underlying `#32768` menu windows.
+- **Context Target Changes**: Rebuild the visible hierarchy and ghost before opening context on another item; highlight-only updates retain stale date panels. Hit-test the actual window's `MN_GETHMENU`. See `.ai-context/PROJECT.md` sections 4.4-4.7 for the state flow and `tests/menu-regression.ps1` checks.
 - **Delete Key Interception**: `menu_msg_filter_proc` (`WH_MSGFILTER`) must consume `VK_DELETE` (`return 1`) on both `WM_KEYDOWN` and `WM_KEYUP` to prevent Windows default popup menu dismissal.
 - **Cloud OAuth Client ID**: Always use Client ID `8a6ce5d366014eb4b2b0ab1f65926a6b` for Yandex OAuth. Never change it or revert to any other client ID.
-

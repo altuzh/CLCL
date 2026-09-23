@@ -1,6 +1,6 @@
 # CLCL Project Memory & Architecture Context
 
-Last verified: 2026-09-20. This document contains persistent project context, architecture, operational workflows, and critical regression prevention knowledge for AI coding assistants working on the CLCL codebase.
+Architecture baseline: 2026-09-20. Menu mechanics and regression checks updated: 2026-09-23. This document contains persistent project context, architecture, operational workflows, and critical regression prevention knowledge for AI coding assistants working on the CLCL codebase.
 
 ---
 
@@ -81,43 +81,78 @@ Last verified: 2026-09-20. This document contains persistent project context, ar
 ## 4. Critical Regression Knowledge & Best Practices
 
 ### 4.1 Menu Persistence on Deletions & Actions
-- When deleting an item via `Delete` key or right-click menu:
-  1. Record restore state (`menu_cursor_restore_pt`, `menu_cursor_restore_needed = TRUE`).
-  2. If inside a date folder: record `menu_reopen_folder_title = parent_folder->title`, `menu_reopen_is_fav = FALSE`.
-  3. If inside Favourites: record `menu_reopen_is_fav = TRUE`, and if inside a subfolder, record its title.
-  4. Capture ghost screenshot via `menu_ghost_show()`.
-  5. Delete data node via `data_delete`.
-  6. If a History folder becomes empty, prune it. If a Favourites folder becomes empty, retain it and its ancestors; delete such folders only on explicit folder deletion. Restore the parent menu with `menu_cursor_restore_pt` over the retained folder (`active_submenu_item_rect`).
-  7. Set `menu_delete_requested = TRUE; menu_reopen_requested = TRUE; EndMenu();`.
-  8. Outer loop in `main.c` (`menu_show`) detects `menu_delete_requested || menu_reopen_requested`, calls `menu_create`, and redisplays `TrackPopupMenu` at the exact saved screen coordinates and alignment (`has_reopen_pos`, `menu_reopen_pos`, `menu_reopen_align`).
+
+- `show_popup_menu` owns the outer create/track/destroy/reopen loop. `popup_menu != NULL` also prevents reentrant main-menu opening.
+- For keyboard Delete, `menu_delete_current_item` records `menu_delete_target`, cursor/position state and reopen flags, captures the ghost, then calls `EndMenu`. **Do not free the target during native tracking:** owner-draw teardown can still reference it. After tracking returns and `menu_destory` destroys the native menu, `menu_delete_pending_item` mutates the tree.
+- Context-menu actions run after the main native menu has been destroyed. Their result determines deletion, pruning and restoration before the next iteration.
+- `menu_prune_empty_parent` prunes empty History folders. Favourites folders survive deletion of their last item; restore to their parent over the retained folder. Delete a Favourites folder only through an explicit folder action.
+- Preserve root coordinates and monitor-edge alignment through `has_reopen_pos`, `menu_reopen_pos` and `menu_reopen_align`. `menu_free` releases menu-item metadata; saved `MENU_ITEM_INFO *` values must not survive it.
 
 ### 4.2 Cursor Stability: NO Cursor Teleportation
 - **NEVER use `SetCursorPos` to simulate hovering on parent menus.**
-  - Win32 popup menus enforce `SPI_GETMENUSHOWDELAY` (400 ms) for mouse hover transitions. Teleporting the cursor to the root menu forces the cursor across the screen and immediately dismisses the date submenu.
+  - Win32 has a configurable submenu hover delay. Moving the real cursor to the root can dismiss the submenu being restored.
 - **Submenu reopening mechanism (`menu_open_reopen_folder` in `main.c`):**
   - Finds folder index in `popup_menu` via `menu_find_folder_index`.
-  - Sends internal Win32 menu window messages directly to the root menu window `#32768`:
-    - `0x01E5` (`MN_SELECTITEM`): selects the folder item index.
-    - `0x01E3` (`MN_OPENHIERARCHY`): opens the submenu hierarchy immediately.
-  - Sends simulated `WM_MOUSEMOVE` to the menu window at folder coordinates without moving the physical cursor.
-  - Posts `WM_KEYDOWN, VK_RIGHT` and `WM_KEYUP, VK_RIGHT` to ensure keyboard navigation expands the hierarchy.
-  - Subclasses submenu windows via `menu_subclass_enum_proc`.
+  - Selects the parent using internal message `0x01E5` (`MN_SELECTITEM`), then posts `VK_RIGHT` down/up so Windows opens the hierarchy after layout. The initial RMB folder path also uses `0x01E3` (`MN_OPENHIERARCHY`). These are internal Windows messages; retain native regression coverage when changing them.
   - Guarded by `menu_folder_hover_posted` so it executes once per reopening.
+  - `WM_ENTERIDLE` drives restoration. Nested Favourites use `menu_reopen_fav_folder`, `menu_reopen_fav_ancestor` and `menu_next_folder_on_path` to open one ancestor at a time.
 - **In-place cursor positioning (`menu_position_cursor_in_submenu` in `main.c`):**
-  - When the newly opened submenu window `#32768` appears, the physical cursor is already inside the submenu area (`menu_cursor_restore_pt`).
-  - Only clamps `pt.y` if the submenu shrank due to deletion (`rcSub.bottom - Scale(12)`).
-  - Sends `WM_MOUSEMOVE` and a 1-pixel `mouse_event` jiggle (`1, 0` then `-1, 0`) to force Windows menu to update its hot-tracking highlight.
-  - Clears `menu_cursor_restore_needed`, resets reopen titles, and hides the ghost window.
+  - Requires a visible window, valid layout and the expected `HMENU` from `MN_GETHMENU`. An ancestor repaint must not complete restoration intended for a child.
+  - For ordinary restoration, keep `menu_cursor_restore_pt` if it still hits a row; otherwise clamp to the nearest real row after shrinking/reparenting. Select that row and post `WM_MOUSEMOVE`; the existing `SetCursorPos` here is for landing/clamping, never hierarchy navigation.
+  - The pending-context branch described below returns before cursor positioning, so switching context targets does not move the pointer.
+  - Successful restoration clears pending restore state, kills the safety timer and hides the ghost.
 
 ### 4.3 Anti-Flicker Ghost Window (`CLCL_MenuGhost`)
+
 - Implemented in `main.c`:
   - `menu_ghost_show`: Takes a `BitBlt` capture of all `#32768` windows before `EndMenu()` and creates a window with `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST`.
   - Must return `HTTRANSPARENT` in `menu_ghost_wnd_proc` for `WM_NCHITTEST` so hit testing passes cleanly through to menu windows.
-  - `menu_ghost_hide`: Safely hides and destroys the ghost window once the new menu is drawn and ready.
+  - The ghost is a static bitmap, not a live submenu. Changing a highlight cannot close an obsolete panel or populate another folder.
+  - Before capture, visible native menu windows are synchronously redrawn, followed by `GdiFlush`/`DwmFlush`. When context hit rows exist, `menu_ghost_prep_submenus` prepares panel backgrounds and `menu_drawitem` renders folder children and the highlighted row into the bitmap. Capturing before paint/composition can freeze a blank panel.
+  - `menu_ghost_hide` destroys the window/bitmap **and clears captured hit rows and highlight pointers**. Rebuild hits after hiding the old ghost, before making a replacement snapshot.
 
-### 4.4 Right-Click Context Menus (`Favorites.c`, `Favorites.h`)
+### 4.4 Right-Click Context Menus (`main.c`, `Favorites.c`, `History.c`)
+
 - Right-clicking items in popup menus:
-  - **History item:** Opens context menu to Add to Favourites (`favorites_show_add_menu`).
-  - **History date folder:** Expands the date folder in place without closing.
+  - **History item:** Opens Add to Favourites / Delete context menu (`favorites_show_add_menu`).
+  - **History date folder:** Expands its items and opens Delete Submenu (`history_show_folder_menu`).
   - **Favourites item:** Opens context menu with Delete option (`favorites_show_item_menu`).
-  - **Favourites subfolder:** Opens context menu with Create Subfolder and Delete Folder options (`favorites_show_folder_menu`).
+  - **Favourites root/subfolder:** Opens folder actions (`favorites_show_folder_menu`). Normalize a root row with no `set_di` to `&regist_data` when switching targets.
+- `menu_get_item_from_point` uses `WindowFromPoint` and that window's `MN_GETHMENU`. Do not search `current_menu_handle` or unrelated submenus first: querying a different menu with the clicked window can return an overlapping, stale row. This previously selected a child instead of the clicked date folder.
+- While a context menu tracks, the main native menu has already been destroyed (`popup_menu == NULL`), but its metadata and ghost remain. `menu_context_capture_items` records visible rows for `menu_context_filter_proc` to handle clicks on the ghost.
+- Live context windows, including cascading children, take precedence over ghost rows. A press followed by release outside the rows must not choose a new target. LMB follows ordinary item/folder selection; RMB changes context target.
+
+### 4.5 Switching Context Targets: Rebuild the Visible Hierarchy
+
+The regression was date Delete menu -> RMB on a root clipboard (CB) item: the CB row highlighted, but the old date items stayed visible. The old inner context loop reused the same ghost bitmap.
+
+Current flow:
+
+1. `menu_context_filter_proc` records the picked row and point, then ends context tracking.
+2. `show_popup_menu` saves the stable `DATA_INFO *` in `menu_context_reopen_target`. Resolve the desired hierarchy: a nonempty folder opens itself; a leaf/empty folder needs its parent. Nested Favourites preserve their ancestor path.
+3. Release old row metadata and rebuild the main native menu with `TPM_NOANIMATION`. Check whether the target leaf appears directly in the rebuilt root: History can flatten a CB item onto the root even when its data parent is a date folder. In that case, clear the date/Favourites reopen path.
+4. At `WM_ENTERIDLE`, open the required hierarchy. Once `menu_position_cursor_in_submenu` sees the expected menu and valid bounds, select the target leaf if present, hide the old ghost, recapture visible rows and repaint/capture the replacement ghost.
+5. Resolve the new context action, clear `menu_context_reopen_target`, mark reopen requested and end native tracking. The outer loop then opens the new context menu against the replacement snapshot.
+
+Required outcomes: date -> root CB has no date panel or stale date hit rows; date -> another date shows the new date's items; date -> Favourites shows Favourites items. The pointer stays in place. Do not replace this sequence with highlight-only painting or reuse old `MENU_ITEM_INFO *` pointers after `menu_free`.
+
+### 4.6 Exit and Blocking Safeguards
+
+- `WM_EXITMENULOOP` preserves restoration only for deliberate delete/reopen transitions; context-menu exits have `popup_menu == NULL` and must not clear the saved main-menu state.
+- `ID_MENU_HOVER_SAFETY_TIMER` (800 ms) ends unresolved native restoration before clearing pending targets, restore flags and the ghost. Menu-creation failures also clear the ghost and timer.
+- Unhandled RMB on a native menu must have a dismissal path rather than being swallowed forever. Keep Delete consumption on both keydown and keyup.
+- Clipboard viewer-chain forwarding uses bounded `SendMessageTimeout` (200 ms, `SMTO_ABORTIFHUNG | SMTO_BLOCK`); an unresponsive external viewer must not indefinitely block this UI thread.
+
+### 4.7 Menu Regression Checks
+
+After building Release objects, run the existing native harness:
+
+```powershell
+rtk powershell -ExecutionPolicy Bypass -File .\tests\menu-regression.ps1
+```
+
+- `tests/menu_regression.c` includes production `main.c` and exercises real Win32 menu tracking, drawing and hooks on a separate, non-input desktop. It substitutes cursor I/O and persistence/clipboard dispatch; menu scenarios do not operate on the user's history. Other checks use temporary bitmap/SQLite test data.
+- Verified 2026-09-23: 20 native-menu scenarios plus bitmap serialization, SQLite persistence and date-folder deletion passed. Scenarios 17/18/19 cover date context -> root CB / another date / Favourites. They check target identity, removal of old date hit rows, new folder contents, cursor stability and restoration; the CB case also requires the ghost bounds to equal the root panel bounds. Earlier scenarios cover deletion, retained empty Favourites, nested folders, alignment, LMB/RMB switching and rendered selection changes.
+- Keep test clicks outside the live context rectangle. A click on a covered row is correctly routed to the context menu, not the ghost.
+- Required deployment gate remains `build-deploy.ps1 -Deploy -Restart`: Release|x86/v145, no warnings/errors, confirmed new PID. Last code change passed this gate.
+- Native checks do not replace interactive visual confirmation on the user's desktop. That confirmation was still pending after the last fix; do not record the user's original visual issue as independently confirmed resolved.
