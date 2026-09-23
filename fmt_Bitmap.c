@@ -138,6 +138,26 @@ __declspec(dllexport) BYTE* CALLBACK bitmap_data_to_bytes(const DATA_INFO *di, D
 	if (di->format_name == NULL || lstrcmpi(di->format_name, TEXT("BITMAP")) == 0) {
 		return bitmap_to_dib((HBITMAP)di->data, ret_size);
 	}
+	if (lstrcmpi(di->format_name, TEXT("DIB")) == 0) {
+		DWORD sz = di->size;
+		if (sz == 0) {
+			sz = (DWORD)GlobalSize(di->data);
+		}
+		if (sz > 0) {
+			BYTE *src = (BYTE *)GlobalLock(di->data);
+			if (src != NULL) {
+				BYTE *buf = (BYTE *)mem_alloc(sz);
+				if (buf != NULL) {
+					CopyMemory(buf, src, sz);
+					if (ret_size != NULL) {
+						*ret_size = sz;
+					}
+				}
+				GlobalUnlock(di->data);
+				return buf;
+			}
+		}
+	}
 	return NULL;
 }
 

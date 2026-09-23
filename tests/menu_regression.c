@@ -371,6 +371,102 @@ static void test_bitmap_serialization(void)
     printf("PASS: Bitmap serialization/deserialization and thumbnail generation\n");
 }
 
+static HBITMAP create_solid_bitmap(int w, int h, COLORREF color)
+{
+    HDC hdc = GetDC(NULL);
+    HDC mem_dc = CreateCompatibleDC(hdc);
+    HBITMAP hbmp = CreateCompatibleBitmap(hdc, w, h);
+    HBITMAP old_bmp = (HBITMAP)SelectObject(mem_dc, hbmp);
+    HBRUSH brush = CreateSolidBrush(color);
+    RECT rc = {0, 0, w, h};
+    FillRect(mem_dc, &rc, brush);
+    DeleteObject(brush);
+    SelectObject(mem_dc, old_bmp);
+    DeleteDC(mem_dc);
+    ReleaseDC(NULL, hdc);
+    return hbmp;
+}
+
+static void test_sqlite_multiple_bitmap_persistence(void)
+{
+    TCHAR err_str[BUF_SIZE] = {0};
+    TCHAR temp_dir[MAX_PATH];
+    TCHAR db_file[MAX_PATH];
+    GetTempPath(MAX_PATH, temp_dir);
+    lstrcat(temp_dir, TEXT("clcl_test_db_dir"));
+    CreateDirectory(temp_dir, NULL);
+
+    // Ensure cleanly closed before starting
+    db_history_close();
+
+    // 1. Initialize DB
+    BOOL init_ok = db_history_init(temp_dir);
+    CHECK(init_ok, "db_history_init succeeds");
+
+    // 2. Create and save 3 distinct bitmap items
+    HBITMAP bmp1 = create_solid_bitmap(16, 16, RGB(255, 0, 0));
+    HBITMAP bmp2 = create_solid_bitmap(24, 24, RGB(0, 255, 0));
+    HBITMAP bmp3 = create_solid_bitmap(32, 32, RGB(0, 0, 255));
+
+    DATA_INFO *item1 = data_create_item(TEXT("(BITMAP)"), FALSE, err_str);
+    item1->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), (HANDLE)bmp1, 0, FALSE, err_str);
+    data_set_modified(item1);
+
+    DATA_INFO *item2 = data_create_item(TEXT("(BITMAP)"), FALSE, err_str);
+    item2->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), (HANDLE)bmp2, 0, FALSE, err_str);
+    data_set_modified(item2);
+
+    DATA_INFO *item3 = data_create_item(TEXT("(BITMAP)"), FALSE, err_str);
+    item3->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), (HANDLE)bmp3, 0, FALSE, err_str);
+    data_set_modified(item3);
+
+    BOOL s1 = db_history_save_item(item1);
+    BOOL s2 = db_history_save_item(item2);
+    BOOL s3 = db_history_save_item(item3);
+    CHECK(s1 && s2 && s3, "db_history_save_item succeeds for all 3 bitmaps");
+
+    data_free(item1);
+    data_free(item2);
+    data_free(item3);
+
+    // 3. Close database
+    db_history_close();
+
+    // 4. Simulate app restart: re-initialize DB and load items
+    BOOL reinit_ok = db_history_init(temp_dir);
+    CHECK(reinit_ok, "db_history_init succeeds on simulated restart");
+
+    DATA_INFO *loaded_root = NULL;
+    int loaded_count = db_history_load_recent(10, &loaded_root);
+    CHECK(loaded_count == 3, "All 3 bitmap items survived restart in SQLite");
+
+    int verified = 0;
+    DATA_INFO *cur;
+    for (cur = loaded_root; cur != NULL; cur = cur->next) {
+        CHECK(cur->child != NULL, "loaded bitmap item has child format node");
+        CHECK(cur->child != NULL && cur->child->format == CF_BITMAP, "child format is CF_BITMAP");
+        BOOL ensured = db_history_ensure_item_data(cur);
+        CHECK(ensured, "db_history_ensure_item_data succeeds on restart-loaded bitmap");
+        CHECK(cur->child != NULL && cur->child->data != NULL, "bitmap data handle is loaded into memory");
+        verified++;
+    }
+    CHECK(verified == 3, "verified all 3 loaded bitmap items");
+
+    data_free(loaded_root);
+    db_history_close();
+
+    // Clean up temporary database files
+    wsprintf(db_file, TEXT("%s\\history.db"), temp_dir);
+    DeleteFile(db_file);
+    wsprintf(db_file, TEXT("%s\\history.db-shm"), temp_dir);
+    DeleteFile(db_file);
+    wsprintf(db_file, TEXT("%s\\history.db-wal"), temp_dir);
+    DeleteFile(db_file);
+    RemoveDirectory(temp_dir);
+
+    printf("PASS: SQLite multiple bitmap persistence across restart\n");
+}
+
 int main(void)
 {
     HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
@@ -473,6 +569,7 @@ int main(void)
     }
     DestroyWindow(owner);
     test_bitmap_serialization();
-    printf("%s: 16 native-menu scenarios (Delete, Favourites, cursor positioning, LMB/RMB context switching) + bitmap serialization\n", failures ? "FAILED" : "PASS");
+    test_sqlite_multiple_bitmap_persistence();
+    printf("%s: 16 native-menu scenarios + bitmap serialization + SQLite multiple bitmap persistence\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

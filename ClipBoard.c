@@ -479,7 +479,10 @@ BYTE *clipboard_data_to_bytes(const DATA_INFO *di, DWORD *ret_size)
 			break;
 		}
 		size = di->size;
-		if ((ret = mem_alloc(size)) == NULL) {
+		if (size == 0 && di->data != NULL) {
+			size = (DWORD)GlobalSize(di->data);
+		}
+		if (size == 0 || (ret = mem_alloc(size)) == NULL) {
 			GlobalUnlock(di->data);
 			break;
 		}

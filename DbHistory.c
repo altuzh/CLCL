@@ -145,11 +145,6 @@ BOOL db_history_init(const TCHAR *work_path)
 		"  JOIN item_formats f ON i.id = f.item_id "
 		"  WHERE f.format_name = 'BITMAP' AND (f.data IS NULL OR f.data_size = 0)"
 		");", NULL, NULL, NULL);
-	// Deduplicate multiple identical (BITMAP) items
-	sqlite3_exec(db,
-		"DELETE FROM items WHERE title = '(BITMAP)' AND id NOT IN ("
-		"  SELECT MAX(id) FROM items WHERE title = '(BITMAP)'"
-		");", NULL, NULL, NULL);
 	sqlite3_exec(db, "DELETE FROM items WHERE id NOT IN (SELECT DISTINCT item_id FROM item_formats);", NULL, NULL, NULL);
 	sqlite3_exec(db, "DELETE FROM item_formats WHERE item_id NOT IN (SELECT id FROM items);", NULL, NULL, NULL);
 	sqlite3_exec(db, "DELETE FROM history_fts WHERE docid NOT IN (SELECT id FROM items);", NULL, NULL, NULL);
@@ -243,12 +238,6 @@ BOOL db_history_save_item(DATA_INFO *item)
 				}
 			} else if (text_content != NULL && last_txt != NULL) {
 				if (wcscmp((const WCHAR *)text_content, last_txt) == 0) {
-					is_dup = TRUE;
-				}
-			} else if (text_content == NULL && last_txt == NULL) {
-				if (last_title != NULL && item_title != NULL &&
-					wcscmp((const WCHAR *)item_title, last_title) == 0 &&
-					(int)total_size == last_size) {
 					is_dup = TRUE;
 				}
 			}
@@ -462,10 +451,6 @@ int db_history_load_recent(const int limit, DATA_INFO **out_root)
 				}
 			} else if (txt != NULL && last_loaded_text != NULL) {
 				if (wcscmp(txt, last_loaded_text) == 0) {
-					continue;
-				}
-			} else if (txt == NULL && last_loaded_text == NULL && title != NULL && last_loaded_title[0] != L'\0') {
-				if (wcscmp(title, last_loaded_title) == 0) {
 					continue;
 				}
 			}
