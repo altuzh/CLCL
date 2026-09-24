@@ -861,7 +861,11 @@ static MENU_ITEM_INFO *menu_create_info(MENU_INFO *menu_info, const int menu_cnt
 		switch ((menu_info + i)->content) {
 		case MENU_CONTENT_SEPARATOR:
 		case MENU_CONTENT_POPUP:
+			(*ret_cnt)++;
+			break;
 		case MENU_CONTENT_VIEWER:
+			*ret_cnt += 2; // Viewer and New snip.
+			break;
 		case MENU_CONTENT_OPTION:
 		case MENU_CONTENT_CLIPBOARD_WATCH:
 		case MENU_CONTENT_APP:
@@ -1010,6 +1014,14 @@ static MENU_ITEM_INFO *menu_create_info(MENU_INFO *menu_info, const int menu_cnt
 			(mii + j)->text = alloc_copy(((menu_info + i)->title == NULL || *(menu_info + i)->title == TEXT('\0')) ?
 				message_get_res(IDS_MENU_VIEWER) : (menu_info + i)->title);
 			(mii + j)->icon = menu_read_icon((menu_info + i)->icon_path, (menu_info + i)->icon_index, MENU_ICON_SIZE);
+			(mii + j)->free_icon = TRUE;
+			j++;
+			(mii + j)->id = ID_MENUITEM_NEW_SNIP;
+			(mii + j)->flag = MF_OWNERDRAW;
+			(mii + j)->item = (LPCTSTR)(mii + j);
+			(mii + j)->text = alloc_copy(TEXT("New snip"));
+			(mii + j)->icon = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDR_PIN_CROP), IMAGE_ICON,
+				MENU_ICON_SIZE, MENU_ICON_SIZE, 0);
 			(mii + j)->free_icon = TRUE;
 			j++;
 			break;
@@ -1661,7 +1673,8 @@ BOOL menu_drawitem(const DRAWITEMSTRUCT *ds)
 		hRetFont = SelectObject(draw_dc, hFont);
 
 		left_margin += MENU_TEXT_MARGIN_LEFT;
-		SetRect(&draw_rect, left_margin, 0, width - MENU_TEXT_MARGIN_RIGHT, height);
+		SetRect(&draw_rect, left_margin, 0,
+			width - MENU_TEXT_MARGIN_RIGHT, height);
 		if (mii->hkey == NULL) {
 			DrawText(draw_dc,
 				mii->text, lstrlen(mii->text),
@@ -1733,7 +1746,6 @@ BOOL menu_drawitem(const DRAWITEMSTRUCT *ds)
 		SetRect(&draw_rect, width - arrow_size, 0, width, height);
 		menu_draw_arrow(draw_dc, &draw_rect, text_color);
 	}
-
 	// Draw to menu
 	BitBlt(ds->hDC,
 		ds->rcItem.left, ds->rcItem.top,

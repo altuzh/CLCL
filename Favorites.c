@@ -24,6 +24,7 @@
 #include "dpi.h"
 #include "DbHistory.h"
 #include "Favorites.h"
+#include "PinnedImage.h"
 #include "resource.h"
 
 /* Global Variables */
@@ -40,6 +41,7 @@ extern BOOL save_regist(const HWND hWnd);
 #define ID_FAV_DELETE_SUBMENU		40004
 #define ID_FAV_DELETE_ITEM			40005
 #define ID_FAV_RENAME_SUBMENU		40006
+#define ID_FAV_EDIT_BITMAP			40007
 #define ID_FAV_FOLDER_BASE			41000
 #define ID_FAV_NEW_SUB_BASE			45000
 #define ID_FAV_INSERT_BASE			46000
@@ -680,7 +682,7 @@ static BOOL favorites_build_submenus(HMENU hParentMenu, DATA_INFO **folder_head,
 /*
  * favorites_show_add_menu - display standard Win32 cascading context menu for adding item to favorites
  */
-BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt, BOOL *deleted)
+BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt, BOOL *deleted, BOOL *edit)
 {
 	HMENU hMenu;
 	HMENU hFavSubMenu;
@@ -696,6 +698,7 @@ BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt
 	if (deleted != NULL) {
 		*deleted = FALSE;
 	}
+	if (edit != NULL) *edit = FALSE;
 
 	icon_size = GetSystemMetrics(SM_CXSMICON);
 	if (icon_size <= 0) {
@@ -754,6 +757,10 @@ BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt
 		SetMenuItemInfo(hFavSubMenu, ID_FAV_NEW_SUBMENU_ROOT, FALSE, &mii);
 	}
 
+	if (pinned_image_has_bitmap(cb_item)) {
+		AppendMenu(hMenu, MF_STRING, ID_FAV_EDIT_BITMAP, TEXT("&Edit image..."));
+		AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+	}
 	// In root context menu: Add to Favorites >
 	AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFavSubMenu, TEXT("Add to Favorites"));
 	if (hBmpRegist != NULL) {
@@ -782,7 +789,9 @@ BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt
 	cmd = TrackPopupMenuEx(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
 		pt.x, pt.y, hWnd, NULL);
 
-	if (cmd == ID_FAV_ROOT) {
+	if (cmd == ID_FAV_EDIT_BITMAP) {
+		if (edit != NULL) *edit = TRUE;
+	} else if (cmd == ID_FAV_ROOT) {
 		favorites_add_item_to_folder(hWnd, cb_item, NULL, NULL);
 	} else if (cmd >= ID_FAV_INSERT_BASE && (UINT)cmd < next_id) {
 		DATA_INFO **insert_at = favorites_find_insert_pos(hFavSubMenu, (UINT)cmd);
@@ -916,7 +925,7 @@ BOOL favorites_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POI
 /*
  * favorites_show_item_menu - display RMB context menu for item within Favourites
  */
-BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT pt, BOOL *deleted)
+BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT pt, BOOL *deleted, BOOL *edit)
 {
 	HMENU hMenu;
 	UINT cmd;
@@ -928,10 +937,15 @@ BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT 
 	if (deleted != NULL) {
 		*deleted = FALSE;
 	}
+	if (edit != NULL) *edit = FALSE;
 
 	hMenu = CreatePopupMenu();
 	if (hMenu == NULL) {
 		return FALSE;
+	}
+	if (pinned_image_has_bitmap(fav_item)) {
+		AppendMenu(hMenu, MF_STRING, ID_FAV_EDIT_BITMAP, TEXT("&Edit image..."));
+		AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
 	}
 
 	icon_size = GetSystemMetrics(SM_CXSMICON);
@@ -968,7 +982,9 @@ BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT 
 	cmd = TrackPopupMenuEx(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_RIGHTBUTTON,
 		pt.x, pt.y, hWnd, NULL);
 
-	if (cmd == ID_FAV_DELETE_ITEM) {
+	if (cmd == ID_FAV_EDIT_BITMAP) {
+		if (edit != NULL) *edit = TRUE;
+	} else if (cmd == ID_FAV_DELETE_ITEM) {
 		data_delete(&regist_data.child, fav_item, TRUE);
 		if (deleted != NULL) {
 			*deleted = TRUE;
@@ -999,6 +1015,6 @@ BOOL favorites_show_add_dialog(const HWND hWnd, DATA_INFO *cb_item)
 {
 	POINT pt;
 	GetCursorPos(&pt);
-	return favorites_show_add_menu(hWnd, cb_item, pt, NULL);
+	return favorites_show_add_menu(hWnd, cb_item, pt, NULL, NULL);
 }
 /* End of source */

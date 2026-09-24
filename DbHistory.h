@@ -24,6 +24,7 @@ static __inline BOOL db_history_init(const TCHAR *work_path) { return FALSE; }
 static __inline void db_history_close(void) {}
 static __inline BOOL db_history_is_open(void) { return FALSE; }
 static __inline BOOL db_history_save_item(DATA_INFO *item) { return FALSE; }
+static __inline BOOL db_history_update_item(DATA_INFO *item) { return FALSE; }
 static __inline BOOL db_history_delete_item(const int id) { return FALSE; }
 static __inline BOOL db_history_trim(const int max_count) { return FALSE; }
 static __inline int db_history_load_recent(const int limit, DATA_INFO **out_root) { return 0; }
@@ -41,6 +42,7 @@ void db_history_close(void);
 BOOL db_history_is_open(void);
 
 BOOL db_history_save_item(DATA_INFO *item);
+BOOL db_history_update_item(DATA_INFO *item);
 BOOL db_history_delete_item(const int id);
 BOOL db_history_trim(const int max_count);
 

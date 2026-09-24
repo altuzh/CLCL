@@ -168,6 +168,7 @@
     <ClCompile Include="Menu.c" />
     <ClCompile Include="Message.c" />
     <ClCompile Include="OleDragDrop.c" />
+    <ClCompile Include="PinnedImage.c" />
     <ClCompile Include="Profile.c" />
     <ClCompile Include="Regist.c" />
     <ClCompile Include="Search.c" />
@@ -225,6 +226,7 @@
     <ClInclude Include="Menu.h" />
     <ClInclude Include="Message.h" />
     <ClInclude Include="OleDragDrop.h" />
+    <ClInclude Include="PinnedImage.h" />
     <ClInclude Include="Profile.h" />
     <ClInclude Include="Regist.h" />
     <ClInclude Include="resource.h" />

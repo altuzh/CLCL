@@ -69,6 +69,8 @@ typedef struct _TOOLTIP_INFO {
 	int top;
 	RECT anchor_rect;
 	HWND hWnd;
+	HWND hover_wnd;
+	RECT hover_rect;
 } TOOLTIP_INFO;
 
 // DPI when tooltip font was created
@@ -339,9 +341,11 @@ static LRESULT CALLBACK tooltip_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 				DeleteObject(ti->hbmp);
 				ti->hbmp = NULL;
 			}
+			ti->hbmp = NULL;
 			ti->free_bmp = FALSE;
 			ti->bmp_width = 0;
 			ti->bmp_height = 0;
+			ti->hover_wnd = NULL;
 		}
 		break;
 
@@ -367,6 +371,8 @@ static LRESULT CALLBACK tooltip_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 			ti->pt.x = src->pt.x;
 			ti->pt.y = src->pt.y;
 			ti->anchor_rect = src->anchor_rect;
+			ti->hover_wnd = src->hover_wnd;
+			ti->hover_rect = src->hover_rect;
 
 			// Get window
 			if (ti->pt.x == 0 && ti->pt.y == 0 && (ti->anchor_rect.right <= ti->anchor_rect.left)) {
@@ -407,6 +413,14 @@ static LRESULT CALLBACK tooltip_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 			if (ti->buf == NULL && ti->hbmp == NULL) {
 				SendMessage(hWnd, WM_TOOLTIP_HIDE, 0, 0);
 				break;
+			}
+			if (ti->hover_wnd != NULL) {
+				GetCursorPos(&pt);
+				if (!IsWindowVisible(ti->hover_wnd) || WindowFromPoint(pt) != ti->hover_wnd ||
+					!PtInRect(&ti->hover_rect, pt)) {
+					SendMessage(hWnd, WM_TOOLTIP_HIDE, 0, 0);
+					break;
+				}
 			}
 
 			// Get display position (mouse position)
@@ -689,13 +703,21 @@ static LRESULT CALLBACK tooltip_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 
 		case ID_MOUSE_TIMER:
 			if ((ti = (TOOLTIP_INFO *)GetWindowLong(hWnd, GWL_USERDATA)) == NULL ||
-				ti->hWnd == NULL || IsWindowVisible(hWnd) == FALSE) {
+				IsWindowVisible(hWnd) == FALSE) {
 				KillTimer(hWnd, wParam);
 				break;
 			}
+			if (ti->hover_wnd != NULL) {
+				GetCursorPos(&pt);
+				if (!IsWindowVisible(ti->hover_wnd) || WindowFromPoint(pt) != ti->hover_wnd ||
+					!PtInRect(&ti->hover_rect, pt))
+					SendMessage(hWnd, WM_TOOLTIP_HIDE, 0, 0);
+				break;
+			}
+			if (ti->hWnd == NULL) { KillTimer(hWnd, wParam); break; }
 			// Check window under mouse
 			GetCursorPos(&pt);
-			if (ti->pt.x != pt.x && ti->pt.y != pt.y && ti->hWnd != WindowFromPoint(pt)) {
+			if ((ti->pt.x != pt.x || ti->pt.y != pt.y) && ti->hWnd != WindowFromPoint(pt)) {
 				SendMessage(hWnd, WM_TOOLTIP_HIDE, 0, 0);
 				break;
 			}
@@ -720,7 +742,7 @@ BOOL tooltip_show(const HWND hToolTip, TCHAR *tip_text, const long x, const long
 /*
  * tooltip_show_image_delay - display tooltip with image after specified delay
  */
-BOOL tooltip_show_image_delay(const HWND hToolTip, TCHAR *tip_text, const HBITMAP hbmp, const BOOL free_bmp, const long x, const long y, const long top, const RECT *anchor_rect, const int delay)
+BOOL tooltip_show_image_delay(const HWND hToolTip, TCHAR *tip_text, const HBITMAP hbmp, const BOOL free_bmp, const long x, const long y, const long top, const RECT *anchor_rect, const int delay, const HWND hover_wnd, const RECT *hover_rect)
 {
 	TOOLTIP_INFO ti;
 	ZeroMemory(&ti, sizeof(TOOLTIP_INFO));
@@ -734,6 +756,8 @@ BOOL tooltip_show_image_delay(const HWND hToolTip, TCHAR *tip_text, const HBITMA
 	if (anchor_rect != NULL) {
 		ti.anchor_rect = *anchor_rect;
 	}
+	ti.hover_wnd = hover_wnd;
+	if (hover_rect != NULL) ti.hover_rect = *hover_rect;
 
 	WPARAM delay_param = (delay >= 0) ? (WPARAM)delay : (WPARAM)option.tooltip_show_delay;
 	SendMessage(hToolTip, WM_TOOLTIP_SHOW, delay_param, (LPARAM)&ti);
@@ -745,7 +769,7 @@ BOOL tooltip_show_image_delay(const HWND hToolTip, TCHAR *tip_text, const HBITMA
  */
 BOOL tooltip_show_image(const HWND hToolTip, TCHAR *tip_text, const HBITMAP hbmp, const BOOL free_bmp, const long x, const long y, const long top, const RECT *anchor_rect)
 {
-	return tooltip_show_image_delay(hToolTip, tip_text, hbmp, free_bmp, x, y, top, anchor_rect, -1);
+	return tooltip_show_image_delay(hToolTip, tip_text, hbmp, free_bmp, x, y, top, anchor_rect, -1, NULL, NULL);
 }
 
 /*

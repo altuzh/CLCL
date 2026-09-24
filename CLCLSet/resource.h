@@ -208,6 +208,7 @@
 #define IDS_ACTION_TOOL_ALL             4034
 #define IDS_ACTION_TITLE_PATH           4035
 #define IDS_ACTION_TITLE_TOOL           4036
+#define IDS_ACTION_NEW_SNIP             4037
 #define IDS_FORMAT_LIST_NAME            5000
 #define IDS_FORMAT_LIST_DLL             5001
 #define IDS_FORMAT_LIST_HEADER          5002

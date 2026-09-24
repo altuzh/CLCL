@@ -25,9 +25,9 @@
 #define ID_FAV_ORGANIZE				40007
 
 /* Function Prototypes */
-BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt, BOOL *deleted);
+BOOL favorites_show_add_menu(const HWND hWnd, DATA_INFO *cb_item, const POINT pt, BOOL *deleted, BOOL *edit);
 BOOL favorites_show_folder_menu(const HWND hWnd, DATA_INFO *folder_di, const POINT pt, BOOL *deleted);
-BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT pt, BOOL *deleted);
+BOOL favorites_show_item_menu(const HWND hWnd, DATA_INFO *fav_item, const POINT pt, BOOL *deleted, BOOL *edit);
 BOOL favorites_show_add_dialog(const HWND hWnd, DATA_INFO *cb_item);
 BOOL favorites_show_new_folder_dialog(const HWND hWnd, DATA_INFO *parent_folder);
 BOOL favorites_show_rename_folder_dialog(const HWND hWnd, DATA_INFO *folder_di);

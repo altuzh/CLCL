@@ -912,6 +912,33 @@ BOOL db_history_delete_item(const int id)
 	return TRUE;
 }
 
+/* Replace an existing item atomically, preserving the old row if saving fails. */
+BOOL db_history_update_item(DATA_INFO *item)
+{
+	int old_id;
+	if (db == NULL || item == NULL || item->type != TYPE_ITEM || (old_id = (int)item->param1) <= 0) {
+		return FALSE;
+	}
+	if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
+	if (!db_history_delete_item(old_id)) {
+		sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		return FALSE;
+	}
+	item->param1 = 0;
+	item->content_hash = 0;
+	if (!db_history_save_item(item)) {
+		item->param1 = old_id;
+		sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		return FALSE;
+	}
+	if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+		item->param1 = old_id;
+		sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 /*
  * db_history_trim - keep only the latest max_count items
  */

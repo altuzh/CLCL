@@ -73,6 +73,21 @@ IDI_ICON_CLIP_BAN       ICON                    "res\\ico00006.ico"
 
 IDI_ICON_FOLDER         ICON                    "res\\ico00002.ico"
 
+IDR_PIN_PEN             ICON                    "res\\pin-pen.ico"
+IDR_PIN_MARKER          ICON                    "res\\pin-marker.ico"
+IDR_PIN_ERASER          ICON                    "res\\pin-eraser.ico"
+IDR_PIN_LINE            ICON                    "res\\pin-line.ico"
+IDR_PIN_ARROW           ICON                    "res\\pin-arrow.ico"
+IDR_PIN_RECT            ICON                    "res\\pin-rect.ico"
+IDR_PIN_FILLED_RECT     ICON                    "res\\pin-filled-rect.ico"
+IDR_PIN_ELLIPSE         ICON                    "res\\pin-ellipse.ico"
+IDR_PIN_FILLED_ELLIPSE  ICON                    "res\\pin-filled-ellipse.ico"
+IDR_PIN_CROP            ICON                    "res\\pin-crop.ico"
+IDR_PIN_COPY           ICON                    "res\\pin-copy.ico"
+IDR_PIN_UNDO            ICON                    "res\\pin-undo.ico"
+IDR_PIN_REDO            ICON                    "res\\pin-redo.ico"
+IDR_PIN_SIZE            ICON                    "res\\pin-size.ico"
+
 
 /////////////////////////////////////////////////////////////////////////////
 //

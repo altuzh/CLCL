@@ -188,7 +188,7 @@ static LRESULT CALLBACK dark_mode_header_proc(HWND hWnd, UINT msg, WPARAM wParam
 static LRESULT CALLBACK dark_mode_notify_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam,
 	UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 static BOOL dark_mode_draw_menubar(const HWND hWnd, const UAHMENU *pum);
-static BOOL dark_mode_draw_menubar_item(const UAHDRAWMENUITEM *pumdi);
+static BOOL dark_mode_draw_menubar_item(HWND hWnd, const UAHDRAWMENUITEM *pumdi);
 static void dark_mode_draw_menubar_border(const HWND hWnd);
 
 /*
@@ -389,9 +389,9 @@ BOOL dark_mode_is_color_change(const UINT msg, const LPARAM lParam)
 /*
  * dark_mode_get_color - システムカラーの取得
  */
-COLORREF dark_mode_get_color(const int index)
+static COLORREF theme_color(const int index, BOOL dark)
 {
-	if (dark_mode_dark == FALSE) {
+	if (dark == FALSE) {
 		return GetSysColor(index);
 	}
 	switch (index) {
@@ -446,6 +446,34 @@ COLORREF dark_mode_get_color(const int index)
 	return GetSysColor(index);
 }
 
+COLORREF dark_mode_get_color(const int index)
+{
+	return theme_color(index, dark_mode_dark);
+}
+
+BOOL dark_mode_window_is_dark(HWND hwnd)
+{
+	return GetProp(GetAncestor(hwnd, GA_ROOT), TEXT("CLCLInverseTheme")) != NULL ?
+		!dark_mode_dark : dark_mode_dark;
+}
+
+static HBRUSH window_theme_brush(HWND hwnd, HDC dc, int index)
+{
+	SetDCBrushColor(dc, theme_color(index, dark_mode_window_is_dark(hwnd)));
+	return (HBRUSH)GetStockObject(DC_BRUSH);
+}
+
+void dark_mode_set_inverse_window(HWND hwnd)
+{
+	BOOL dark = !dark_mode_dark;
+	SetProp(hwnd, TEXT("CLCLInverseTheme"), (HANDLE)1);
+	if (_AllowDarkModeForWindow != NULL) _AllowDarkModeForWindow(hwnd, dark);
+	if (_DwmSetWindowAttribute != NULL) {
+		_DwmSetWindowAttribute(hwnd, DWMWA_DARK_MODE, &dark, sizeof(dark));
+	}
+	RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
 /*
  * dark_mode_get_accent_color - 強調表示の文字色の取得
  */
@@ -495,7 +523,7 @@ static void dark_mode_allow_window(const HWND hWnd)
 	if (_AllowDarkModeForWindow == NULL || hWnd == NULL) {
 		return;
 	}
-	_AllowDarkModeForWindow(hWnd, dark_mode_dark);
+	_AllowDarkModeForWindow(hWnd, dark_mode_window_is_dark(hWnd));
 }
 
 /*
@@ -587,7 +615,7 @@ void dark_mode_set_control(const HWND hWnd)
 	} else if (lstrcmpi(class_name, TOOLBARCLASSNAME) == 0) {
 		// 独自の配色を使うためビジュアルスタイルを無効にする
 		if (_SetWindowTheme != NULL) {
-			_SetWindowTheme(hWnd, (dark_mode_dark == TRUE) ? L"" : NULL, (dark_mode_dark == TRUE) ? L"" : NULL);
+			_SetWindowTheme(hWnd, (dark_mode_window_is_dark(hWnd) || GetProp(GetAncestor(hWnd, GA_ROOT), TEXT("CLCLInverseTheme")) != NULL) ? L"" : NULL, L"");
 		}
 		dark_mode_set_tooltip((HWND)SendMessage(hWnd, TB_GETTOOLTIPS, 0, 0));
 		dark_mode_set_notify(hWnd);
@@ -1403,14 +1431,14 @@ static BOOL dark_mode_draw_menubar(const HWND hWnd, const UAHMENU *pum)
 
 	rect = mbi.rcBar;
 	OffsetRect(&rect, -window_rect.left, -window_rect.top);
-	FillRect(pum->hdc, &rect, dark_mode_get_brush(COLOR_MENU));
+	FillRect(pum->hdc, &rect, window_theme_brush(hWnd, pum->hdc, COLOR_MENU));
 	return TRUE;
 }
 
 /*
  * dark_mode_draw_menubar_item - メニューバーの項目の描画
  */
-static BOOL dark_mode_draw_menubar_item(const UAHDRAWMENUITEM *pumdi)
+static BOOL dark_mode_draw_menubar_item(HWND hWnd, const UAHDRAWMENUITEM *pumdi)
 {
 	MENUITEMINFO mii;
 	RECT rect;
@@ -1432,12 +1460,12 @@ static BOOL dark_mode_draw_menubar_item(const UAHDRAWMENUITEM *pumdi)
 
 	rect = pumdi->dis.rcItem;
 	if (pumdi->dis.itemState & (ODS_HOTLIGHT | ODS_SELECTED)) {
-		FillRect(pumdi->um.hdc, &rect, dark_mode_get_brush(COLOR_MENUHILIGHT));
-		SetTextColor(pumdi->um.hdc, dark_mode_get_color(COLOR_HIGHLIGHTTEXT));
+		FillRect(pumdi->um.hdc, &rect, window_theme_brush(hWnd, pumdi->um.hdc, COLOR_MENUHILIGHT));
+		SetTextColor(pumdi->um.hdc, theme_color(COLOR_HIGHLIGHTTEXT, dark_mode_window_is_dark(hWnd)));
 	} else {
-		FillRect(pumdi->um.hdc, &rect, dark_mode_get_brush(COLOR_MENU));
+		FillRect(pumdi->um.hdc, &rect, window_theme_brush(hWnd, pumdi->um.hdc, COLOR_MENU));
 		SetTextColor(pumdi->um.hdc, (pumdi->dis.itemState & (ODS_GRAYED | ODS_DISABLED)) ?
-			dark_mode_get_color(COLOR_GRAYTEXT) : dark_mode_get_color(COLOR_MENUTEXT));
+			theme_color(COLOR_GRAYTEXT, dark_mode_window_is_dark(hWnd)) : theme_color(COLOR_MENUTEXT, dark_mode_window_is_dark(hWnd)));
 	}
 	SetBkMode(pumdi->um.hdc, TRANSPARENT);
 	DrawText(pumdi->um.hdc, buf, lstrlen(buf), &rect, flags);
@@ -1468,7 +1496,7 @@ static void dark_mode_draw_menubar_border(const HWND hWnd)
 	if ((hdc = GetWindowDC(hWnd)) == NULL) {
 		return;
 	}
-	FillRect(hdc, &rect, dark_mode_get_brush(COLOR_MENU));
+	FillRect(hdc, &rect, window_theme_brush(hWnd, hdc, COLOR_MENU));
 	ReleaseDC(hWnd, hdc);
 }
 
@@ -1477,7 +1505,7 @@ static void dark_mode_draw_menubar_border(const HWND hWnd)
  */
 BOOL dark_mode_menubar_message(const HWND hWnd, const UINT msg, const WPARAM wParam, const LPARAM lParam, LRESULT *ret)
 {
-	if (dark_mode_dark == FALSE || ret == NULL) {
+	if ((dark_mode_window_is_dark(hWnd) == FALSE && GetProp(GetAncestor(hWnd, GA_ROOT), TEXT("CLCLInverseTheme")) == NULL) || ret == NULL) {
 		return FALSE;
 	}
 	switch (msg) {
@@ -1489,7 +1517,7 @@ BOOL dark_mode_menubar_message(const HWND hWnd, const UINT msg, const WPARAM wPa
 		return TRUE;
 
 	case WM_UAHDRAWMENUITEM:
-		if (dark_mode_draw_menubar_item((UAHDRAWMENUITEM *)lParam) == FALSE) {
+		if (dark_mode_draw_menubar_item(hWnd, (UAHDRAWMENUITEM *)lParam) == FALSE) {
 			return FALSE;
 		}
 		*ret = TRUE;
@@ -1510,22 +1538,23 @@ BOOL dark_mode_menubar_message(const HWND hWnd, const UINT msg, const WPARAM wPa
 BOOL dark_mode_toolbar_customdraw(const LPARAM lParam, LRESULT *ret)
 {
 	LPNMTBCUSTOMDRAW nmtb = (LPNMTBCUSTOMDRAW)lParam;
+	HWND hWnd = nmtb->nmcd.hdr.hwndFrom;
 
-	if (dark_mode_dark == FALSE || ret == NULL) {
+	if ((dark_mode_window_is_dark(hWnd) == FALSE && GetProp(GetAncestor(hWnd, GA_ROOT), TEXT("CLCLInverseTheme")) == NULL) || ret == NULL) {
 		return FALSE;
 	}
 	switch (nmtb->nmcd.dwDrawStage) {
 	case CDDS_PREPAINT:
-		FillRect(nmtb->nmcd.hdc, &nmtb->nmcd.rc, dark_mode_get_brush(COLOR_BTNFACE));
+		FillRect(nmtb->nmcd.hdc, &nmtb->nmcd.rc, window_theme_brush(hWnd, nmtb->nmcd.hdc, COLOR_BTNFACE));
 		*ret = CDRF_NOTIFYITEMDRAW;
 		return TRUE;
 
 	case CDDS_ITEMPREPAINT:
-		nmtb->clrText = dark_mode_get_color(COLOR_BTNTEXT);
-		nmtb->clrTextHighlight = dark_mode_get_color(COLOR_HIGHLIGHTTEXT);
-		nmtb->clrBtnFace = dark_mode_get_color(COLOR_BTNFACE);
-		nmtb->clrBtnHighlight = dark_mode_get_color(COLOR_BTNSHADOW);
-		nmtb->clrHighlightHotTrack = dark_mode_get_color(COLOR_BTNSHADOW);
+		nmtb->clrText = theme_color(COLOR_BTNTEXT, dark_mode_window_is_dark(hWnd));
+		nmtb->clrTextHighlight = theme_color(COLOR_HIGHLIGHTTEXT, dark_mode_window_is_dark(hWnd));
+		nmtb->clrBtnFace = theme_color(COLOR_BTNFACE, dark_mode_window_is_dark(hWnd));
+		nmtb->clrBtnHighlight = theme_color(COLOR_BTNSHADOW, dark_mode_window_is_dark(hWnd));
+		nmtb->clrHighlightHotTrack = theme_color(COLOR_BTNSHADOW, dark_mode_window_is_dark(hWnd));
 		nmtb->nStringBkMode = TRANSPARENT;
 		nmtb->nHLStringBkMode = TRANSPARENT;
 		*ret = TBCDRF_USECDCOLORS | TBCDRF_HILITEHOTTRACK | CDRF_DODEFAULT;

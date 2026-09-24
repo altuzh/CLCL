@@ -283,7 +283,7 @@ BOOL ini_get_option(TCHAR *err_str)
 	option.action_cnt = profile_get_int(TEXT("action"), TEXT("cnt"), -1, ini_path);
 	if (option.action_cnt < 0) {
 		// Default
-		option.action_cnt = 4;
+		option.action_cnt = 5;
 		if ((option.action_info = mem_calloc(sizeof(ACTION_INFO) * option.action_cnt)) == NULL) {
 			message_get_error(GetLastError(), err_str);
 			return FALSE;
@@ -388,6 +388,14 @@ BOOL ini_get_option(TCHAR *err_str)
 		((option.action_info + i)->menu_info + 0)->content = MENU_CONTENT_TOOL;
 		((option.action_info + i)->menu_info + 1)->content = MENU_CONTENT_SEPARATOR;
 		((option.action_info + i)->menu_info + 2)->content = MENU_CONTENT_CANCEL;
+
+		// hotkey (F1): new snip
+		i++;
+		(option.action_info + i)->action = ACTION_NEW_SNIP;
+		(option.action_info + i)->type = ACTION_TYPE_HOTKEY;
+		(option.action_info + i)->enable = 1;
+		(option.action_info + i)->id = HKEY_ID + i;
+		(option.action_info + i)->virtkey = VK_F1;
 	} else {
 		if ((option.action_info = mem_calloc(sizeof(ACTION_INFO) * option.action_cnt)) == NULL) {
 			message_get_error(GetLastError(), err_str);
@@ -422,6 +430,38 @@ BOOL ini_get_option(TCHAR *err_str)
 					return FALSE;
 				}
 			}
+		}
+		// Add the shortcut once to existing profiles; a later user deletion stays deleted.
+		if (!profile_get_int(TEXT("action"), TEXT("new_snip_added"), 0, ini_path)) {
+			for (i = 0; i < option.action_cnt; i++)
+				if ((option.action_info + i)->action == ACTION_NEW_SNIP) break;
+			if (i == option.action_cnt) {
+				ACTION_INFO *actions = mem_calloc(sizeof(ACTION_INFO) * (option.action_cnt + 1));
+				if (actions == NULL) {
+					message_get_error(GetLastError(), err_str);
+					return FALSE;
+				}
+				CopyMemory(actions, option.action_info, sizeof(ACTION_INFO) * option.action_cnt);
+				mem_free(&option.action_info);
+				option.action_info = actions;
+				(option.action_info + i)->action = ACTION_NEW_SNIP;
+				(option.action_info + i)->type = ACTION_TYPE_HOTKEY;
+				(option.action_info + i)->enable = 1;
+				(option.action_info + i)->id = HKEY_ID + i;
+				(option.action_info + i)->virtkey = VK_F1;
+				option.action_cnt++;
+				wsprintf(buf, TEXT("action-%d"), i);
+				profile_write_int(TEXT("action"), buf, ACTION_NEW_SNIP, ini_path);
+				wsprintf(buf, TEXT("type-%d"), i);
+				profile_write_int(TEXT("action"), buf, ACTION_TYPE_HOTKEY, ini_path);
+				wsprintf(buf, TEXT("enable-%d"), i);
+				profile_write_int(TEXT("action"), buf, 1, ini_path);
+				wsprintf(buf, TEXT("virtkey-%d"), i);
+				profile_write_int(TEXT("action"), buf, VK_F1, ini_path);
+				profile_write_int(TEXT("action"), TEXT("cnt"), option.action_cnt, ini_path);
+			}
+			profile_write_int(TEXT("action"), TEXT("new_snip_added"), 1, ini_path);
+			profile_flush(ini_path);
 		}
 	}
 
@@ -740,6 +780,11 @@ BOOL ini_get_option(TCHAR *err_str)
 	option.fmt_file_font_weight = profile_get_int(TEXT("fmt_file"), TEXT("font_weight"), 0, ini_path);
 	option.fmt_file_font_italic = profile_get_int(TEXT("fmt_file"), TEXT("font_italic"), 0, ini_path);
 	option.fmt_file_font_charset = profile_get_int(TEXT("fmt_file"), TEXT("font_charset"), char_set, ini_path);
+
+	// pinned image editor
+	option.pinned_tool = profile_get_int(TEXT("pinned"), TEXT("tool"), 6100 /* ID_PEN */, ini_path);
+	option.pinned_stroke_width = profile_get_int(TEXT("pinned"), TEXT("stroke_width"), 3, ini_path);
+	option.pinned_color = profile_get_int(TEXT("pinned"), TEXT("color"), (int)RGB(220, 32, 32), ini_path);
 
 #ifdef OPTION_SET
 	// cloud
@@ -1109,6 +1154,11 @@ BOOL ini_put_option(void)
 	profile_write_int(TEXT("fmt_file"), TEXT("font_weight"), option.fmt_file_font_weight, ini_path);
 	profile_write_int(TEXT("fmt_file"), TEXT("font_italic"), option.fmt_file_font_italic, ini_path);
 	profile_write_int(TEXT("fmt_file"), TEXT("font_charset"), option.fmt_file_font_charset, ini_path);
+
+	// pinned image editor
+	profile_write_int(TEXT("pinned"), TEXT("tool"), option.pinned_tool, ini_path);
+	profile_write_int(TEXT("pinned"), TEXT("stroke_width"), option.pinned_stroke_width, ini_path);
+	profile_write_int(TEXT("pinned"), TEXT("color"), option.pinned_color, ini_path);
 
 #ifdef OPTION_SET
 	// cloud

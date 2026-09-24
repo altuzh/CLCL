@@ -174,6 +174,13 @@ DATA_INFO *clipboard_get_datainfo(const BOOL use_filter, const BOOL get_data, TC
 			}
 		}
 		
+		// Advertised or delayed formats may fail to render. Never save an
+		// empty format as a clipboard-history item.
+		if (get_data == TRUE && new_item->data == NULL) {
+			data_free(new_item);
+			continue;
+		}
+
 		// Filter (size)
 		if (use_filter == TRUE && filter_size_check(new_item->format_name, new_item->size) == FALSE) {
 			data_free(new_item);
