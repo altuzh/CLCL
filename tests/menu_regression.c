@@ -1833,11 +1833,19 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     // 1. Initialize DB
     BOOL init_ok = db_history_init(temp_dir);
     CHECK(init_ok, "db_history_init succeeds");
+    init_gdip();
 
     // 2. Create and save 3 distinct bitmap items
     HBITMAP bmp1 = create_solid_bitmap(16, 16, RGB(255, 0, 0));
     HBITMAP bmp2 = create_solid_bitmap(24, 24, RGB(0, 255, 0));
     HBITMAP bmp3 = create_solid_bitmap(32, 32, RGB(0, 0, 255));
+    {
+        HDC dc = CreateCompatibleDC(NULL);
+        HBITMAP previous = SelectObject(dc, bmp2);
+        SetPixel(dc, 5, 7, RGB(17, 93, 201));
+        SelectObject(dc, previous);
+        DeleteDC(dc);
+    }
 
     DATA_INFO *item1 = data_create_item(TEXT("(BITMAP)"), FALSE, err_str);
     item1->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), (HANDLE)bmp1, 0, FALSE, err_str);
@@ -1855,6 +1863,124 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     BOOL s2 = db_history_save_item(item2);
     BOOL s3 = db_history_save_item(item3);
     CHECK(s1 && s2 && s3, "db_history_save_item succeeds for all 3 bitmaps");
+    {
+        sqlite3 *inspect = NULL;
+        sqlite3_stmt *stmt = NULL;
+        DWORD raw_size = 0, png_size = 0;
+        BYTE *raw = clipboard_data_to_bytes(item3->child, &raw_size);
+        BYTE *png = bitmap_to_png(bmp2, &png_size);
+        HBITMAP decoded = png != NULL ? png_to_bitmap(png, png_size) : NULL;
+        CHECK(decoded != NULL && bitmap_pixel(decoded, 0, 0) == RGB(0, 255, 0),
+            "PNG memory codec restores bitmap pixels");
+        if (decoded != NULL) {
+            DWORD before_size = 0, after_size = 0;
+            BYTE *before = bitmap_to_dib(bmp2, &before_size);
+            BYTE *after = bitmap_to_dib(decoded, &after_size);
+            CHECK(before != NULL && after != NULL && before_size == after_size &&
+                memcmp(before, after, before_size) == 0,
+                "PNG round trip preserves screenshot bytes used for duplicate detection");
+            CHECK(bitmap_pixel(decoded, 5, 7) == RGB(17, 93, 201) &&
+                bitmap_pixel(decoded, 7, 5) == RGB(0, 255, 0),
+                "PNG preserves channel values and pixel orientation");
+            mem_free((void **)&before);
+            mem_free((void **)&after);
+        }
+        if (decoded != NULL) DeleteObject(decoded);
+        CHECK(png != NULL && png_to_bitmap(png, 8) == NULL,
+            "PNG decoder rejects truncated input");
+        mem_free((void **)&png);
+        {
+            int depth;
+            for (depth = 24; depth <= 32; depth += 8) {
+                BITMAPINFO info = {0};
+                DIBSECTION restored = {0};
+                BYTE *bits = NULL;
+                HBITMAP source, restored_bitmap;
+                DWORD encoded_size = 0;
+                BYTE *encoded;
+                int y, x, stride = ((17 * depth + 31) / 32) * 4;
+                info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                info.bmiHeader.biWidth = 17;
+                info.bmiHeader.biHeight = -9;
+                info.bmiHeader.biPlanes = 1;
+                info.bmiHeader.biBitCount = (WORD)depth;
+                source = CreateDIBSection(NULL, &info, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+                CHECK(source != NULL, "create odd-width PNG pixel fixture");
+                if (source == NULL) continue;
+                for (y = 0; y < 9; y++)
+                    for (x = 0; x < 17 * depth / 8; x++)
+                        bits[y * stride + x] = (BYTE)(x * 17 + y * 31);
+                encoded = bitmap_to_png(source, &encoded_size);
+                restored_bitmap = png_to_bitmap(encoded, encoded_size);
+                CHECK(restored_bitmap != NULL &&
+                    GetObject(restored_bitmap, sizeof(restored), &restored) == sizeof(restored) &&
+                    restored.dsBm.bmBitsPixel == depth && restored.dsBm.bmWidth == 17 &&
+                    restored.dsBm.bmHeight == 9, "PNG preserves 24/32-bit dimensions and depth");
+                if (restored.dsBm.bmBits != NULL) {
+                    for (y = 0; y < 9; y++)
+                        CHECK(memcmp(bits + y * stride, (BYTE *)restored.dsBm.bmBits +
+                            y * restored.dsBm.bmWidthBytes, 17 * depth / 8) == 0,
+                            "PNG preserves every color/alpha byte with padded rows");
+                }
+                if (restored_bitmap != NULL) DeleteObject(restored_bitmap);
+                mem_free((void **)&encoded);
+                DeleteObject(source);
+            }
+        }
+        wsprintf(db_file, TEXT("%s\\history.db"), temp_dir);
+        CHECK(sqlite3_open16(db_file, &inspect) == SQLITE_OK, "open PNG database fixture");
+        CHECK(sqlite3_prepare_v2(inspect,
+            "SELECT count(*) FROM item_formats WHERE hex(substr(data,1,8)) = '89504E470D0A1A0A' "
+            "AND length(data) < data_size;", -1, &stmt, NULL) == SQLITE_OK &&
+            sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 3,
+            "database stores smaller PNG blobs with original decoded sizes");
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+        // A legacy DIB row must coexist with new PNG rows across restart.
+        CHECK(sqlite3_prepare_v2(inspect,
+            "UPDATE item_formats SET data = ?, data_size = ? WHERE item_id = ?;",
+            -1, &stmt, NULL) == SQLITE_OK, "prepare legacy bitmap fixture");
+        if (stmt != NULL && raw != NULL) {
+            sqlite3_bind_blob(stmt, 1, raw, (int)raw_size, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 2, (int)raw_size);
+            sqlite3_bind_int(stmt, 3, item3->param1);
+            CHECK(sqlite3_step(stmt) == SQLITE_DONE, "store legacy uncompressed bitmap");
+        }
+        sqlite3_finalize(stmt);
+        sqlite3_close(inspect);
+        mem_free((void **)&raw);
+        {
+            DATA_INFO *standalone = data_create_data(CF_BITMAP, TEXT("BITMAP"), NULL,
+                0, FALSE, err_str);
+            standalone->param1 = item2->param1;
+            CHECK(db_history_ensure_item_data(standalone) && standalone->size > png_size &&
+                bitmap_pixel(standalone->data, 23, 23) == RGB(0, 255, 0),
+                "standalone format loading decodes PNG and retains decoded size");
+            data_free(standalone);
+        }
+        {
+            HBITMAP tiny = create_solid_bitmap(1, 1, RGB(31, 63, 127));
+            DATA_INFO *tiny_item = data_create_item(TEXT("Tiny PNG fallback"), FALSE, err_str);
+            tiny_item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), tiny, 0, FALSE, err_str);
+            data_set_modified(tiny_item);
+            CHECK(db_history_save_item(tiny_item), "save tiny bitmap with raw fallback");
+            CHECK(sqlite3_open16(db_file, &inspect) == SQLITE_OK, "open fallback fixture");
+            stmt = NULL;
+            CHECK(sqlite3_prepare_v2(inspect,
+                "SELECT length(data) = data_size AND hex(substr(data,1,8)) != '89504E470D0A1A0A' "
+                "FROM item_formats WHERE item_id = ?;", -1, &stmt, NULL) == SQLITE_OK,
+                "prepare raw fallback check");
+            if (stmt != NULL) {
+                sqlite3_bind_int(stmt, 1, tiny_item->param1);
+                CHECK(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0),
+                    "tiny bitmap stays raw when PNG would increase storage");
+            }
+            sqlite3_finalize(stmt);
+            sqlite3_close(inspect);
+            db_history_delete_item(tiny_item->param1);
+            data_free(tiny_item);
+        }
+    }
     {
         PINNED_IMAGE recovery = {0};
         DATA_INFO *saved_head = history_data.child;
@@ -1894,7 +2020,7 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     option.history_max = 30;
     CHECK(load_history(NULL, 0), "startup history load succeeds");
 
-    int verified = 0, updated_found = 0, recovered_found = 0;
+    int verified = 0, updated_found = 0, recovered_found = 0, legacy_found = 0;
     DATA_INFO *cur;
     for (cur = history_data.child; cur != NULL; cur = cur->next) {
         CHECK(cur->child != NULL, "loaded bitmap item has child format node");
@@ -1903,6 +2029,8 @@ static void test_sqlite_multiple_bitmap_persistence(void)
             "startup loaded bitmap data before menu creation");
         if (cur->child != NULL && cur->child->data != NULL &&
             bitmap_pixel(cur->child->data, 0, 0) == RGB(123, 45, 67)) recovered_found++;
+        if (cur->child != NULL && cur->child->data != NULL &&
+            bitmap_pixel(cur->child->data, 31, 31) == RGB(0, 0, 255)) legacy_found++;
         if (cur->title != NULL && lstrcmp(cur->title, TEXT("Updated bitmap")) == 0) {
             BITMAP updated;
             CHECK(GetObject(cur->child->data, sizeof(updated), &updated) != 0 &&
@@ -1914,6 +2042,7 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     }
     CHECK(verified == 4 && recovered_found == 1, "all bitmaps including recovered editor edits survive restart");
     CHECK(updated_found == 1, "bitmap update replaces one row without duplication");
+    CHECK(legacy_found == 1, "legacy DIB bitmap loads alongside PNG records");
 
     data_free(history_data.child);
     history_data.child = NULL;
@@ -1930,6 +2059,7 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     wsprintf(db_file, TEXT("%s\\history.db-wal"), temp_dir);
     DeleteFile(db_file);
     RemoveDirectory(temp_dir);
+    shutdown_gdip();
 
     printf("PASS: SQLite multiple bitmap persistence across restart\n");
 }

@@ -23,9 +23,27 @@
 #include "File.h"
 #include "Ini.h"
 #include "DbHistory.h"
+#include "gdip.h"
 
 static sqlite3 *db = NULL;
 extern DATA_INFO history_data;
+
+/* PNG is private to SQLite; clipboard and .dat serialization stay unchanged. */
+static HANDLE db_format_from_bytes(DATA_INFO *item, const BYTE *bytes, DWORD size)
+{
+	static const BYTE png_signature[] = {137, 80, 78, 71, 13, 10, 26, 10};
+	UINT fmt = item->format ? item->format : clipboard_get_format(0, item->format_name);
+	HANDLE result;
+	if ((fmt == CF_BITMAP || fmt == CF_DSPBITMAP) && size >= sizeof(png_signature) &&
+		memcmp(bytes, png_signature, sizeof(png_signature)) == 0) {
+		return png_to_bitmap(bytes, size);
+	}
+	item->size = size;
+	result = format_bytes_to_data(item->format_name, bytes, &item->size);
+	if (result == NULL)
+		result = clipboard_bytes_to_data(item->format_name, bytes, &item->size);
+	return result;
+}
 
 /*
  * extract_text_for_index - extract text content from item for indexing
@@ -365,6 +383,7 @@ BOOL db_history_save_item(DATA_INFO *item)
 			BYTE *mem = NULL;
 			const void *blob_ptr = NULL;
 			DWORD blob_size = 0;
+			DWORD data_size;
 			BOOL free_mem = FALSE;
 			BOOL unlock_data = FALSE;
 			UINT fmt = cdi->format ? cdi->format : clipboard_get_format(0, cdi->format_name);
@@ -393,12 +412,25 @@ BOOL db_history_save_item(DATA_INFO *item)
 			if (cdi->size == 0 && blob_size > 0) {
 				cdi->size = blob_size;
 			}
+			data_size = blob_size;
+			if ((fmt == CF_BITMAP || fmt == CF_DSPBITMAP) && blob_size > 0) {
+				DWORD png_size = 0;
+				BYTE *png = bitmap_to_png((HBITMAP)cdi->data, &png_size);
+				// Keep the original payload if encoding fails or PNG is larger.
+				if (png != NULL && png_size < blob_size) {
+					if (free_mem) mem_free((void **)&mem);
+					mem = png;
+					blob_ptr = mem;
+					blob_size = png_size;
+					free_mem = TRUE;
+				} else mem_free((void **)&png);
+			}
 
 			sqlite3_reset(stmt_fmt);
 			sqlite3_bind_int64(stmt_fmt, 1, item_id);
 			sqlite3_bind_text16(stmt_fmt, 2, cdi->format_name ? cdi->format_name : TEXT(""), -1, SQLITE_TRANSIENT);
 			sqlite3_bind_int(stmt_fmt, 3, (int)fmt);
-			sqlite3_bind_int(stmt_fmt, 4, (int)blob_size);
+			sqlite3_bind_int(stmt_fmt, 4, (int)data_size);
 			if (blob_ptr != NULL && blob_size > 0) {
 				sqlite3_bind_blob(stmt_fmt, 5, blob_ptr, (int)blob_size, SQLITE_TRANSIENT);
 			} else {
@@ -654,9 +686,11 @@ BOOL db_history_ensure_item_data(DATA_INFO *item)
 					const void *blob_ptr = sqlite3_column_blob(stmt, 0);
 					int blob_size = sqlite3_column_bytes(stmt, 0);
 					if (blob_ptr != NULL && blob_size > 0) {
-						item->size = (DWORD)blob_size;
-						if ((item->data = format_bytes_to_data(item->format_name, (const BYTE *)blob_ptr, &item->size)) == NULL) {
-							item->data = clipboard_bytes_to_data(item->format_name, (const BYTE *)blob_ptr, &item->size);
+						item->size = (DWORD)sqlite3_column_int(stmt, 1);
+						item->data = db_format_from_bytes(item, (const BYTE *)blob_ptr, (DWORD)blob_size);
+						if (item->data == NULL) {
+							sqlite3_finalize(stmt);
+							return FALSE;
 						}
 						item->param2 = 1;
 					}
@@ -710,9 +744,11 @@ BOOL db_history_ensure_item_data(DATA_INFO *item)
 		if (cdi != NULL) {
 			cdi->param1 = item->param1;
 			if (cdi->data == NULL && blob_ptr != NULL && blob_size > 0) {
-				cdi->size = (DWORD)blob_size;
-				if ((cdi->data = format_bytes_to_data(cdi->format_name, (const BYTE *)blob_ptr, &cdi->size)) == NULL) {
-					cdi->data = clipboard_bytes_to_data(cdi->format_name, (const BYTE *)blob_ptr, &cdi->size);
+				cdi->size = (DWORD)data_size;
+				cdi->data = db_format_from_bytes(cdi, (const BYTE *)blob_ptr, (DWORD)blob_size);
+				if (cdi->data == NULL) {
+					sqlite3_finalize(stmt);
+					return FALSE;
 				}
 				cdi->param2 = 1;
 			}

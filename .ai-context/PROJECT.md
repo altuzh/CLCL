@@ -53,6 +53,9 @@ Architecture baseline: 2026-09-20. Menu mechanics and regression checks updated:
   - `data_create_folder(title, di)`: Allocates and initializes a `TYPE_FOLDER` node.
 
 ### 3.2 Date-Based History Organization (`History.c`, `History.h`)
+
+- SQLite bitmap storage (`DbHistory.c`, `gdip.cpp`): new/updated 24/32-bit `CF_BITMAP`/`CF_DSPBITMAP` payloads use PNG when smaller than the original DIB. `data_size` retains the decoded size. Both lazy-load paths recognize PNG signatures and still read legacy DIB rows; existing records are not bulk converted. Other clipboard formats and `.dat` files retain their existing representation. Copy GDI+ pixels directly: `GetHBITMAP` changes alpha/reserved bytes and breaks byte-based duplicate detection. The native regression harness covers PNG pixels, row padding, both load paths, raw fallback, and mixed legacy/new records.
+
 - Clipboard items are organized chronologically into date folders:
   - Format: `YYYY/MM/DD` (e.g. `2026/09/20`).
   - Flattening & Restructuring: `history_restructure` extracts all items and groups them into date folders sorted descending by timestamp.
