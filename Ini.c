@@ -389,12 +389,13 @@ BOOL ini_get_option(TCHAR *err_str)
 		((option.action_info + i)->menu_info + 1)->content = MENU_CONTENT_SEPARATOR;
 		((option.action_info + i)->menu_info + 2)->content = MENU_CONTENT_CANCEL;
 
-		// hotkey (F1): new snip
+		// hotkey (Ctrl + Shift + F1): new snip
 		i++;
 		(option.action_info + i)->action = ACTION_NEW_SNIP;
 		(option.action_info + i)->type = ACTION_TYPE_HOTKEY;
 		(option.action_info + i)->enable = 1;
 		(option.action_info + i)->id = HKEY_ID + i;
+		(option.action_info + i)->modifiers = MOD_CONTROL | MOD_SHIFT;
 		(option.action_info + i)->virtkey = VK_F1;
 	} else {
 		if ((option.action_info = mem_calloc(sizeof(ACTION_INFO) * option.action_cnt)) == NULL) {
@@ -448,6 +449,7 @@ BOOL ini_get_option(TCHAR *err_str)
 				(option.action_info + i)->type = ACTION_TYPE_HOTKEY;
 				(option.action_info + i)->enable = 1;
 				(option.action_info + i)->id = HKEY_ID + i;
+				(option.action_info + i)->modifiers = MOD_CONTROL | MOD_SHIFT;
 				(option.action_info + i)->virtkey = VK_F1;
 				option.action_cnt++;
 				wsprintf(buf, TEXT("action-%d"), i);
@@ -456,6 +458,8 @@ BOOL ini_get_option(TCHAR *err_str)
 				profile_write_int(TEXT("action"), buf, ACTION_TYPE_HOTKEY, ini_path);
 				wsprintf(buf, TEXT("enable-%d"), i);
 				profile_write_int(TEXT("action"), buf, 1, ini_path);
+				wsprintf(buf, TEXT("modifiers-%d"), i);
+				profile_write_int(TEXT("action"), buf, MOD_CONTROL | MOD_SHIFT, ini_path);
 				wsprintf(buf, TEXT("virtkey-%d"), i);
 				profile_write_int(TEXT("action"), buf, VK_F1, ini_path);
 				profile_write_int(TEXT("action"), TEXT("cnt"), option.action_cnt, ini_path);
@@ -463,6 +467,21 @@ BOOL ini_get_option(TCHAR *err_str)
 			profile_write_int(TEXT("action"), TEXT("new_snip_added"), 1, ini_path);
 			profile_flush(ini_path);
 		}
+	}
+	// Move only the original F1 default; leave user-chosen shortcuts alone.
+	if (!profile_get_int(TEXT("action"), TEXT("new_snip_hotkey_updated"), 0, ini_path)) {
+		for (i = 0; i < option.action_cnt; i++) {
+			if ((option.action_info + i)->action == ACTION_NEW_SNIP &&
+				(option.action_info + i)->type == ACTION_TYPE_HOTKEY &&
+				(option.action_info + i)->virtkey == VK_F1 &&
+				(option.action_info + i)->modifiers == 0) {
+				(option.action_info + i)->modifiers = MOD_CONTROL | MOD_SHIFT;
+				wsprintf(buf, TEXT("modifiers-%d"), i);
+				profile_write_int(TEXT("action"), buf, MOD_CONTROL | MOD_SHIFT, ini_path);
+			}
+		}
+		profile_write_int(TEXT("action"), TEXT("new_snip_hotkey_updated"), 1, ini_path);
+		profile_flush(ini_path);
 	}
 
 	// format

@@ -864,7 +864,7 @@ static MENU_ITEM_INFO *menu_create_info(MENU_INFO *menu_info, const int menu_cnt
 			(*ret_cnt)++;
 			break;
 		case MENU_CONTENT_VIEWER:
-			*ret_cnt += 2; // Viewer and New snip.
+			*ret_cnt += 3; // Viewer and both snip commands.
 			break;
 		case MENU_CONTENT_OPTION:
 		case MENU_CONTENT_CLIPBOARD_WATCH:
@@ -1019,7 +1019,15 @@ static MENU_ITEM_INFO *menu_create_info(MENU_INFO *menu_info, const int menu_cnt
 			(mii + j)->id = ID_MENUITEM_NEW_SNIP;
 			(mii + j)->flag = MF_OWNERDRAW;
 			(mii + j)->item = (LPCTSTR)(mii + j);
-			(mii + j)->text = alloc_copy(TEXT("New snip"));
+			(mii + j)->text = alloc_copy(message_get_res(IDS_SNIP_NEW));
+			(mii + j)->icon = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDR_PIN_CROP), IMAGE_ICON,
+				MENU_ICON_SIZE, MENU_ICON_SIZE, 0);
+			(mii + j)->free_icon = TRUE;
+			j++;
+			(mii + j)->id = ID_MENUITEM_SCROLLING_SNIP;
+			(mii + j)->flag = MF_OWNERDRAW;
+			(mii + j)->item = (LPCTSTR)(mii + j);
+			(mii + j)->text = alloc_copy(message_get_res(IDS_SNIP_SCROLLING));
 			(mii + j)->icon = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDR_PIN_CROP), IMAGE_ICON,
 				MENU_ICON_SIZE, MENU_ICON_SIZE, 0);
 			(mii + j)->free_icon = TRUE;

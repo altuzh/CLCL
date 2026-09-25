@@ -2,10 +2,12 @@
 #include <windows.h>
 #undef _INC_OLE
 #include <commctrl.h>
+#include <commdlg.h>
 #include <tchar.h>
 #include <windowsx.h>
 #include <math.h>
 #include <limits.h>
+#include <string.h>
 
 #include "General.h"
 #include "Memory.h"
@@ -19,6 +21,7 @@
 #include "Ini.h"
 #include "Profile.h"
 #include "PinnedImage.h"
+#include "gdip.h"
 #include "resource.h"
 
 #pragma comment(lib, "msimg32.lib")
@@ -53,6 +56,24 @@
 #define ID_SIZE_DROPDOWN 6133
 #define ID_FILLED_RECT  6134
 #define ID_FILLED_ELLIPSE 6135
+#define ID_SELECT      6136
+#define ID_TEXT        6137
+#define ID_CALLOUT     6138
+#define ID_STEP        6139
+#define ID_REDACT      6141
+#define ID_SPOTLIGHT   6142
+#define ID_COPY_KEEP   6143
+#define ID_SAVE_PNG    6144
+#define ID_DELETE_MARK 6145
+#define ID_DUPLICATE   6146
+#define ID_TEXT_EDIT   6147
+#define ID_FRAME_SELECT 6149
+#define ID_FRAME_ARROW 6150
+#define ID_ZOOM 6151
+#define ID_PAN 6152
+#define ID_ROTATE 6153
+#define MENU_TIP_TIMER 6
+#define WM_FINISH_TEXT (WM_APP + 150)
 
 #define PIN_DEFAULT_COLOR RGB(220, 32, 32)
 
@@ -61,14 +82,21 @@ typedef struct _PIN_ARTIFACT {
 	int tool, stroke, count, capacity;
 	COLORREF color;
 	BOOL deleted;
+	BOOL selected;
 	POINT start, end;
 	POINT *points;
+	RECT box;
+	TCHAR *text;
+	int number;
 } PIN_ARTIFACT;
 
 typedef struct _PINNED_IMAGE {
 	HWND hwnd;
 	HWND owner;
 	HWND toolbar;
+	HWND menu_tip;
+	UINT menu_tip_id;
+	TCHAR tool_tip_text[64];
 	HIMAGELIST icons;
 	HCURSOR tool_cursor;
 	int cursor_tool, cursor_width;
@@ -79,6 +107,8 @@ typedef struct _PINNED_IMAGE {
 	HMENU menu;
 	DATA_INFO *source_item;
 	DATA_INFO *source_data;
+	DATA_INFO *pending_item;
+	DWORD pending_sequence;
 	HBITMAP original;
 	HBITMAP bitmap;
 	HBITMAP undo[HISTORY_MAX];
@@ -87,6 +117,15 @@ typedef struct _PINNED_IMAGE {
 	HBITMAP redo_base[HISTORY_MAX];
 	PIN_ARTIFACT *artifacts;
 	PIN_ARTIFACT *active_artifact;
+	PIN_ARTIFACT *selected_artifact;
+	PIN_ARTIFACT *drag_original;
+	int drag_mode;
+	BOOL drag_changed;
+	BOOL frame_additive;
+	HWND text_edit;
+	PIN_ARTIFACT *editing_artifact;
+	int text_edit_tool;
+	POINT text_anchor;
 	PIN_ARTIFACT *undo_artifacts[HISTORY_MAX];
 	PIN_ARTIFACT *redo_artifacts[HISTORY_MAX];
 	RECT undo_window[HISTORY_MAX];
@@ -107,6 +146,11 @@ typedef struct _PINNED_IMAGE {
 	POINT start;
 	POINT last;
 	RECT image_rect;
+	int zoom_percent;
+	POINT pan_offset;
+	POINT pan_last;
+	BOOL panning;
+	BOOL pan_right;
 	RECT selection;
 	struct _PINNED_IMAGE *next;
 } PINNED_IMAGE;
@@ -132,12 +176,6 @@ static const COLORREF standard_colors[] = {
 	RGB(192, 112, 0)    // Amber
 };
 #define STANDARD_COLOR_COUNT 16
-static const TCHAR *standard_color_names[] = {
-	TEXT("Black"), TEXT("Dark Gray"), TEXT("Gray"), TEXT("White"),
-	TEXT("Red"), TEXT("Orange"), TEXT("Yellow"), TEXT("Green"),
-	TEXT("Teal"), TEXT("Cyan"), TEXT("Blue"), TEXT("Navy"),
-	TEXT("Purple"), TEXT("Pink"), TEXT("Brown"), TEXT("Amber")
-};
 
 static const COLORREF marker_colors[] = {
 	RGB(255, 230, 0), RGB(255, 180, 0), RGB(255, 120, 0), RGB(255, 85, 65),
@@ -145,13 +183,6 @@ static const COLORREF marker_colors[] = {
 	RGB(125, 65, 225), RGB(75, 85, 220), RGB(35, 120, 235), RGB(35, 205, 235),
 	RGB(0, 180, 170), RGB(170, 220, 35), RGB(50, 185, 85), RGB(60, 210, 155)
 };
-static const TCHAR *marker_color_names[] = {
-	TEXT("Yellow"), TEXT("Gold"), TEXT("Orange"), TEXT("Coral"),
-	TEXT("Red"), TEXT("Magenta"), TEXT("Pink"), TEXT("Purple"),
-	TEXT("Violet"), TEXT("Indigo"), TEXT("Blue"), TEXT("Cyan"),
-	TEXT("Teal"), TEXT("Lime"), TEXT("Green"), TEXT("Mint")
-};
-
 static HINSTANCE pin_instance;
 static PINNED_IMAGE *pin_windows;
 static DWORD last_auto_sequence, last_copy_sequence;
@@ -160,6 +191,21 @@ extern TCHAR work_path[];
 
 extern DATA_INFO history_data;
 extern DATA_INFO regist_data;
+
+static const TCHAR *pin_text(UINT id)
+{
+	static TCHAR strings[132][256];
+	static LANGID language;
+	LANGID current = GetThreadUILanguage();
+	if (id < IDS_SNIP_NEW || id >= IDS_SNIP_NEW + ARRAYSIZE(strings)) return TEXT("");
+	if (language != current) {
+		ZeroMemory(strings, sizeof(strings));
+		language = current;
+	}
+	if (!strings[id - IDS_SNIP_NEW][0])
+		LoadString(pin_instance, id, strings[id - IDS_SNIP_NEW], ARRAYSIZE(strings[0]));
+	return strings[id - IDS_SNIP_NEW];
+}
 
 static COLORREF get_pin_color(const PINNED_IMAGE *pin)
 {
@@ -199,6 +245,8 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 static LRESULT CALLBACK editor_toolbar_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
 	UINT_PTR id, DWORD_PTR ref);
 static void refit_image(PINNED_IMAGE *pin);
+static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept);
+static void cancel_annotation_drag(PINNED_IMAGE *pin);
 static void calculate_image_rect(PINNED_IMAGE *pin, const RECT *client);
 
 static DATA_INFO *find_bitmap_data(DATA_INFO *item)
@@ -282,6 +330,7 @@ static void free_artifacts(PIN_ARTIFACT *item)
 	while (item != NULL) {
 		PIN_ARTIFACT *next = item->next;
 		if (item->points != NULL) mem_free((void **)&item->points);
+		if (item->text != NULL) mem_free((void **)&item->text);
 		mem_free((void **)&item);
 		item = next;
 	}
@@ -296,12 +345,19 @@ static PIN_ARTIFACT *clone_artifacts(const PIN_ARTIFACT *source)
 		*item = *source;
 		item->next = NULL;
 		item->points = NULL;
+		item->text = NULL;
 		if (source->count > 0) {
 			item->points = mem_alloc(sizeof(POINT) * source->count);
 			if (item->points == NULL) { mem_free((void **)&item); free_artifacts(head); return NULL; }
 			CopyMemory(item->points, source->points, sizeof(POINT) * source->count);
 		}
 		item->capacity = source->count;
+		if (source->text != NULL) {
+			int bytes = (lstrlen(source->text) + 1) * sizeof(TCHAR);
+			item->text = mem_alloc(bytes);
+			if (item->text == NULL) { free_artifacts(item); free_artifacts(head); return NULL; }
+			CopyMemory(item->text, source->text, bytes);
+		}
 		*tail = item;
 		tail = &item->next;
 	}
@@ -351,6 +407,10 @@ static void transform_artifacts(PINNED_IMAGE *pin, int old_width, int old_height
 		item->start.y = MulDiv(item->start.y - top, new_height, old_height);
 		item->end.x = MulDiv(item->end.x - left, new_width, old_width);
 		item->end.y = MulDiv(item->end.y - top, new_height, old_height);
+		item->box.left = MulDiv(item->box.left - left, new_width, old_width);
+		item->box.top = MulDiv(item->box.top - top, new_height, old_height);
+		item->box.right = MulDiv(item->box.right - left, new_width, old_width);
+		item->box.bottom = MulDiv(item->box.bottom - top, new_height, old_height);
 		item->stroke = max(1, MulDiv(item->stroke, new_width, old_width));
 		for (i = 0; i < item->count; i++) {
 			item->points[i].x = MulDiv(item->points[i].x - left, new_width, old_width);
@@ -453,13 +513,13 @@ static void refresh_history_buttons(PINNED_IMAGE *pin)
 	SendMessage(pin->toolbar, TB_ENABLEBUTTON, ID_REDO, MAKELONG(pin->redo_count != 0, 0));
 }
 
-static BOOL begin_change(PINNED_IMAGE *pin)
+static BOOL begin_change_with_base(PINNED_IMAGE *pin, BOOL include_base)
 {
 	HBITMAP snapshot = clone_bitmap(pin->bitmap, NULL, NULL);
-	HBITMAP base = pin->tool == ID_CROP ? clone_bitmap(pin->original, NULL, NULL) : NULL;
+	HBITMAP base = include_base ? clone_bitmap(pin->original, NULL, NULL) : NULL;
 	PIN_ARTIFACT *items = clone_artifacts(pin->artifacts);
 	RECT r = {0};
-	if (snapshot == NULL || (pin->tool == ID_CROP && base == NULL) ||
+	if (snapshot == NULL || (include_base && base == NULL) ||
 		(pin->artifacts != NULL && items == NULL)) {
 		if (snapshot != NULL) DeleteObject(snapshot);
 		if (base != NULL) DeleteObject(base);
@@ -473,6 +533,11 @@ static BOOL begin_change(PINNED_IMAGE *pin)
 	pin->dirty = TRUE;
 	refresh_history_buttons(pin);
 	return TRUE;
+}
+
+static BOOL begin_change(PINNED_IMAGE *pin)
+{
+	return begin_change_with_base(pin, pin->tool == ID_CROP);
 }
 
 static void swap_history(PINNED_IMAGE *pin, BOOL undo)
@@ -490,7 +555,9 @@ static void swap_history(PINNED_IMAGE *pin, BOOL undo)
 	RECT *to_window = undo ? pin->redo_window : pin->undo_window;
 	int *from_count = undo ? &pin->undo_count : &pin->redo_count;
 	int *to_count = undo ? &pin->redo_count : &pin->undo_count;
+	if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
 	if (*from_count == 0) return;
+	cancel_annotation_drag(pin);
 	current = pin->bitmap;
 	current_base = pin->original;
 	current_items = pin->artifacts;
@@ -504,6 +571,12 @@ static void swap_history(PINNED_IMAGE *pin, BOOL undo)
 	if (replacement_base != NULL) pin->original = replacement_base;
 	pin->artifacts = replacement_items;
 	pin->active_artifact = NULL;
+	pin->selected_artifact = NULL;
+	{
+		PIN_ARTIFACT *item;
+		for (item = pin->artifacts; item != NULL; item = item->next) item->selected = FALSE;
+	}
+	if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
 	{
 		BITMAP bm;
 		GetObject(pin->bitmap, sizeof(bm), &bm);
@@ -523,11 +596,19 @@ static void swap_history(PINNED_IMAGE *pin, BOOL undo)
 	InvalidateRect(pin->hwnd, NULL, FALSE);
 }
 
-static void calculate_image_rect(PINNED_IMAGE *pin, const RECT *client)
+static RECT image_viewport(PINNED_IMAGE *pin, const RECT *client)
 {
 	int margin = Scale(10);
-	int area_w = client->right - client->left - margin * 2;
-	int area_h = client->bottom - client->top - pin->toolbar_height - margin * 2;
+	RECT viewport = { client->left + margin, client->top + pin->toolbar_height + margin,
+		client->right - margin, client->bottom - margin };
+	return viewport;
+}
+
+static void calculate_image_rect(PINNED_IMAGE *pin, const RECT *client)
+{
+	RECT viewport = image_viewport(pin, client);
+	int area_w = viewport.right - viewport.left;
+	int area_h = viewport.bottom - viewport.top;
 	int draw_w, draw_h;
 	if (area_w <= 0 || area_h <= 0 || pin->width <= 0 || pin->height <= 0) {
 		SetRectEmpty(&pin->image_rect);
@@ -539,10 +620,40 @@ static void calculate_image_rect(PINNED_IMAGE *pin, const RECT *client)
 		draw_h = area_h;
 		draw_w = MulDiv(draw_h, pin->width, pin->height);
 	}
-	pin->image_rect.left = client->left + margin + (area_w - draw_w) / 2;
-	pin->image_rect.top = client->top + pin->toolbar_height + margin + (area_h - draw_h) / 2;
+	draw_w = max(1, MulDiv(draw_w, pin->zoom_percent, 100));
+	draw_h = max(1, MulDiv(draw_h, pin->zoom_percent, 100));
+	pin->image_rect.left = viewport.left + (area_w - draw_w) / 2 + pin->pan_offset.x;
+	pin->image_rect.top = viewport.top + (area_h - draw_h) / 2 + pin->pan_offset.y;
+	if (draw_w <= area_w) pin->image_rect.left = viewport.left + (area_w - draw_w) / 2;
+	else pin->image_rect.left = min(viewport.left, max(viewport.right - draw_w, pin->image_rect.left));
+	if (draw_h <= area_h) pin->image_rect.top = viewport.top + (area_h - draw_h) / 2;
+	else pin->image_rect.top = min(viewport.top, max(viewport.bottom - draw_h, pin->image_rect.top));
+	pin->pan_offset.x = pin->image_rect.left - (viewport.left + (area_w - draw_w) / 2);
+	pin->pan_offset.y = pin->image_rect.top - (viewport.top + (area_h - draw_h) / 2);
 	pin->image_rect.right = pin->image_rect.left + draw_w;
 	pin->image_rect.bottom = pin->image_rect.top + draw_h;
+}
+
+static void zoom_image(PINNED_IMAGE *pin, POINT anchor, int direction)
+{
+	static const int levels[] = { 50, 75, 100, 125, 150, 200, 300, 400, 600, 800 };
+	RECT client, before = pin->image_rect;
+	int i, next = pin->zoom_percent;
+	if (direction > 0) {
+		for (i = 0; i < ARRAYSIZE(levels); i++) if (levels[i] > next) { next = levels[i]; break; }
+	} else {
+		for (i = ARRAYSIZE(levels) - 1; i >= 0; i--) if (levels[i] < next) { next = levels[i]; break; }
+	}
+	if (next == pin->zoom_percent || before.right <= before.left || before.bottom <= before.top) return;
+	pin->zoom_percent = next;
+	GetClientRect(pin->hwnd, &client);
+	calculate_image_rect(pin, &client);
+	pin->pan_offset.x += anchor.x - pin->image_rect.left -
+		MulDiv(anchor.x - before.left, pin->image_rect.right - pin->image_rect.left, before.right - before.left);
+	pin->pan_offset.y += anchor.y - pin->image_rect.top -
+		MulDiv(anchor.y - before.top, pin->image_rect.bottom - pin->image_rect.top, before.bottom - before.top);
+	calculate_image_rect(pin, &client);
+	InvalidateRect(pin->hwnd, NULL, FALSE);
 }
 
 static RECT desktop_bounds(void)
@@ -605,7 +716,10 @@ static void refit_image(PINNED_IMAGE *pin)
 
 static BOOL client_to_image(PINNED_IMAGE *pin, POINT point, POINT *image)
 {
-	if (!PtInRect(&pin->image_rect, point)) return FALSE;
+	RECT client;
+	GetClientRect(pin->hwnd, &client);
+	RECT viewport = image_viewport(pin, &client);
+	if (!PtInRect(&viewport, point) || !PtInRect(&pin->image_rect, point)) return FALSE;
 	image->x = MulDiv(point.x - pin->image_rect.left, pin->width, pin->image_rect.right - pin->image_rect.left);
 	image->y = MulDiv(point.y - pin->image_rect.top, pin->height, pin->image_rect.bottom - pin->image_rect.top);
 	if (image->x >= pin->width) image->x = pin->width - 1;
@@ -633,7 +747,12 @@ static int image_stroke_width(PINNED_IMAGE *pin, int multiplier)
 static HCURSOR editor_tool_cursor(PINNED_IMAGE *pin)
 {
 	UINT dpi = GetWindowDpi(pin->hwnd);
-	if (pin->tool != ID_PEN && pin->tool != ID_MARKER && pin->tool != ID_ERASER && pin->tool != ID_ARROW)
+	if (pin->tool == ID_PAN) return LoadCursor(NULL, IDC_SIZEALL);
+	if (pin->tool == ID_ZOOM) return LoadCursor(NULL, IDC_CROSS);
+	if (pin->tool == ID_SELECT) return LoadCursor(NULL, IDC_ARROW);
+	if (pin->tool == ID_TEXT || pin->tool == ID_CALLOUT) return LoadCursor(NULL, IDC_IBEAM);
+	if (pin->tool != ID_PEN && pin->tool != ID_MARKER && pin->tool != ID_ERASER &&
+		pin->tool != ID_ARROW && pin->tool != ID_FRAME_ARROW)
 		return LoadCursor(NULL, IDC_CROSS);
 	if (pin->tool_cursor != NULL && pin->cursor_tool == pin->tool &&
 		pin->cursor_width == pin->stroke_width && pin->cursor_dpi == dpi) return pin->tool_cursor;
@@ -656,14 +775,15 @@ static HCURSOR editor_tool_cursor(PINNED_IMAGE *pin)
 		}
 	} else {
 		int size = MulDiv(32, dpi, 96);
-		HICON icon = LoadImage(pin_instance, MAKEINTRESOURCE(pin->tool == ID_ARROW ? IDR_PIN_ARROW : pin->tool == ID_PEN ? IDR_PIN_PEN : IDR_PIN_MARKER),
+		HICON icon = LoadImage(pin_instance, MAKEINTRESOURCE(pin->tool == ID_FRAME_ARROW ? IDR_PIN_FRAME_ARROW :
+			pin->tool == ID_ARROW ? IDR_PIN_ARROW : pin->tool == ID_PEN ? IDR_PIN_PEN : IDR_PIN_MARKER),
 			IMAGE_ICON, size, size, LR_DEFAULTCOLOR);
 		ICONINFO info;
 		if (icon != NULL) {
 			if (GetIconInfo(icon, &info)) {
 				info.fIcon = FALSE;
-				info.xHotspot = MulDiv(pin->tool == ID_ARROW ? 27 : pin->tool == ID_PEN ? 5 : 16, size, 32);
-				info.yHotspot = MulDiv(pin->tool == ID_ARROW ? 4 : 27, size, 32);
+				info.xHotspot = MulDiv(pin->tool == ID_FRAME_ARROW ? 29 : pin->tool == ID_ARROW ? 27 : pin->tool == ID_PEN ? 5 : 16, size, 32);
+				info.yHotspot = MulDiv(pin->tool == ID_FRAME_ARROW ? 16 : pin->tool == ID_ARROW ? 4 : 27, size, 32);
 				pin->tool_cursor = CreateIconIndirect(&info);
 				DeleteObject(info.hbmMask);
 				if (info.hbmColor != NULL) DeleteObject(info.hbmColor);
@@ -737,6 +857,25 @@ static void draw_segment(PINNED_IMAGE *pin, POINT a, POINT b, BOOL erase)
 	DeleteDC(dst);
 }
 
+static void frame_arrow_points(POINT start, POINT end, int stroke, POINT points[7])
+{
+	double dx = end.x - start.x, dy = end.y - start.y;
+	double length = sqrt(dx * dx + dy * dy);
+	double ux = length > 0 ? dx / length : 1, uy = length > 0 ? dy / length : 0;
+	double head = min(length * 0.55, max(length * 0.34, stroke * 3));
+	double body_half = min(length * 0.18, max(length * 0.10, stroke * 1.5));
+	double head_half = min(length * 0.36, max(length * 0.25, body_half * 1.8));
+	double along[7] = { 0, length - head, length - head, length,
+		length - head, length - head, 0 };
+	double across[7] = { -body_half, -body_half, -head_half, 0,
+		head_half, body_half, body_half };
+	int i;
+	for (i = 0; i < 7; i++) {
+		points[i].x = start.x + (LONG)(ux * along[i] - uy * across[i]);
+		points[i].y = start.y + (LONG)(uy * along[i] + ux * across[i]);
+	}
+}
+
 static void finish_shape(PINNED_IMAGE *pin, POINT end)
 {
 	HDC dc = CreateCompatibleDC(NULL);
@@ -760,6 +899,10 @@ static void finish_shape(PINNED_IMAGE *pin, POINT end)
 			MoveToEx(dc, end.x, end.y, NULL); LineTo(dc, wing1.x, wing1.y);
 			MoveToEx(dc, end.x, end.y, NULL); LineTo(dc, wing2.x, wing2.y);
 		}
+	} else if (pin->tool == ID_FRAME_ARROW) {
+		POINT points[7];
+		frame_arrow_points(pin->start, end, stroke, points);
+		Polygon(dc, points, ARRAYSIZE(points));
 	} else if (pin->tool == ID_RECT || pin->tool == ID_FILLED_RECT) {
 		Rectangle(dc, left, top, right, bottom);
 	} else if (pin->tool == ID_ELLIPSE || pin->tool == ID_FILLED_ELLIPSE) {
@@ -768,6 +911,90 @@ static void finish_shape(PINNED_IMAGE *pin, POINT end)
 	SelectObject(dc, old_brush);
 	if (fill != NULL) DeleteObject(fill);
 	SelectObject(dc, old_pen);
+	DeleteObject(pen);
+	SelectObject(dc, old_bitmap);
+	DeleteDC(dc);
+}
+
+static void render_extra_artifact(PINNED_IMAGE *pin, const PIN_ARTIFACT *item)
+{
+	RECT box = item->box;
+	HDC dc;
+	HBITMAP old_bitmap;
+	HPEN pen, old_pen;
+	HBRUSH brush, old_brush;
+	if (item->tool == ID_SPOTLIGHT) {
+		DIBSECTION dib;
+		int x, y;
+		GdiFlush();
+		if (GetObject(pin->bitmap, sizeof(dib), &dib) != sizeof(dib) || dib.dsBm.bmBits == NULL) return;
+		for (y = 0; y < pin->height; y++) {
+			BYTE *row = (BYTE *)dib.dsBm.bmBits + y * dib.dsBm.bmWidthBytes;
+			for (x = 0; x < pin->width; x++) if (x < box.left || x >= box.right || y < box.top || y >= box.bottom) {
+				row[x * 4] = (BYTE)(row[x * 4] * 55 / 100);
+				row[x * 4 + 1] = (BYTE)(row[x * 4 + 1] * 55 / 100);
+				row[x * 4 + 2] = (BYTE)(row[x * 4 + 2] * 55 / 100);
+			}
+		}
+		return;
+	}
+	dc = CreateCompatibleDC(NULL);
+	if (dc == NULL) return;
+	old_bitmap = SelectObject(dc, pin->bitmap);
+	pen = CreatePen(PS_SOLID, max(1, item->stroke), item->color);
+	old_pen = SelectObject(dc, pen);
+	brush = CreateSolidBrush(item->tool == ID_REDACT ? item->color :
+		item->tool == ID_CALLOUT ? RGB(255, 255, 245) : item->color);
+	old_brush = SelectObject(dc, brush);
+	if (item->tool == ID_REDACT) {
+		Rectangle(dc, box.left, box.top, box.right, box.bottom);
+	} else if (item->tool == ID_STEP) {
+		TCHAR label[16];
+		HFONT font, old_font;
+		int radius = max(12, item->stroke * 4);
+		RECT label_rect = { item->start.x - radius, item->start.y - radius,
+			item->start.x + radius, item->start.y + radius };
+		if (item->start.x != item->end.x || item->start.y != item->end.y) {
+			MoveToEx(dc, item->start.x, item->start.y, NULL);
+			LineTo(dc, item->end.x, item->end.y);
+		}
+		Ellipse(dc, label_rect.left, label_rect.top, label_rect.right, label_rect.bottom);
+		wsprintf(label, TEXT("%d"), item->number);
+		font = CreateFont(-max(12, radius), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+			DEFAULT_PITCH, TEXT("Segoe UI"));
+		old_font = SelectObject(dc, font);
+		SetBkMode(dc, TRANSPARENT);
+		SetTextColor(dc, RGB(255, 255, 255));
+		DrawText(dc, label, -1, &label_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+		SelectObject(dc, old_font);
+		DeleteObject(font);
+	} else if (item->tool == ID_TEXT || item->tool == ID_CALLOUT) {
+		HFONT font, old_font;
+		RECT text_rect = box;
+		if (item->tool == ID_CALLOUT) {
+			POINT anchor = { item->start.x < box.left ? box.left :
+				item->start.x > box.right ? box.right : (box.left + box.right) / 2,
+				item->start.y < box.top ? box.top : box.bottom };
+			MoveToEx(dc, anchor.x, anchor.y, NULL);
+			LineTo(dc, item->start.x, item->start.y);
+			RoundRect(dc, box.left, box.top, box.right, box.bottom, max(8, item->stroke * 4), max(8, item->stroke * 4));
+			InflateRect(&text_rect, -max(6, item->stroke * 2), -max(4, item->stroke));
+		}
+		font = CreateFont(-max(16, item->stroke * 5), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+			DEFAULT_PITCH, TEXT("Segoe UI"));
+		old_font = SelectObject(dc, font);
+		SetBkMode(dc, TRANSPARENT);
+		SetTextColor(dc, item->tool == ID_CALLOUT ? RGB(25, 25, 25) : item->color);
+		if (item->text != NULL) DrawText(dc, item->text, -1, &text_rect,
+			DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+		SelectObject(dc, old_font);
+		DeleteObject(font);
+	}
+	SelectObject(dc, old_brush);
+	SelectObject(dc, old_pen);
+	DeleteObject(brush);
 	DeleteObject(pen);
 	SelectObject(dc, old_bitmap);
 	DeleteDC(dc);
@@ -797,7 +1024,10 @@ static BOOL rebuild_artifacts(PINNED_IMAGE *pin)
 			for (i = 0; i < item->count; i++)
 				draw_segment(pin, i ? item->points[i - 1] : item->points[0], item->points[i], FALSE);
 			if (pin->marker_base != NULL) { DeleteObject(pin->marker_base); pin->marker_base = NULL; }
-		} else finish_shape(pin, item->end);
+		} else if (item->tool == ID_TEXT || item->tool == ID_CALLOUT || item->tool == ID_STEP ||
+			item->tool == ID_REDACT || item->tool == ID_SPOTLIGHT)
+			render_extra_artifact(pin, item);
+		else finish_shape(pin, item->end);
 	}
 	pin->tool = old_tool;
 	pin->current_color = old_color;
@@ -831,6 +1061,16 @@ static BOOL artifact_hit(const PIN_ARTIFACT *item, POINT p, int eraser_radius)
 	double tolerance = (item->stroke * (item->tool == ID_MARKER ? 3 : 1)) / 2.0 + eraser_radius;
 	int i;
 	if (item->deleted) return FALSE;
+	if (item->tool == ID_TEXT || item->tool == ID_REDACT || item->tool == ID_SPOTLIGHT)
+		return p.x >= item->box.left - eraser_radius && p.x <= item->box.right + eraser_radius &&
+			p.y >= item->box.top - eraser_radius && p.y <= item->box.bottom + eraser_radius;
+	if (item->tool == ID_CALLOUT)
+		return PtInRect(&item->box, p) || segment_distance_squared(p, item->start, item->end) <= tolerance * tolerance;
+	if (item->tool == ID_STEP) {
+		int radius = max(12, item->stroke * 4) + eraser_radius;
+		return segment_distance_squared(p, item->start, item->start) <= radius * radius ||
+			segment_distance_squared(p, item->start, item->end) <= tolerance * tolerance;
+	}
 	if (item->tool == ID_PEN || item->tool == ID_MARKER) {
 		for (i = 0; i < item->count; i++)
 			if (segment_distance_squared(p, i ? item->points[i - 1] : item->points[0], item->points[i]) <= tolerance * tolerance)
@@ -849,6 +1089,14 @@ static BOOL artifact_hit(const PIN_ARTIFACT *item, POINT p, int eraser_radius)
 		}
 		return FALSE;
 	}
+	if (item->tool == ID_FRAME_ARROW) {
+		POINT points[7];
+		frame_arrow_points(item->start, item->end, item->stroke, points);
+		for (i = 0; i < 7; i++)
+			if (segment_distance_squared(p, points[i], points[(i + 1) % 7]) <= tolerance * tolerance)
+				return TRUE;
+		return FALSE;
+	}
 	if (p.x < left - tolerance || p.x > right + tolerance ||
 		p.y < top - tolerance || p.y > bottom + tolerance) return FALSE;
 	if (item->tool == ID_FILLED_RECT) return p.x >= left && p.x <= right && p.y >= top && p.y <= bottom;
@@ -865,6 +1113,314 @@ static BOOL artifact_hit(const PIN_ARTIFACT *item, POINT p, int eraser_radius)
 		return normalized > 0 && fabs(distance - distance / normalized) <= tolerance;
 	}
 	return FALSE;
+}
+
+static RECT artifact_bounds(const PIN_ARTIFACT *item)
+{
+	RECT box = { min(item->start.x, item->end.x), min(item->start.y, item->end.y),
+		max(item->start.x, item->end.x), max(item->start.y, item->end.y) };
+	int i;
+	if (item->tool == ID_TEXT || item->tool == ID_REDACT || item->tool == ID_SPOTLIGHT)
+		return item->box;
+	if (item->tool == ID_CALLOUT) {
+		box.left = min(box.left, item->box.left);
+		box.top = min(box.top, item->box.top);
+		box.right = max(box.right, item->box.right);
+		box.bottom = max(box.bottom, item->box.bottom);
+	}
+	if (item->tool == ID_STEP) {
+		int radius = max(12, item->stroke * 4);
+		box.left = min(box.left, item->start.x - radius);
+		box.top = min(box.top, item->start.y - radius);
+		box.right = max(box.right, item->start.x + radius);
+		box.bottom = max(box.bottom, item->start.y + radius);
+	}
+	if (item->tool == ID_FRAME_ARROW) {
+		POINT points[7];
+		frame_arrow_points(item->start, item->end, item->stroke, points);
+		for (i = 0; i < 7; i++) {
+			box.left = min(box.left, points[i].x);
+			box.top = min(box.top, points[i].y);
+			box.right = max(box.right, points[i].x);
+			box.bottom = max(box.bottom, points[i].y);
+		}
+	}
+	for (i = 0; i < item->count; i++) {
+		box.left = min(box.left, item->points[i].x);
+		box.top = min(box.top, item->points[i].y);
+		box.right = max(box.right, item->points[i].x);
+		box.bottom = max(box.bottom, item->points[i].y);
+	}
+	InflateRect(&box, max(3, item->stroke), max(3, item->stroke));
+	return box;
+}
+
+static PIN_ARTIFACT *top_artifact_at(PINNED_IMAGE *pin, POINT point)
+{
+	PIN_ARTIFACT *item, *hit = NULL;
+	for (item = pin->artifacts; item != NULL; item = item->next)
+		if (artifact_hit(item, point, max(3, image_stroke_width(pin, 1)))) hit = item;
+	return hit;
+}
+
+static int selected_bounds(PIN_ARTIFACT *first, RECT *bounds)
+{
+	PIN_ARTIFACT *item;
+	int count = 0;
+	SetRectEmpty(bounds);
+	for (item = first; item != NULL; item = item->next) {
+		RECT box;
+		if (!item->selected || item->deleted) continue;
+		box = artifact_bounds(item);
+		if (count++ == 0) *bounds = box;
+		else UnionRect(bounds, bounds, &box);
+	}
+	return count;
+}
+
+static void clear_selection(PINNED_IMAGE *pin)
+{
+	PIN_ARTIFACT *item;
+	for (item = pin->artifacts; item != NULL; item = item->next) item->selected = FALSE;
+	pin->selected_artifact = NULL;
+}
+
+static LRESULT CALLBACK annotation_edit_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
+	UINT_PTR id, DWORD_PTR data)
+{
+	UNREFERENCED_PARAMETER(id);
+	if (msg == WM_KEYDOWN) {
+		if (wparam == VK_ESCAPE || (wparam == VK_RETURN && GetKeyState(VK_SHIFT) >= 0)) {
+			SendMessage((HWND)data, WM_FINISH_TEXT, wparam == VK_RETURN, 0);
+			return 0;
+		}
+	}
+	if (msg == WM_GETDLGCODE) return DLGC_WANTALLKEYS;
+	return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+static void begin_text_edit(PINNED_IMAGE *pin, PIN_ARTIFACT *item, RECT box)
+{
+	POINT top_left = image_to_client(pin, (POINT){box.left, box.top});
+	POINT bottom_right = image_to_client(pin, (POINT){box.right, box.bottom});
+	int width = max(Scale(120), bottom_right.x - top_left.x);
+	int height = max(Scale(42), bottom_right.y - top_left.y);
+	if (pin->text_edit != NULL) return;
+	pin->editing_artifact = item;
+	pin->selection = box;
+	pin->text_edit = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"),
+		item != NULL && item->text != NULL ? item->text : TEXT(""),
+		WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
+		top_left.x, top_left.y, width, height, pin->hwnd,
+		(HMENU)ID_TEXT_EDIT, pin_instance, NULL);
+	if (pin->text_edit == NULL) return;
+	SendMessage(pin->text_edit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+	SetWindowSubclass(pin->text_edit, annotation_edit_proc, 1, (DWORD_PTR)pin->hwnd);
+	SetFocus(pin->text_edit);
+}
+
+static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept)
+{
+	HWND edit = pin->text_edit;
+	PIN_ARTIFACT *item = pin->editing_artifact;
+	TCHAR *value = NULL;
+	int length;
+	if (edit == NULL) return;
+	length = GetWindowTextLength(edit);
+	if (accept && length > 0) {
+		value = mem_alloc((length + 1) * sizeof(TCHAR));
+		if (value != NULL) GetWindowText(edit, value, length + 1);
+	}
+	pin->text_edit = NULL;
+	pin->editing_artifact = NULL;
+	DestroyWindow(edit);
+	if (value == NULL) return;
+	if (item != NULL) {
+		PIN_ARTIFACT *live;
+		for (live = pin->artifacts; live != NULL && live != item; live = live->next) {}
+		if (live == NULL) { mem_free((void **)&value); return; }
+	}
+	if (item != NULL && item->text != NULL && lstrcmp(item->text, value) == 0) {
+		mem_free((void **)&value);
+		return;
+	}
+	if (!begin_change(pin)) { mem_free((void **)&value); return; }
+	if (item == NULL) {
+		item = add_artifact(pin, pin->text_edit_tool, pin->text_anchor, image_stroke_width(pin, 1));
+		if (item != NULL) {
+			item->box = pin->selection;
+			item->end = (POINT){item->box.left, item->box.top};
+		}
+	}
+	if (item != NULL) {
+		TCHAR *old = item->text;
+		item->text = value;
+		if (rebuild_artifacts(pin)) {
+			if (old != NULL) mem_free((void **)&old);
+		} else {
+			item->text = old;
+			mem_free((void **)&value);
+		}
+		InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+	} else mem_free((void **)&value);
+}
+
+static PIN_ARTIFACT *clone_one_artifact(const PIN_ARTIFACT *source)
+{
+	PIN_ARTIFACT single = *source;
+	single.next = NULL;
+	return clone_artifacts(&single);
+}
+
+static void set_artifact_geometry(PIN_ARTIFACT *target, const PIN_ARTIFACT *source,
+	RECT old_bounds, RECT new_bounds)
+{
+	int i, old_width = max(1, old_bounds.right - old_bounds.left);
+	int old_height = max(1, old_bounds.bottom - old_bounds.top);
+	int new_width = max(1, new_bounds.right - new_bounds.left);
+	int new_height = max(1, new_bounds.bottom - new_bounds.top);
+	#define MAP_X(x) (new_bounds.left + MulDiv((x) - old_bounds.left, new_width, old_width))
+	#define MAP_Y(y) (new_bounds.top + MulDiv((y) - old_bounds.top, new_height, old_height))
+	target->start.x = MAP_X(source->start.x); target->start.y = MAP_Y(source->start.y);
+	target->end.x = MAP_X(source->end.x); target->end.y = MAP_Y(source->end.y);
+	target->box.left = MAP_X(source->box.left); target->box.top = MAP_Y(source->box.top);
+	target->box.right = MAP_X(source->box.right); target->box.bottom = MAP_Y(source->box.bottom);
+	for (i = 0; i < target->count; i++) {
+		target->points[i].x = MAP_X(source->points[i].x);
+		target->points[i].y = MAP_Y(source->points[i].y);
+	}
+	#undef MAP_X
+	#undef MAP_Y
+}
+
+static void offset_artifact(PIN_ARTIFACT *item, int dx, int dy)
+{
+	int i;
+	item->start.x += dx; item->start.y += dy;
+	item->end.x += dx; item->end.y += dy;
+	OffsetRect(&item->box, dx, dy);
+	for (i = 0; i < item->count; i++) {
+		item->points[i].x += dx;
+		item->points[i].y += dy;
+	}
+}
+
+static int selection_handle(RECT box, POINT point, int radius)
+{
+	POINT corners[4] = { {box.left, box.top}, {box.right, box.top},
+		{box.left, box.bottom}, {box.right, box.bottom} };
+	int i;
+	for (i = 0; i < 4; i++)
+		if (abs(point.x - corners[i].x) <= radius && abs(point.y - corners[i].y) <= radius)
+			return i + 2;
+	return 0;
+}
+
+static void preview_selection_drag(PINNED_IMAGE *pin, POINT point)
+{
+	RECT old_bounds, new_bounds;
+	PIN_ARTIFACT *item, *original;
+	int dx, dy;
+	if (pin->drag_original == NULL || pin->drag_mode < 1 || pin->drag_mode > 5) return;
+	if (!selected_bounds(pin->drag_original, &old_bounds)) return;
+	new_bounds = old_bounds;
+	dx = point.x - pin->start.x;
+	dy = point.y - pin->start.y;
+	if (pin->drag_mode == 1) OffsetRect(&new_bounds, dx, dy);
+	else {
+		if (pin->drag_mode == 2 || pin->drag_mode == 4) new_bounds.left += dx;
+		else new_bounds.right += dx;
+		if (pin->drag_mode == 2 || pin->drag_mode == 3) new_bounds.top += dy;
+		else new_bounds.bottom += dy;
+		if (new_bounds.right - new_bounds.left < 4 || new_bounds.bottom - new_bounds.top < 4) return;
+	}
+	for (item = pin->artifacts, original = pin->drag_original;
+		item != NULL && original != NULL; item = item->next, original = original->next)
+		if (original->selected) set_artifact_geometry(item, original, old_bounds, new_bounds);
+	pin->drag_changed = dx != 0 || dy != 0;
+}
+
+static void restore_selection_drag(PINNED_IMAGE *pin)
+{
+	PIN_ARTIFACT *item, *original;
+	RECT old_bounds;
+	if (pin->drag_original == NULL || pin->drag_mode < 1 || pin->drag_mode > 5) return;
+	if (!selected_bounds(pin->drag_original, &old_bounds)) return;
+	for (item = pin->artifacts, original = pin->drag_original;
+		item != NULL && original != NULL; item = item->next, original = original->next)
+		if (original->selected) set_artifact_geometry(item, original, old_bounds, old_bounds);
+}
+
+static void cancel_annotation_drag(PINNED_IMAGE *pin)
+{
+	if (!pin->drawing) return;
+	restore_selection_drag(pin);
+	pin->drawing = FALSE;
+	pin->active_artifact = NULL;
+	pin->drag_mode = 0;
+	pin->drag_changed = FALSE;
+	if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
+	if (GetCapture() == pin->hwnd) ReleaseCapture();
+	InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+}
+
+static void select_in_frame(PINNED_IMAGE *pin, POINT end)
+{
+	RECT frame = { min(pin->start.x, end.x), min(pin->start.y, end.y),
+		max(pin->start.x, end.x), max(pin->start.y, end.y) };
+	PIN_ARTIFACT *item;
+	if (!pin->frame_additive) clear_selection(pin);
+	if (frame.right == frame.left || frame.bottom == frame.top) {
+		item = top_artifact_at(pin, end);
+		if (item != NULL) { item->selected = TRUE; pin->selected_artifact = item; }
+		return;
+	}
+	for (item = pin->artifacts; item != NULL; item = item->next) {
+		RECT hit, box;
+		if (item->deleted) continue;
+		box = artifact_bounds(item);
+		if (IntersectRect(&hit, &frame, &box)) {
+			item->selected = TRUE;
+			pin->selected_artifact = item;
+		}
+	}
+}
+
+static void change_selected_style(PINNED_IMAGE *pin, BOOL color)
+{
+	PIN_ARTIFACT *item;
+	RECT bounds;
+	if (!selected_bounds(pin->artifacts, &bounds) || !begin_change(pin)) return;
+	for (item = pin->artifacts; item != NULL; item = item->next) if (item->selected && !item->deleted) {
+		if (color) item->color = pin->current_color;
+		else item->stroke = image_stroke_width(pin, 1);
+	}
+	if (rebuild_artifacts(pin)) InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+}
+
+static RECT text_box_for_drag(PINNED_IMAGE *pin, POINT start, POINT end, BOOL callout)
+{
+	RECT box;
+	int x = callout ? end.x : min(start.x, end.x);
+	int y = callout ? end.y : min(start.y, end.y);
+	int width = max(150, abs(end.x - start.x));
+	int height = max(52, abs(end.y - start.y));
+	box.left = max(0, min(x, pin->width - 1));
+	box.top = max(0, min(y, pin->height - 1));
+	box.right = min(pin->width, box.left + width);
+	box.bottom = min(pin->height, box.top + height);
+	if (box.right - box.left < width) box.left = max(0, box.right - width);
+	if (box.bottom - box.top < height) box.top = max(0, box.bottom - height);
+	return box;
+}
+
+static int next_step_number(PINNED_IMAGE *pin)
+{
+	PIN_ARTIFACT *item;
+	int number = 0;
+	for (item = pin->artifacts; item != NULL; item = item->next)
+		if (item->tool == ID_STEP && !item->deleted) number = max(number, item->number);
+	return number + 1;
 }
 
 static BOOL erase_artifacts(PINNED_IMAGE *pin, POINT from, POINT to)
@@ -932,6 +1488,65 @@ static HBITMAP crop_bitmap(HBITMAP source, RECT crop, int *width, int *height)
 	return result;
 }
 
+static HBITMAP rotate_bitmap_clockwise(HBITMAP source)
+{
+	DIBSECTION dib;
+	BITMAPINFO bi = {0};
+	HDC screen;
+	HBITMAP result;
+	DWORD *out;
+	int x, y, width, height, stride;
+	if (GetObject(source, sizeof(dib), &dib) != sizeof(dib) || dib.dsBm.bmBits == NULL ||
+		dib.dsBm.bmBitsPixel != 32) return NULL;
+	width = dib.dsBm.bmWidth;
+	height = dib.dsBm.bmHeight;
+	stride = dib.dsBm.bmWidthBytes / sizeof(DWORD);
+	bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	bi.bmiHeader.biWidth = height;
+	bi.bmiHeader.biHeight = -width;
+	bi.bmiHeader.biPlanes = 1;
+	bi.bmiHeader.biBitCount = 32;
+	bi.bmiHeader.biCompression = BI_RGB;
+	screen = GetDC(NULL);
+	if (screen == NULL) return NULL;
+	result = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, (void **)&out, NULL, 0);
+	ReleaseDC(NULL, screen);
+	if (result == NULL) return NULL;
+	GdiFlush();
+	for (y = 0; y < height; y++) {
+		DWORD *row = (DWORD *)dib.dsBm.bmBits + y * stride;
+		for (x = 0; x < width; x++) out[x * height + height - 1 - y] = row[x];
+	}
+	return result;
+}
+
+static BOOL rotate_image_clockwise(PINNED_IMAGE *pin)
+{
+	HBITMAP rotated = rotate_bitmap_clockwise(pin->bitmap), base;
+	if (rotated == NULL) return FALSE;
+	base = clone_bitmap(rotated, NULL, NULL);
+	if (base == NULL || !begin_change_with_base(pin, TRUE)) {
+		if (base != NULL) DeleteObject(base);
+		DeleteObject(rotated);
+		return FALSE;
+	}
+	DeleteObject(pin->bitmap);
+	DeleteObject(pin->original);
+	pin->bitmap = rotated;
+	pin->original = base;
+	free_artifacts(pin->artifacts);
+	pin->artifacts = pin->active_artifact = pin->selected_artifact = NULL;
+	{
+		int width = pin->width;
+		pin->width = pin->height;
+		pin->height = width;
+	}
+	pin->pan_offset.x = pin->pan_offset.y = 0;
+	refit_image(pin);
+	InvalidateRect(pin->hwnd, NULL, FALSE);
+	return TRUE;
+}
+
 static BOOL copy_bitmap_to_clipboard(HWND owner, HBITMAP bitmap)
 {
 	DWORD size = 0;
@@ -969,6 +1584,28 @@ static BOOL copy_bitmap_to_clipboard(HWND owner, HBITMAP bitmap)
 	return TRUE;
 }
 
+static BOOL save_bitmap_as_png(PINNED_IMAGE *pin)
+{
+	OPENFILENAME of = {0};
+	TCHAR path[MAX_PATH] = TEXT("");
+	TCHAR filter[128] = {0};
+	lstrcpyn(filter, pin_text(IDS_PIN_PNG_FILTER), 110);
+	lstrcpy(filter + lstrlen(filter) + 1, TEXT("*.png"));
+	of.lStructSize = sizeof(of);
+	of.hwndOwner = pin->hwnd;
+	of.lpstrFilter = filter;
+	of.lpstrFile = path;
+	of.nMaxFile = MAX_PATH;
+	of.lpstrDefExt = TEXT("png");
+	of.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+	if (!GetSaveFileName(&of)) return FALSE;
+	if (!save_png(pin->bitmap, path)) {
+		MessageBox(pin->hwnd, pin_text(IDS_PIN_SAVE_FAILED), TEXT("CLCL"), MB_OK | MB_ICONERROR);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 
 static BOOL replace_source(PINNED_IMAGE *pin)
 {
@@ -978,6 +1615,7 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	DWORD old_size;
 	DWORD size = 0;
 	BYTE *dib;
+	if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
 	if (pin->source_data == NULL) return FALSE;
 	owner = pin->source_item;
 	if (owner != pin->source_data && data_check(&history_data, owner) == NULL && data_check(&regist_data, owner) == NULL) return FALSE;
@@ -1025,7 +1663,8 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	DeleteObject(pin->original);
 	pin->original = clone_bitmap(pin->bitmap, NULL, NULL);
 	free_artifacts(pin->artifacts);
-	pin->artifacts = pin->active_artifact = NULL;
+	pin->artifacts = pin->active_artifact = pin->selected_artifact = NULL;
+	if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
 	pin->dirty = FALSE;
 	clear_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts, &pin->undo_count);
 	clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
@@ -1061,42 +1700,143 @@ static void theme_editor_popups(HMENU menu)
 	}
 }
 
+static const TCHAR *editor_tool_help(UINT id)
+{
+	switch (id) {
+	case ID_SELECT: return pin_text(IDS_PIN_TOOL_SELECT);
+	case ID_FRAME_SELECT: return pin_text(IDS_PIN_TOOL_FRAME_SELECT);
+	case ID_ZOOM: return pin_text(IDS_PIN_TOOL_ZOOM);
+	case ID_PAN: return pin_text(IDS_PIN_TOOL_PAN);
+	case ID_ROTATE: return pin_text(IDS_PIN_TOOL_ROTATE);
+	case ID_PEN: return pin_text(IDS_PIN_TOOL_PEN);
+	case ID_MARKER: return pin_text(IDS_PIN_TOOL_MARKER);
+	case ID_ERASER: return pin_text(IDS_PIN_TOOL_ERASER);
+	case ID_LINE: return pin_text(IDS_PIN_TOOL_LINE);
+	case ID_ARROW: return pin_text(IDS_PIN_TOOL_ARROW);
+	case ID_FRAME_ARROW: return pin_text(IDS_PIN_TOOL_FRAME_ARROW);
+	case ID_RECT: return pin_text(IDS_PIN_TOOL_RECT);
+	case ID_FILLED_RECT: return pin_text(IDS_PIN_TOOL_FILLED_RECT);
+	case ID_ELLIPSE: return pin_text(IDS_PIN_TOOL_ELLIPSE);
+	case ID_FILLED_ELLIPSE: return pin_text(IDS_PIN_TOOL_FILLED_ELLIPSE);
+	case ID_TEXT: return pin_text(IDS_PIN_TOOL_TEXT);
+	case ID_CALLOUT: return pin_text(IDS_PIN_TOOL_CALLOUT);
+	case ID_STEP: return pin_text(IDS_PIN_TOOL_STEP);
+	case ID_REDACT: return pin_text(IDS_PIN_TOOL_REDACT);
+	case ID_SPOTLIGHT: return pin_text(IDS_PIN_TOOL_SPOTLIGHT);
+	case ID_CROP: return pin_text(IDS_PIN_TOOL_CROP);
+	}
+	return NULL;
+}
+
+static const TCHAR *short_tool_tip(PINNED_IMAGE *pin, UINT id)
+{
+	const TCHAR *source = editor_tool_help(id);
+	TCHAR *target = pin->tool_tip_text;
+	int remaining = ARRAYSIZE(pin->tool_tip_text) - 1;
+	if (source == NULL) return NULL;
+	while (*source && *source != TEXT('\t') && remaining > 0) {
+		if (*source != TEXT('&')) { *target++ = *source; remaining--; }
+		source++;
+	}
+	*target = 0;
+	return pin->tool_tip_text;
+}
+
+static void hide_editor_menu_tip(PINNED_IMAGE *pin)
+{
+	TOOLINFO tip = { sizeof(tip) };
+	KillTimer(pin->hwnd, MENU_TIP_TIMER);
+	pin->menu_tip_id = 0;
+	if (pin->menu_tip == NULL) return;
+	tip.hwnd = pin->hwnd;
+	tip.uId = 1;
+	SendMessage(pin->menu_tip, TTM_TRACKACTIVATE, FALSE, (LPARAM)&tip);
+}
+
+static void show_editor_menu_tip(PINNED_IMAGE *pin)
+{
+	HMENU tools = GetSubMenu(pin->menu, 2);
+	TOOLINFO tip = { sizeof(tip) };
+	MONITORINFO monitor = { sizeof(monitor) };
+	RECT item;
+	DWORD bubble;
+	int i, x, y, width, height;
+	const TCHAR *help = short_tool_tip(pin, pin->menu_tip_id);
+	if (pin->menu_tip == NULL || help == NULL) return;
+	for (i = 0; i < GetMenuItemCount(tools); i++)
+		if (GetMenuItemID(tools, i) == pin->menu_tip_id) break;
+	if (i == GetMenuItemCount(tools) || !GetMenuItemRect(pin->hwnd, tools, i, &item)) return;
+	tip.hwnd = pin->hwnd;
+	tip.uId = 1;
+	tip.lpszText = (TCHAR *)help;
+	SendMessage(pin->menu_tip, TTM_UPDATETIPTEXT, 0, (LPARAM)&tip);
+	bubble = (DWORD)SendMessage(pin->menu_tip, TTM_GETBUBBLESIZE, 0, (LPARAM)&tip);
+	width = LOWORD(bubble);
+	height = HIWORD(bubble);
+	GetMonitorInfo(MonitorFromRect(&item, MONITOR_DEFAULTTONEAREST), &monitor);
+	x = item.right + Scale(8);
+	if (x + width > monitor.rcWork.right) x = item.left - width - Scale(8);
+	y = item.top;
+	if (y + height > monitor.rcWork.bottom) y = monitor.rcWork.bottom - height;
+	SendMessage(pin->menu_tip, TTM_TRACKPOSITION, 0, MAKELPARAM(x, y));
+	SendMessage(pin->menu_tip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&tip);
+	SetWindowPos(pin->menu_tip, HWND_TOPMOST, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 static HMENU create_editor_menu(BOOL can_update)
 {
 	HMENU menu = CreateMenu();
 	HMENU image, edit, tools, color, size;
 	if (menu == NULL) return NULL;
-	image = add_submenu(menu, TEXT("&Image"));
-	edit = add_submenu(menu, TEXT("&Edit"));
-	tools = add_submenu(menu, TEXT("&Tools"));
-	color = add_submenu(menu, TEXT("&Color"));
-	size = add_submenu(menu, TEXT("&Size"));
+	image = add_submenu(menu, pin_text(IDS_PIN_MENU_IMAGE));
+	edit = add_submenu(menu, pin_text(IDS_PIN_MENU_EDIT));
+	tools = add_submenu(menu, pin_text(IDS_PIN_MENU_TOOLS));
+	color = add_submenu(menu, pin_text(IDS_PIN_MENU_COLOR));
+	size = add_submenu(menu, pin_text(IDS_PIN_MENU_SIZE));
 	if (image == NULL || edit == NULL || tools == NULL || color == NULL || size == NULL) {
 		DestroyMenu(menu);
 		return NULL;
 	}
-	if (!AppendMenu(image, MF_STRING, ID_COPY, TEXT("&Copy and close\tCtrl+C")) ||
-		!AppendMenu(image, MF_STRING, ID_UPDATE, TEXT("&Update original")) ||
+	if (!AppendMenu(image, MF_STRING, ID_COPY, pin_text(IDS_PIN_COPY_CLOSE)) ||
+		!AppendMenu(image, MF_STRING, ID_COPY_KEEP, pin_text(IDS_PIN_COPY_KEEP)) ||
+		!AppendMenu(image, MF_STRING, ID_SAVE_PNG, pin_text(IDS_PIN_SAVE_PNG)) ||
+		!AppendMenu(image, MF_STRING, ID_UPDATE, pin_text(IDS_PIN_UPDATE)) ||
 		!AppendMenu(image, MF_SEPARATOR, 0, NULL) ||
-		!AppendMenu(image, MF_STRING, ID_CLOSE, TEXT("&Close\tAlt+F4")) ||
-		!AppendMenu(edit, MF_STRING, ID_UNDO, TEXT("&Undo\tCtrl+Z")) ||
-		!AppendMenu(edit, MF_STRING, ID_REDO, TEXT("&Redo\tCtrl+Y")) ||
-		!AppendMenu(tools, MF_STRING, ID_PEN, TEXT("&Pen")) ||
-		!AppendMenu(tools, MF_STRING, ID_MARKER, TEXT("&Highlighter")) ||
-		!AppendMenu(tools, MF_STRING, ID_ERASER, TEXT("&Eraser")) ||
+		!AppendMenu(image, MF_STRING, ID_CLOSE, pin_text(IDS_PIN_CLOSE)) ||
+		!AppendMenu(edit, MF_STRING, ID_UNDO, pin_text(IDS_PIN_UNDO)) ||
+		!AppendMenu(edit, MF_STRING, ID_REDO, pin_text(IDS_PIN_REDO)) ||
+		!AppendMenu(edit, MF_STRING, ID_DELETE_MARK, pin_text(IDS_PIN_DELETE)) ||
+		!AppendMenu(edit, MF_STRING, ID_DUPLICATE, pin_text(IDS_PIN_DUPLICATE)) ||
+		!AppendMenu(tools, MF_STRING, ID_SELECT, pin_text(IDS_PIN_TOOL_SELECT)) ||
+		!AppendMenu(tools, MF_STRING, ID_FRAME_SELECT, pin_text(IDS_PIN_TOOL_FRAME_SELECT)) ||
+		!AppendMenu(tools, MF_STRING, ID_ZOOM, pin_text(IDS_PIN_TOOL_ZOOM)) ||
+		!AppendMenu(tools, MF_STRING, ID_PAN, pin_text(IDS_PIN_TOOL_PAN)) ||
 		!AppendMenu(tools, MF_SEPARATOR, 0, NULL) ||
-		!AppendMenu(tools, MF_STRING, ID_LINE, TEXT("&Line")) ||
-		!AppendMenu(tools, MF_STRING, ID_ARROW, TEXT("&Arrow")) ||
-		!AppendMenu(tools, MF_STRING, ID_RECT, TEXT("&Rectangle")) ||
-		!AppendMenu(tools, MF_STRING, ID_FILLED_RECT, TEXT("Filled rectangle")) ||
-		!AppendMenu(tools, MF_STRING, ID_ELLIPSE, TEXT("&Ellipse")) ||
-		!AppendMenu(tools, MF_STRING, ID_FILLED_ELLIPSE, TEXT("Filled ellipse")) ||
+		!AppendMenu(tools, MF_STRING, ID_PEN, pin_text(IDS_PIN_TOOL_PEN)) ||
+		!AppendMenu(tools, MF_STRING, ID_MARKER, pin_text(IDS_PIN_TOOL_MARKER)) ||
+		!AppendMenu(tools, MF_STRING, ID_ERASER, pin_text(IDS_PIN_TOOL_ERASER)) ||
 		!AppendMenu(tools, MF_SEPARATOR, 0, NULL) ||
-		!AppendMenu(tools, MF_STRING, ID_CROP, TEXT("&Crop")) ||
-		!AppendMenu(color, MF_STRING, ID_COLOR_RED, TEXT("&Red")) ||
-		!AppendMenu(color, MF_STRING, ID_COLOR_BLUE, TEXT("&Blue")) ||
-		!AppendMenu(color, MF_STRING, ID_COLOR_GREEN, TEXT("&Green")) ||
-		!AppendMenu(color, MF_STRING, ID_COLOR_BLACK, TEXT("&Black")) ||
+		!AppendMenu(tools, MF_STRING, ID_LINE, pin_text(IDS_PIN_TOOL_LINE)) ||
+		!AppendMenu(tools, MF_STRING, ID_ARROW, pin_text(IDS_PIN_TOOL_ARROW)) ||
+		!AppendMenu(tools, MF_STRING, ID_FRAME_ARROW, pin_text(IDS_PIN_TOOL_FRAME_ARROW)) ||
+		!AppendMenu(tools, MF_STRING, ID_RECT, pin_text(IDS_PIN_TOOL_RECT)) ||
+		!AppendMenu(tools, MF_STRING, ID_FILLED_RECT, pin_text(IDS_PIN_TOOL_FILLED_RECT)) ||
+		!AppendMenu(tools, MF_STRING, ID_ELLIPSE, pin_text(IDS_PIN_TOOL_ELLIPSE)) ||
+		!AppendMenu(tools, MF_STRING, ID_FILLED_ELLIPSE, pin_text(IDS_PIN_TOOL_FILLED_ELLIPSE)) ||
+		!AppendMenu(tools, MF_SEPARATOR, 0, NULL) ||
+		!AppendMenu(tools, MF_STRING, ID_TEXT, pin_text(IDS_PIN_TOOL_TEXT)) ||
+		!AppendMenu(tools, MF_STRING, ID_CALLOUT, pin_text(IDS_PIN_TOOL_CALLOUT)) ||
+		!AppendMenu(tools, MF_STRING, ID_STEP, pin_text(IDS_PIN_TOOL_STEP)) ||
+		!AppendMenu(tools, MF_STRING, ID_REDACT, pin_text(IDS_PIN_TOOL_REDACT)) ||
+		!AppendMenu(tools, MF_STRING, ID_SPOTLIGHT, pin_text(IDS_PIN_TOOL_SPOTLIGHT)) ||
+		!AppendMenu(tools, MF_SEPARATOR, 0, NULL) ||
+		!AppendMenu(tools, MF_STRING, ID_CROP, pin_text(IDS_PIN_TOOL_CROP)) ||
+		!AppendMenu(tools, MF_STRING, ID_ROTATE, pin_text(IDS_PIN_TOOL_ROTATE)) ||
+		!AppendMenu(color, MF_STRING, ID_COLOR_RED, pin_text(IDS_PIN_RED)) ||
+		!AppendMenu(color, MF_STRING, ID_COLOR_BLUE, pin_text(IDS_PIN_BLUE)) ||
+		!AppendMenu(color, MF_STRING, ID_COLOR_GREEN, pin_text(IDS_PIN_GREEN)) ||
+		!AppendMenu(color, MF_STRING, ID_COLOR_BLACK, pin_text(IDS_PIN_BLACK)) ||
 		!AppendMenu(size, MF_STRING, ID_WIDTH_3, TEXT("&3 px")) ||
 		!AppendMenu(size, MF_STRING, ID_WIDTH_6, TEXT("&6 px")) ||
 		!AppendMenu(size, MF_STRING, ID_WIDTH_12, TEXT("&12 px"))) {
@@ -1104,7 +1844,7 @@ static HMENU create_editor_menu(BOOL can_update)
 		return NULL;
 	}
 	if (!can_update) EnableMenuItem(image, ID_UPDATE, MF_BYCOMMAND | MF_GRAYED);
-	CheckMenuRadioItem(tools, ID_PEN, ID_CROP, ID_CROP, MF_BYCOMMAND);
+	CheckMenuItem(tools, ID_CROP, MF_BYCOMMAND | MF_CHECKED);
 	CheckMenuRadioItem(color, ID_COLOR_RED, ID_COLOR_BLACK, ID_COLOR_RED, MF_BYCOMMAND);
 	CheckMenuRadioItem(size, ID_WIDTH_3, ID_WIDTH_12, ID_WIDTH_3, MF_BYCOMMAND);
 	return menu;
@@ -1112,19 +1852,18 @@ static HMENU create_editor_menu(BOOL can_update)
 
 static const UINT toolbar_icons[] = {
 	IDR_PIN_UNDO, IDR_PIN_REDO,
-	IDR_PIN_PEN, IDR_PIN_MARKER, IDR_PIN_ERASER, IDR_PIN_LINE, IDR_PIN_ARROW,
+	IDR_PIN_SELECT, IDR_PIN_FRAME_SELECT, IDR_PIN_ZOOM, IDR_PIN_PAN, IDR_PIN_PEN, IDR_PIN_MARKER, IDR_PIN_ERASER,
+	IDR_PIN_LINE, IDR_PIN_ARROW, IDR_PIN_FRAME_ARROW,
 	IDR_PIN_RECT, IDR_PIN_FILLED_RECT, IDR_PIN_ELLIPSE,
-	IDR_PIN_FILLED_ELLIPSE, IDR_PIN_CROP, IDR_PIN_COPY
+	IDR_PIN_FILLED_ELLIPSE, IDR_PIN_TEXT, IDR_PIN_CALLOUT, IDR_PIN_STEP,
+	IDR_PIN_REDACT, IDR_PIN_SPOTLIGHT, IDR_PIN_CROP, IDR_PIN_ROTATE, IDR_PIN_COPY
 };
 static const UINT toolbar_commands[] = {
-	ID_UNDO, ID_REDO, ID_PEN, ID_MARKER, ID_ERASER, ID_LINE, ID_ARROW,
-	ID_RECT, ID_FILLED_RECT, ID_ELLIPSE, ID_FILLED_ELLIPSE, ID_CROP, ID_COPY
+	ID_UNDO, ID_REDO, ID_SELECT, ID_FRAME_SELECT, ID_ZOOM, ID_PAN, ID_PEN, ID_MARKER, ID_ERASER,
+	ID_LINE, ID_ARROW, ID_FRAME_ARROW,
+	ID_RECT, ID_FILLED_RECT, ID_ELLIPSE, ID_FILLED_ELLIPSE, ID_TEXT, ID_CALLOUT,
+	ID_STEP, ID_REDACT, ID_SPOTLIGHT, ID_CROP, ID_ROTATE, ID_COPY
 };
-static const TCHAR *tool_tips[] = {
-	TEXT("Pen"), TEXT("Highlighter"), TEXT("Eraser"), TEXT("Line"), TEXT("Arrow"),
-	TEXT("Rectangle"), TEXT("Ellipse"), TEXT("Crop")
-};
-
 static HICON create_color_swatch_icon(COLORREF color, int size)
 {
 	BITMAPV5HEADER bi;
@@ -1214,7 +1953,23 @@ static void update_color_button_icon(PINNED_IMAGE *pin)
 	size = Scale(TOOL_ICON_SIZE);
 	icon = create_color_swatch_icon(get_pin_color(pin), size);
 	if (icon != NULL) {
-		ImageList_ReplaceIcon(pin->icons, 13, icon);
+		ImageList_ReplaceIcon(pin->icons, ARRAYSIZE(toolbar_icons), icon);
+		DestroyIcon(icon);
+		InvalidateRect(pin->toolbar, NULL, TRUE);
+	}
+}
+
+static void update_size_button_icon(PINNED_IMAGE *pin)
+{
+	HICON icon;
+	UINT resource;
+	if (pin == NULL || pin->icons == NULL || pin->toolbar == NULL) return;
+	resource = pin->stroke_width == 12 ? IDR_PIN_SIZE_12 :
+		pin->stroke_width == 6 ? IDR_PIN_SIZE_6 : IDR_PIN_SIZE;
+	icon = (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(resource), IMAGE_ICON,
+		Scale(TOOL_ICON_SIZE), Scale(TOOL_ICON_SIZE), LR_DEFAULTCOLOR);
+	if (icon != NULL) {
+		ImageList_ReplaceIcon(pin->icons, ARRAYSIZE(toolbar_icons) + 1, icon);
 		DestroyIcon(icon);
 		InvalidateRect(pin->toolbar, NULL, TRUE);
 	}
@@ -1313,6 +2068,10 @@ static LRESULT CALLBACK color_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 		DestroyWindow(hwnd);
 		if (pin != NULL && hit >= 0 && hit < STANDARD_COLOR_COUNT) {
 			pin->current_color = pin->tool == ID_MARKER ? marker_colors[hit] : standard_colors[hit];
+			change_selected_style(pin, TRUE);
+			sync_color_menu(pin);
+			update_color_button_icon(pin);
+			save_pinned_preferences(pin);
 			sync_color_menu(pin);
 			update_color_button_icon(pin);
 			save_pinned_preferences(pin);
@@ -1327,6 +2086,7 @@ static LRESULT CALLBACK color_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 			cc.Flags = CC_FULLOPEN | CC_RGBINIT;
 			if (ChooseColor(&cc)) {
 				pin->current_color = cc.rgbResult;
+				change_selected_style(pin, TRUE);
 				sync_color_menu(pin);
 				update_color_button_icon(pin);
 				save_pinned_preferences(pin);
@@ -1370,7 +2130,7 @@ static LRESULT CALLBACK color_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 		PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
 		COLORREF active_color = get_pin_color(pin);
 		const COLORREF *palette = pin != NULL && pin->tool == ID_MARKER ? marker_colors : standard_colors;
-		const TCHAR *const *palette_names = pin != NULL && pin->tool == ID_MARKER ? marker_color_names : standard_color_names;
+		UINT palette_base = pin != NULL && pin->tool == ID_MARKER ? IDS_PIN_PALETTE_MARKER : IDS_PIN_PALETTE_STANDARD;
 		int i;
 
 		GetClientRect(hwnd, &client);
@@ -1472,10 +2232,10 @@ static LRESULT CALLBACK color_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 			old_font = SelectObject(mem_dc, font);
 
 			if (popup_hovered_index >= 0 && popup_hovered_index < STANDARD_COLOR_COUNT) {
-				DrawText(mem_dc, palette_names[popup_hovered_index], -1, &tr,
+				DrawText(mem_dc, pin_text(palette_base + popup_hovered_index), -1, &tr,
 					DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 			} else {
-				DrawText(mem_dc, TEXT("More Colors..."), -1, &tr,
+				DrawText(mem_dc, pin_text(IDS_PIN_MORE_COLORS), -1, &tr,
 					DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 			}
 			SelectObject(mem_dc, old_font);
@@ -1583,13 +2343,13 @@ static void show_size_popup(PINNED_IMAGE *pin)
 
 static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 {
-	TBBUTTON buttons[19];
+	TBBUTTON buttons[30];
 	HICON icon;
 	RECT bounds;
-	int i, icon_index = 0, size = Scale(TOOL_ICON_SIZE);
-	pin->icons = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, 15, 0);
+	int i, count = 0, size = Scale(TOOL_ICON_SIZE);
+	pin->icons = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, 26, 0);
 	if (pin->icons == NULL) return FALSE;
-	for (i = 0; i < 13; i++) {
+	for (i = 0; i < ARRAYSIZE(toolbar_icons); i++) {
 		icon = (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(toolbar_icons[i]), IMAGE_ICON,
 			size, size, LR_DEFAULTCOLOR);
 		if (icon == NULL || ImageList_AddIcon(pin->icons, icon) == -1) {
@@ -1605,7 +2365,9 @@ static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 		ImageList_AddIcon(pin->icons, icon);
 		DestroyIcon(icon);
 	}
-	icon = (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(IDR_PIN_SIZE), IMAGE_ICON,
+	icon = (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(
+		pin->stroke_width == 12 ? IDR_PIN_SIZE_12 :
+		pin->stroke_width == 6 ? IDR_PIN_SIZE_6 : IDR_PIN_SIZE), IMAGE_ICON,
 		size, size, LR_DEFAULTCOLOR);
 	if (icon != NULL) {
 		ImageList_AddIcon(pin->icons, icon);
@@ -1627,29 +2389,31 @@ static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 	SendMessage(pin->toolbar, TB_SETBUTTONSIZE, 0, MAKELPARAM(Scale(32), Scale(32)));
 	SendMessage(pin->toolbar, TB_SETINDENT, Scale(5), 0);
 	ZeroMemory(buttons, sizeof(buttons));
-	for (i = 0; i < 19; i++) {
-		if (i == 2 || i == 6 || i == 13 || i == 16) {
-			buttons[i].fsStyle = TBSTYLE_SEP;
-			buttons[i].iBitmap = Scale(8);
-		} else if (i == 18) {
-			buttons[i].iBitmap = 14;
-			buttons[i].idCommand = ID_SIZE_DROPDOWN;
-			buttons[i].fsState = TBSTATE_ENABLED;
-			buttons[i].fsStyle = TBSTYLE_BUTTON | BTNS_WHOLEDROPDOWN;
-		} else if (i == 17) {
-			buttons[i].iBitmap = 13;
-			buttons[i].idCommand = ID_COLOR_DROPDOWN;
-			buttons[i].fsState = TBSTATE_ENABLED;
-			buttons[i].fsStyle = TBSTYLE_BUTTON | BTNS_WHOLEDROPDOWN;
-		} else {
-			buttons[i].iBitmap = icon_index;
-			buttons[i].idCommand = toolbar_commands[icon_index];
-			buttons[i].fsState = icon_index < 2 ? 0 : TBSTATE_ENABLED;
-			buttons[i].fsStyle = (icon_index < 2 || icon_index == 12) ? TBSTYLE_BUTTON : TBSTYLE_CHECK;
-			icon_index++;
+	for (i = 0; i < ARRAYSIZE(toolbar_icons) - 1; i++) {
+		if (i == 2 || i == 6 || i == 16) {
+			buttons[count].fsStyle = TBSTYLE_SEP;
+			buttons[count++].iBitmap = Scale(8);
 		}
+		buttons[count].iBitmap = i;
+		buttons[count].idCommand = toolbar_commands[i];
+		buttons[count].fsState = i < 2 ? 0 : TBSTATE_ENABLED;
+		buttons[count++].fsStyle = i < 2 || i == ARRAYSIZE(toolbar_icons) - 2 ? TBSTYLE_BUTTON : TBSTYLE_CHECK;
 	}
-	SendMessage(pin->toolbar, TB_ADDBUTTONS, 19, (LPARAM)buttons);
+	buttons[count].fsStyle = TBSTYLE_SEP;
+	buttons[count++].iBitmap = Scale(8);
+	buttons[count].iBitmap = ARRAYSIZE(toolbar_icons);
+	buttons[count].idCommand = ID_COLOR_DROPDOWN;
+	buttons[count].fsState = TBSTATE_ENABLED;
+	buttons[count++].fsStyle = TBSTYLE_BUTTON | BTNS_WHOLEDROPDOWN;
+	buttons[count].iBitmap = ARRAYSIZE(toolbar_icons) + 1;
+	buttons[count].idCommand = ID_SIZE_DROPDOWN;
+	buttons[count].fsState = TBSTATE_ENABLED;
+	buttons[count++].fsStyle = TBSTYLE_BUTTON | BTNS_WHOLEDROPDOWN;
+	buttons[count].iBitmap = ARRAYSIZE(toolbar_icons) - 1;
+	buttons[count].idCommand = ID_COPY;
+	buttons[count].fsState = TBSTATE_ENABLED;
+	buttons[count++].fsStyle = TBSTYLE_BUTTON;
+	SendMessage(pin->toolbar, TB_ADDBUTTONS, count, (LPARAM)buttons);
 	SendMessage(pin->toolbar, TB_CHECKBUTTON, pin->tool, MAKELONG(TRUE, 0));
 	refresh_history_buttons(pin);
 	SendMessage(pin->toolbar, TB_AUTOSIZE, 0, 0);
@@ -1676,7 +2440,7 @@ BOOL pinned_image_regist(const HINSTANCE instance)
 	pin_instance = instance;
 	ZeroMemory(&wc, sizeof(wc));
 	wc.cbSize = sizeof(wc);
-	wc.style = 0;
+	wc.style = CS_DBLCLKS;
 	wc.lpfnWndProc = pinned_image_proc;
 	wc.hInstance = instance;
 	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
@@ -1687,17 +2451,100 @@ BOOL pinned_image_regist(const HINSTANCE instance)
 	return color_popup_regist(instance);
 }
 
+static void place_editor_below_topmost(HWND editor)
+{
+	HWND window, lowest = NULL;
+	BOOL seen_editor = FALSE, needs_move = FALSE;
+	for (window = GetTopWindow(NULL); window != NULL; window = GetWindow(window, GW_HWNDNEXT)) {
+		if (window == editor) seen_editor = TRUE;
+		else if (IsWindowVisible(window) &&
+			(GetWindowLongPtr(window, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+			lowest = window;
+			if (seen_editor) needs_move = TRUE;
+		}
+	}
+	if (needs_move && lowest != NULL)
+		SetWindowPos(editor, lowest, 0, 0, 0, 0,
+			SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_tool)
 {
 	PINNED_IMAGE *pin;
 	DATA_INFO *data = find_bitmap_data(source);
-	HBITMAP bitmap;
+	HBITMAP bitmap, original;
 	int width, height, window_w, window_h, x, y;
 	POINT primary_point = {0, 0};
 	RECT work;
 	MONITORINFO monitor = { sizeof(monitor) };
 	if (data == NULL) return NULL;
+	if (pin_windows != NULL && IsWindow(pin_windows->hwnd)) {
+		pin = pin_windows;
+		if (pin->source_data == data) {
+			ShowWindow(pin->hwnd, SW_SHOWMAXIMIZED);
+			SetForegroundWindow(pin->hwnd);
+			return pin->hwnd;
+		}
+		cancel_annotation_drag(pin);
+		if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
+		if (source->type == TYPE_ITEM && db_history_is_open()) db_history_ensure_item_data(source);
+		data = find_bitmap_data(source);
+		if (data == NULL) return NULL;
+		bitmap = bitmap_from_data(data, &width, &height);
+		if (bitmap == NULL) return NULL;
+		original = clone_bitmap(bitmap, NULL, NULL);
+		if (original == NULL) { DeleteObject(bitmap); return NULL; }
+		if (pin->dirty && !replace_source(pin)) {
+			DeleteObject(original);
+			DeleteObject(bitmap);
+			MessageBox(pin->hwnd, pin_text(IDS_PIN_SOURCE_MISSING), TEXT("CLCL"), MB_OK | MB_ICONWARNING);
+			SetForegroundWindow(pin->hwnd);
+			return NULL;
+		}
+		hide_editor_menu_tip(pin);
+		if (current_color_popup_hwnd != NULL && IsWindow(current_color_popup_hwnd))
+			DestroyWindow(current_color_popup_hwnd);
+		pin->panning = FALSE;
+		if (GetCapture() == pin->hwnd) ReleaseCapture();
+		clear_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts, &pin->undo_count);
+		clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
+		free_artifacts(pin->artifacts);
+		pin->artifacts = pin->active_artifact = pin->selected_artifact = NULL;
+		if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
+		DeleteObject(pin->bitmap);
+		DeleteObject(pin->original);
+		pin->bitmap = bitmap;
+		pin->original = original;
+		pin->width = width;
+		pin->height = height;
+		pin->dirty = FALSE;
+		pin->zoom_percent = 100;
+		pin->pan_offset.x = pin->pan_offset.y = 0;
+		pin->pending_item = NULL;
+		pin->pending_sequence = 0;
+		pin->source_item = pin->source_data = NULL;
+		{
+			DATA_INFO *parent = data_check(&history_data, source);
+			if (parent == NULL) parent = data_check(&regist_data, source);
+			if (parent != NULL) {
+				pin->source_item = source->type == TYPE_DATA && parent->type == TYPE_ITEM ? parent : source;
+				pin->source_data = data;
+			}
+		}
+		EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE,
+			MF_BYCOMMAND | (pin->source_data != NULL ? MF_ENABLED : MF_GRAYED));
+		refresh_history_buttons(pin);
+		SendMessage(pin->hwnd, WM_COMMAND, initial_tool, 0);
+		refit_image(pin);
+		InvalidateRect(pin->hwnd, NULL, FALSE);
+		ShowWindow(pin->hwnd, SW_SHOWMAXIMIZED);
+		SetForegroundWindow(pin->hwnd);
+		place_editor_below_topmost(pin->hwnd);
+		return pin->hwnd;
+	}
 	if (source->type == TYPE_ITEM && db_history_is_open()) db_history_ensure_item_data(source);
+	data = find_bitmap_data(source);
+	if (data == NULL) return NULL;
 	bitmap = bitmap_from_data(data, &width, &height);
 	if (bitmap == NULL) return NULL;
 	pin = mem_calloc(sizeof(*pin));
@@ -1713,8 +2560,10 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 	pin->owner = owner;
 	pin->bitmap = bitmap;
 	pin->original = clone_bitmap(bitmap, NULL, NULL);
+	if (pin->original == NULL) { DeleteObject(bitmap); mem_free(&pin); return NULL; }
 	pin->width = width;
 	pin->height = height;
+	pin->zoom_percent = 100;
 	pin->tool = initial_tool;
 	pin->stroke_width = (option.pinned_stroke_width == 6 || option.pinned_stroke_width == 12) ? option.pinned_stroke_width : 3;
 	pin->current_color = (option.pinned_color != 0 || option.pinned_tool != 0) ? option.pinned_color : PIN_DEFAULT_COLOR;
@@ -1737,7 +2586,7 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 	y = work.top + (work.bottom - work.top - window_h) / 2;
 	pin->min_window_width = min(Scale(410), window_w);
 	pin->min_window_height = min(Scale(260), window_h);
-	pin->hwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_APPWINDOW, PIN_CLASS, TEXT("CLCL image"),
+	pin->hwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_APPWINDOW, PIN_CLASS, pin_text(IDS_PIN_TITLE),
 		WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, window_w, window_h,
 		NULL, pin->menu, pin_instance, pin);
 	if (pin->hwnd == NULL) {
@@ -1750,9 +2599,27 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 	SetWindowPos(pin->hwnd, NULL, x, y, window_w, window_h, SWP_NOZORDER);
 	SendMessage(pin->hwnd, WM_SIZE, SIZE_RESTORED, 0);
 	ShowWindow(pin->hwnd, SW_SHOWMAXIMIZED);
+	SetForegroundWindow(pin->hwnd);
+	SetFocus(pin->hwnd);
+	place_editor_below_topmost(pin->hwnd);
 	pin->next = pin_windows;
 	pin_windows = pin;
 	return pin->hwnd;
+}
+
+void pinned_image_bind_history(DATA_INFO *item, DWORD sequence, BOOL added)
+{
+	PINNED_IMAGE *pin = pin_windows;
+	if (pin == NULL || (pin->pending_item != item &&
+		(pin->pending_sequence == 0 || pin->pending_sequence != sequence))) return;
+	if (added) {
+		pin->source_item = item;
+		pin->source_data = find_bitmap_data(item);
+		EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE,
+			MF_BYCOMMAND | (pin->source_data != NULL ? MF_ENABLED : MF_GRAYED));
+	}
+	pin->pending_item = NULL;
+	pin->pending_sequence = 0;
 }
 
 HWND pinned_image_open(const HWND owner, DATA_INFO *source)
@@ -1845,7 +2712,8 @@ void pinned_image_auto_open(HWND owner, DATA_INFO *source, DWORD sequence)
 		image.format = CF_BITMAP;
 		image.format_name = TEXT("BITMAP");
 		image.data = cropped;
-		pinned_image_open(owner, &image);
+		if (pinned_image_open(owner, &image) != NULL)
+			pin_windows->pending_item = source;
 	} else MessageBeep(MB_ICONWARNING);
 	if (history_image != NULL) data_free(history_image);
 	DeleteObject(cropped);
@@ -1859,6 +2727,7 @@ typedef struct _SNIP_STATE {
 	POINT start;
 	POINT end;
 	BOOL dragging;
+	BOOL scrolling;
 } SNIP_STATE;
 
 static RECT snip_selection(const SNIP_STATE *snip)
@@ -1869,6 +2738,150 @@ static RECT snip_selection(const SNIP_STATE *snip)
 	rect.right = max(snip->start.x, snip->end.x);
 	rect.bottom = max(snip->start.y, snip->end.y);
 	return rect;
+}
+
+static HBITMAP capture_screen_region(RECT area)
+{
+	BITMAPINFO info = {0};
+	HDC screen = GetDC(NULL), memory;
+	HBITMAP image, old;
+	void *pixels;
+	int width = area.right - area.left, height = area.bottom - area.top;
+	if (screen == NULL || width <= 0 || height <= 0) {
+		if (screen != NULL) ReleaseDC(NULL, screen);
+		return NULL;
+	}
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = width;
+	info.bmiHeader.biHeight = -height;
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	info.bmiHeader.biCompression = BI_RGB;
+	image = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, NULL, 0);
+	memory = CreateCompatibleDC(screen);
+	if (image == NULL || memory == NULL) {
+		if (image != NULL) DeleteObject(image);
+		if (memory != NULL) DeleteDC(memory);
+		ReleaseDC(NULL, screen);
+		return NULL;
+	}
+	old = SelectObject(memory, image);
+	if (!BitBlt(memory, 0, 0, width, height, screen, area.left, area.top, SRCCOPY | CAPTUREBLT)) {
+		SelectObject(memory, old); DeleteDC(memory); ReleaseDC(NULL, screen); DeleteObject(image);
+		return NULL;
+	}
+	SelectObject(memory, old);
+	DeleteDC(memory);
+	ReleaseDC(NULL, screen);
+	return image;
+}
+
+static int find_scroll_shift(HBITMAP before, HBITMAP after)
+{
+	DIBSECTION a, b;
+	int shift, best = 0, best_score = 0, width, height, same = 0, checked = 0;
+	if (GetObject(before, sizeof(a), &a) != sizeof(a) ||
+		GetObject(after, sizeof(b), &b) != sizeof(b) || a.dsBm.bmBits == NULL ||
+		b.dsBm.bmBits == NULL || a.dsBm.bmWidth != b.dsBm.bmWidth ||
+		a.dsBm.bmHeight != b.dsBm.bmHeight) return 0;
+	width = a.dsBm.bmWidth; height = a.dsBm.bmHeight;
+	for (int y = 0; y < height; y += max(1, height / 32)) {
+		BYTE *row_a = (BYTE *)a.dsBm.bmBits + y * a.dsBm.bmWidthBytes + width / 10 * 4;
+		BYTE *row_b = (BYTE *)b.dsBm.bmBits + y * b.dsBm.bmWidthBytes + width / 10 * 4;
+		same += memcmp(row_a, row_b, (width * 8 / 10) * 4) == 0;
+		checked++;
+	}
+	if (same * 100 >= checked * 95) return 0;
+	for (shift = max(4, height / 20); shift < height - 16; shift++) {
+		int score = 0, samples = 0, informative = 0, informative_match = 0, y, x;
+		for (y = 0; y < height - shift; y += max(1, (height - shift) / 24)) {
+			DWORD *row_a = (DWORD *)((BYTE *)a.dsBm.bmBits + (y + shift) * a.dsBm.bmWidthBytes);
+			DWORD *row_b = (DWORD *)((BYTE *)b.dsBm.bmBits + y * b.dsBm.bmWidthBytes);
+			BOOL matched = memcmp(row_a + width / 10, row_b + width / 10,
+				(width * 8 / 10) * 4) == 0;
+			BOOL varied = FALSE;
+			for (x = width / 10 + 1; x < width * 9 / 10; x += max(1, width / 64))
+				if (row_a[x] != row_a[width / 10]) { varied = TRUE; break; }
+			score += matched;
+			samples++;
+			if (varied) { informative++; informative_match += matched; }
+		}
+		if (samples > 0 && informative >= 3 && score * 100 >= samples * 80 &&
+			informative_match * 100 >= informative * 85 && score > best_score) {
+			best = shift; best_score = score;
+		}
+	}
+	return best;
+}
+
+static HBITMAP capture_scrolling_region(RECT area)
+{
+	HBITMAP pages[16] = {0}, result = NULL;
+	int shifts[16] = {0}, count = 0, total, width, height, i;
+	POINT middle = { (area.left + area.right) / 2, (area.top + area.bottom) / 2 };
+	HWND target = WindowFromPoint(middle);
+	DWORD process = 0;
+	BITMAPINFO info = {0};
+	HDC screen, output;
+	void *pixels;
+	if (target == NULL) return NULL;
+	GetWindowThreadProcessId(target, &process);
+	if (process == GetCurrentProcessId()) return NULL;
+	width = area.right - area.left; height = area.bottom - area.top;
+	if (width <= 0 || height <= 0) return NULL;
+	pages[0] = capture_screen_region(area);
+	if (pages[0] == NULL) return NULL;
+	count = 1; total = height;
+	for (i = 1; i < 16 && total < 12000; i++) {
+		DWORD_PTR ignored;
+		HBITMAP next;
+		int shift;
+		if (!SendMessageTimeout(target, WM_MOUSEWHEEL,
+			MAKEWPARAM(0, (WORD)(-WHEEL_DELTA * 5)), MAKELPARAM(middle.x, middle.y),
+			SMTO_ABORTIFHUNG, 150, &ignored)) break;
+		Sleep(120);
+		next = capture_screen_region(area);
+		if (next == NULL) break;
+		shift = find_scroll_shift(pages[count - 1], next);
+		if (shift == 0) { DeleteObject(next); break; }
+		pages[count] = next;
+		shifts[count] = min(shift, 12000 - total);
+		total += shifts[count];
+		count++;
+	}
+	if (count == 1) { result = pages[0]; pages[0] = NULL; goto cleanup; }
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	info.bmiHeader.biWidth = width;
+	info.bmiHeader.biHeight = -total;
+	info.bmiHeader.biPlanes = 1;
+	info.bmiHeader.biBitCount = 32;
+	info.bmiHeader.biCompression = BI_RGB;
+	screen = GetDC(NULL);
+	if (screen == NULL) goto cleanup;
+	result = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, NULL, 0);
+	output = result != NULL ? CreateCompatibleDC(screen) : NULL;
+	if (output != NULL) {
+		HBITMAP old_output = SelectObject(output, result);
+		int offset = 0;
+		for (i = 0; i < count; i++) {
+			HDC input = CreateCompatibleDC(screen);
+			if (input != NULL) {
+				HBITMAP old_input = SelectObject(input, pages[i]);
+				int strip = i == 0 ? height : shifts[i];
+				BitBlt(output, 0, offset, width, strip, input, 0, height - strip, SRCCOPY);
+				offset += strip;
+				SelectObject(input, old_input);
+				DeleteDC(input);
+			}
+		}
+		SelectObject(output, old_output);
+		DeleteDC(output);
+	} else if (result != NULL) { DeleteObject(result); result = NULL; }
+	ReleaseDC(NULL, screen);
+cleanup:
+	if (result == NULL && pages[0] != NULL) { result = pages[0]; pages[0] = NULL; }
+	for (i = 0; i < count; i++) if (pages[i] != NULL) DeleteObject(pages[i]);
+	return result;
 }
 
 static LRESULT CALLBACK snip_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -1914,6 +2927,8 @@ static LRESULT CALLBACK snip_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 		if (snip != NULL && snip->dragging) {
 			RECT selection, bounds;
 			HBITMAP cropped = NULL;
+			BOOL scrolling = snip->scrolling;
+			RECT desktop = snip->desktop;
 			int width, height;
 			DATA_INFO image = {0};
 			HWND owner = snip->owner;
@@ -1923,11 +2938,16 @@ static LRESULT CALLBACK snip_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 			SetRect(&bounds, 0, 0, snip->desktop.right - snip->desktop.left,
 				snip->desktop.bottom - snip->desktop.top);
 			IntersectRect(&selection, &selection, &bounds);
-			if (selection.right > selection.left && selection.bottom > selection.top)
+			if (!scrolling && selection.right > selection.left && selection.bottom > selection.top)
 				cropped = crop_bitmap(snip->screen, selection, &width, &height);
 			snip->dragging = FALSE;
 			ReleaseCapture();
 			DestroyWindow(hwnd);
+			if (scrolling && selection.right > selection.left && selection.bottom > selection.top) {
+				OffsetRect(&selection, desktop.left, desktop.top);
+				Sleep(80);
+				cropped = capture_scrolling_region(selection);
+			}
 			if (cropped != NULL) {
 				if (copy_bitmap_to_clipboard(owner, cropped)) {
 					HWND editor;
@@ -1935,8 +2955,11 @@ static LRESULT CALLBACK snip_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 					image.format = CF_BITMAP;
 					image.format_name = TEXT("BITMAP");
 					image.data = cropped;
-					editor = pinned_image_open(owner, &image);
-					if (editor != NULL) SendMessage(editor, WM_COMMAND, ID_ARROW, 0);
+				editor = pinned_image_open(owner, &image);
+				if (editor != NULL) {
+					pin_windows->pending_sequence = last_copy_sequence;
+					SendMessage(editor, WM_COMMAND, ID_ARROW, 0);
+				}
 				} else MessageBeep(MB_ICONWARNING);
 				DeleteObject(cropped);
 			}
@@ -1990,7 +3013,7 @@ static LRESULT CALLBACK snip_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 	return DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
-BOOL pinned_image_start_snip(HWND owner)
+static BOOL start_snip(HWND owner, BOOL scrolling)
 {
 	static BOOL registered;
 	WNDCLASSEX wc = {0};
@@ -2011,6 +3034,7 @@ BOOL pinned_image_start_snip(HWND owner)
 	snip = mem_calloc(sizeof(*snip));
 	if (snip == NULL) return FALSE;
 	snip->owner = owner;
+	snip->scrolling = scrolling;
 	snip->desktop = desktop_bounds();
 	width = snip->desktop.right - snip->desktop.left;
 	height = snip->desktop.bottom - snip->desktop.top;
@@ -2056,7 +3080,8 @@ BOOL pinned_image_start_snip(HWND owner)
 	DeleteDC(source);
 	DeleteDC(dark);
 	ReleaseDC(NULL, screen);
-	hwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, SNIP_CLASS, TEXT("New snip"),
+	hwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, SNIP_CLASS,
+		scrolling ? pin_text(IDS_SNIP_SCROLLING) : pin_text(IDS_SNIP_NEW),
 		WS_POPUP, snip->desktop.left, snip->desktop.top, width, height,
 		owner, NULL, pin_instance, snip);
 	if (hwnd == NULL) {
@@ -2070,6 +3095,9 @@ BOOL pinned_image_start_snip(HWND owner)
 	SetFocus(hwnd);
 	return TRUE;
 }
+
+BOOL pinned_image_start_snip(HWND owner) { return start_snip(owner, FALSE); }
+BOOL pinned_image_start_scrolling_snip(HWND owner) { return start_snip(owner, TRUE); }
 
 void pinned_image_close_all(void)
 {
@@ -2087,18 +3115,43 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		SetDpiFromWindow(hwnd);
 		dark_mode_set_inverse_window(hwnd);
 		create_editor_toolbar(pin);
+		pin->menu_tip = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, TOOLTIPS_CLASS, NULL,
+			WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
+			CW_USEDEFAULT, CW_USEDEFAULT, hwnd, NULL, pin_instance, NULL);
+		if (pin->menu_tip != NULL) {
+			TOOLINFO tip = { sizeof(tip) };
+			tip.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+			tip.hwnd = hwnd;
+			tip.uId = 1;
+			tip.lpszText = TEXT("");
+			SendMessage(pin->menu_tip, TTM_ADDTOOL, 0, (LPARAM)&tip);
+			SendMessage(pin->menu_tip, TTM_SETMAXTIPWIDTH, 0, Scale(360));
+		}
 		theme_editor_popups(pin->menu);
-		CheckMenuRadioItem(GetSubMenu(pin->menu, 2), ID_PEN, ID_CROP, pin->tool, MF_BYCOMMAND);
+		CheckMenuItem(GetSubMenu(pin->menu, 2), pin->tool, MF_BYCOMMAND | MF_CHECKED);
 		sync_color_menu(pin);
 		CheckMenuRadioItem(GetSubMenu(pin->menu, 4), ID_WIDTH_3, ID_WIDTH_12,
 			pin->stroke_width == 6 ? ID_WIDTH_6 : pin->stroke_width == 12 ? ID_WIDTH_12 : ID_WIDTH_3, MF_BYCOMMAND);
 		return 0;
 	case WM_SETCURSOR:
 		if (pin != NULL && (HWND)wparam == hwnd && LOWORD(lparam) == HTCLIENT) {
-			POINT point;
+			POINT point, image;
 			GetCursorPos(&point);
 			ScreenToClient(hwnd, &point);
-			SetCursor(PtInRect(&pin->image_rect, point) ? editor_tool_cursor(pin) : LoadCursor(NULL, IDC_ARROW));
+			if (pin->panning) { SetCursor(LoadCursor(NULL, IDC_SIZEALL)); return TRUE; }
+			if ((pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) &&
+				client_to_image(pin, point, &image)) {
+				RECT box;
+				int handle = selected_bounds(pin->artifacts, &box) ?
+					selection_handle(box, image, max(5, image_stroke_width(pin, 2))) : 0;
+				PIN_ARTIFACT *hit = top_artifact_at(pin, image);
+				if (handle != 0) {
+					SetCursor(LoadCursor(NULL, handle == 2 || handle == 5 ? IDC_SIZENWSE : IDC_SIZENESW));
+					return TRUE;
+				}
+				if (hit != NULL && hit->selected) { SetCursor(LoadCursor(NULL, IDC_SIZEALL)); return TRUE; }
+			}
+			SetCursor(client_to_image(pin, point, &image) ? editor_tool_cursor(pin) : LoadCursor(NULL, IDC_ARROW));
 			return TRUE;
 		}
 		break;
@@ -2147,6 +3200,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		if (pin != NULL) {
 			RECT client;
 			RECT toolbar_rect;
+			if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
 			if (pin->toolbar != NULL) {
 				SendMessage(pin->toolbar, WM_SIZE, wparam, lparam);
 				GetWindowRect(pin->toolbar, &toolbar_rect);
@@ -2199,17 +3253,11 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		return 0;
 	case WM_SIZING:
 		if (pin != NULL) {
-			RECT *r = (RECT *)lparam, client = {0, 0, pin->width, pin->height};
-			DWORD style = (DWORD)GetWindowLongPtr(hwnd, GWL_STYLE);
-			DWORD exstyle = (DWORD)GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+			RECT *r = (RECT *)lparam;
 			HMONITOR hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 			MONITORINFO mi;
 			RECT work;
-			int chrome_w, chrome_h, max_w, max_h;
-
-			AdjustWindowRectEx(&client, style, TRUE, exstyle);
-			chrome_w = (client.right - client.left) - pin->width + Scale(20);
-			chrome_h = (client.bottom - client.top) - pin->height + pin->toolbar_height + Scale(20);
+			int max_w, max_h, min_w, min_h;
 
 			ZeroMemory(&mi, sizeof(mi));
 			mi.cbSize = sizeof(mi);
@@ -2220,38 +3268,41 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			work = mi.rcWork;
 			max_w = work.right - work.left;
 			max_h = work.bottom - work.top;
+			min_w = pin->min_window_width > 0 ? pin->min_window_width : Scale(410);
+			min_h = pin->min_window_height > 0 ? pin->min_window_height : Scale(260);
 
-			if (wparam == WMSZ_TOP || wparam == WMSZ_BOTTOM) {
-				int wanted_w = MulDiv((r->bottom - r->top) - chrome_h, pin->width, pin->height) + chrome_w;
-				r->right = r->left + wanted_w;
-			} else {
-				int wanted_h = MulDiv((r->right - r->left) - chrome_w, pin->height, pin->width) + chrome_h;
-				if (wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT) r->top = r->bottom - wanted_h;
-				else r->bottom = r->top + wanted_h;
+			if (wparam == WMSZ_LEFT || wparam == WMSZ_RIGHT ||
+				wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT ||
+				wparam == WMSZ_BOTTOMLEFT || wparam == WMSZ_BOTTOMRIGHT) {
+				if (r->right - r->left < min_w) {
+					if (wparam == WMSZ_LEFT || wparam == WMSZ_TOPLEFT || wparam == WMSZ_BOTTOMLEFT)
+						r->left = r->right - min_w;
+					else
+						r->right = r->left + min_w;
+				}
+				if (r->right - r->left > max_w) {
+					if (wparam == WMSZ_LEFT || wparam == WMSZ_TOPLEFT || wparam == WMSZ_BOTTOMLEFT)
+						r->left = r->right - max_w;
+					else
+						r->right = r->left + max_w;
+				}
 			}
 
-			if (r->right - r->left > max_w || r->bottom - r->top > max_h) {
-				int fit_w = max_w, fit_h = max_h;
-				int avail_w = max_w - chrome_w;
-				int avail_h = max_h - chrome_h;
-				if (avail_w > 0 && avail_h > 0 && pin->width > 0 && pin->height > 0) {
-					if (MulDiv(avail_w, pin->height, pin->width) + chrome_h <= max_h) {
-						fit_w = avail_w + chrome_w;
-						fit_h = MulDiv(avail_w, pin->height, pin->width) + chrome_h;
-					} else {
-						fit_h = avail_h + chrome_h;
-						fit_w = MulDiv(avail_h, pin->width, pin->height) + chrome_w;
-					}
+			if (wparam == WMSZ_TOP || wparam == WMSZ_BOTTOM ||
+				wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT ||
+				wparam == WMSZ_BOTTOMLEFT || wparam == WMSZ_BOTTOMRIGHT) {
+				if (r->bottom - r->top < min_h) {
+					if (wparam == WMSZ_TOP || wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT)
+						r->top = r->bottom - min_h;
+					else
+						r->bottom = r->top + min_h;
 				}
-				if (wparam == WMSZ_LEFT || wparam == WMSZ_TOPLEFT || wparam == WMSZ_BOTTOMLEFT)
-					r->left = r->right - fit_w;
-				else
-					r->right = r->left + fit_w;
-
-				if (wparam == WMSZ_TOP || wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT)
-					r->top = r->bottom - fit_h;
-				else
-					r->bottom = r->top + fit_h;
+				if (r->bottom - r->top > max_h) {
+					if (wparam == WMSZ_TOP || wparam == WMSZ_TOPLEFT || wparam == WMSZ_TOPRIGHT)
+						r->top = r->bottom - max_h;
+					else
+						r->bottom = r->top + max_h;
+				}
 			}
 
 			if (r->right > work.right) {
@@ -2311,6 +3362,10 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			}
 		}
 		break;
+	case WM_WINDOWPOSCHANGED:
+		if (pin != NULL && !(((WINDOWPOS *)lparam)->flags & SWP_NOZORDER))
+			place_editor_below_topmost(hwnd);
+		break;
 	case WM_EXITSIZEMOVE:
 		if (pin != NULL) {
 			clamp_pinned_window_to_work_area(pin);
@@ -2322,6 +3377,27 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				MF_BYCOMMAND | (pin->undo_count != 0 ? MF_ENABLED : MF_GRAYED));
 			EnableMenuItem((HMENU)wparam, ID_REDO,
 				MF_BYCOMMAND | (pin->redo_count != 0 ? MF_ENABLED : MF_GRAYED));
+		}
+		break;
+	case WM_MENUSELECT:
+		if (pin != NULL) {
+			UINT id = LOWORD(wparam), flags = HIWORD(wparam);
+			hide_editor_menu_tip(pin);
+			if ((HMENU)lparam == GetSubMenu(pin->menu, 2) &&
+				!(flags & (MF_POPUP | MF_SEPARATOR)) && editor_tool_help(id) != NULL) {
+				pin->menu_tip_id = id;
+				SetTimer(hwnd, MENU_TIP_TIMER, 500, NULL);
+			}
+		}
+		break;
+	case WM_EXITMENULOOP:
+		if (pin != NULL) hide_editor_menu_tip(pin);
+		break;
+	case WM_TIMER:
+		if (pin != NULL && wparam == MENU_TIP_TIMER) {
+			KillTimer(hwnd, MENU_TIP_TIMER);
+			show_editor_menu_tip(pin);
+			return 0;
 		}
 		break;
 	case WM_NOTIFY:
@@ -2344,39 +3420,50 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				}
 			}
 			if (hdr->code == TTN_NEEDTEXT) {
-				if (hdr->idFrom >= ID_PEN && hdr->idFrom <= ID_CROP) {
-					((NMTTDISPINFO *)lparam)->lpszText = (TCHAR *)tool_tips[hdr->idFrom - ID_PEN];
-					return 0;
-				} else if (hdr->idFrom == ID_FILLED_RECT || hdr->idFrom == ID_FILLED_ELLIPSE) {
-					((NMTTDISPINFO *)lparam)->lpszText = hdr->idFrom == ID_FILLED_RECT ?
-						TEXT("Filled rectangle") : TEXT("Filled ellipse");
+				const TCHAR *help = short_tool_tip(pin, (UINT)hdr->idFrom);
+				if (help != NULL) {
+					((NMTTDISPINFO *)lparam)->lpszText = (TCHAR *)help;
 					return 0;
 				} else if (hdr->idFrom == ID_UNDO || hdr->idFrom == ID_REDO) {
 					((NMTTDISPINFO *)lparam)->lpszText =
-						hdr->idFrom == ID_UNDO ? TEXT("Undo (Ctrl+Z)") : TEXT("Redo (Ctrl+Y)");
+						(TCHAR *)pin_text(hdr->idFrom == ID_UNDO ? IDS_PIN_TIP_UNDO : IDS_PIN_TIP_REDO);
 					return 0;
 				} else if (hdr->idFrom == ID_COPY) {
-					((NMTTDISPINFO *)lparam)->lpszText = TEXT("Copy and close (Ctrl+C)");
+					((NMTTDISPINFO *)lparam)->lpszText = (TCHAR *)pin_text(IDS_PIN_TIP_COPY);
 					return 0;
 				} else if (hdr->idFrom == ID_COLOR_DROPDOWN) {
-					((NMTTDISPINFO *)lparam)->lpszText = TEXT("Color");
+					((NMTTDISPINFO *)lparam)->lpszText = (TCHAR *)pin_text(IDS_PIN_TIP_COLOR);
 					return 0;
 				} else if (hdr->idFrom == ID_SIZE_DROPDOWN) {
-					((NMTTDISPINFO *)lparam)->lpszText = TEXT("Stroke size");
+					((NMTTDISPINFO *)lparam)->lpszText = (TCHAR *)pin_text(IDS_PIN_TIP_SIZE);
 					return 0;
 				}
 			}
 		}
 		break;
+	case WM_FINISH_TEXT:
+		if (pin != NULL) finish_text_edit(pin, wparam != 0);
+		return 0;
 	case WM_COMMAND:
 		if (pin == NULL) break;
+		if (LOWORD(wparam) == ID_TEXT_EDIT && HIWORD(wparam) == EN_KILLFOCUS) {
+			finish_text_edit(pin, TRUE);
+			return 0;
+		}
+		if (LOWORD(wparam) == ID_TEXT_EDIT) return 0;
+		if (pin->drawing) cancel_annotation_drag(pin);
+		if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
 		switch (LOWORD(wparam)) {
-		case ID_PEN: case ID_MARKER: case ID_ERASER: case ID_LINE: case ID_ARROW:
+		case ID_PEN: case ID_MARKER: case ID_ERASER: case ID_LINE: case ID_ARROW: case ID_FRAME_ARROW:
 		case ID_RECT: case ID_ELLIPSE: case ID_CROP: case ID_FILLED_RECT: case ID_FILLED_ELLIPSE:
+		case ID_SELECT: case ID_FRAME_SELECT: case ID_ZOOM: case ID_PAN:
+		case ID_TEXT: case ID_CALLOUT: case ID_STEP: case ID_REDACT: case ID_SPOTLIGHT:
 			pin->tool = LOWORD(wparam);
+			if (pin->tool != ID_SELECT && pin->tool != ID_FRAME_SELECT) clear_selection(pin);
+			if (pin->tool == ID_REDACT) pin->current_color = RGB(0, 0, 0);
 			{
 				int i;
-				for (i = 2; i < 12; i++) {
+				for (i = 2; i < ARRAYSIZE(toolbar_icons) - 2; i++) {
 					UINT id = toolbar_commands[i];
 					CheckMenuItem(GetSubMenu(pin->menu, 2), id,
 						MF_BYCOMMAND | (id == pin->tool ? MF_CHECKED : MF_UNCHECKED));
@@ -2384,20 +3471,69 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 						SendMessage(pin->toolbar, TB_CHECKBUTTON, id, MAKELONG(id == pin->tool, 0));
 				}
 			}
+			update_color_button_icon(pin);
+			InvalidateRect(hwnd, &pin->image_rect, FALSE);
 			save_pinned_preferences(pin);
 			break;
 		case ID_UNDO: swap_history(pin, TRUE); break;
 		case ID_REDO: swap_history(pin, FALSE); break;
+		case ID_ROTATE:
+			if (!rotate_image_clockwise(pin)) MessageBeep(MB_ICONWARNING);
+			break;
 		case ID_COPY:
 			if (copy_bitmap_to_clipboard(pin->owner, pin->bitmap)) DestroyWindow(hwnd);
 			else MessageBeep(MB_ICONWARNING);
 			break;
+		case ID_COPY_KEEP:
+			if (!copy_bitmap_to_clipboard(pin->owner, pin->bitmap)) MessageBeep(MB_ICONWARNING);
+			break;
+		case ID_SAVE_PNG:
+			save_bitmap_as_png(pin);
+			break;
+		case ID_DELETE_MARK:
+			{
+				RECT bounds;
+				if (selected_bounds(pin->artifacts, &bounds) && begin_change(pin)) {
+					PIN_ARTIFACT *item;
+					for (item = pin->artifacts; item != NULL; item = item->next)
+						if (item->selected) item->deleted = TRUE;
+					clear_selection(pin);
+				rebuild_artifacts(pin);
+				InvalidateRect(hwnd, &pin->image_rect, FALSE);
+				}
+			}
+			break;
+		case ID_DUPLICATE:
+			if (pin->selected_artifact != NULL) {
+				PIN_ARTIFACT *item, *copies = NULL, **tail = &copies;
+				int delta = max(8, image_stroke_width(pin, 3));
+				for (item = pin->artifacts; item != NULL; item = item->next) if (item->selected && !item->deleted) {
+					*tail = clone_one_artifact(item);
+					if (*tail == NULL) break;
+					offset_artifact(*tail, delta, delta);
+					tail = &(*tail)->next;
+				}
+				if (item == NULL && copies != NULL && begin_change(pin)) {
+					clear_selection(pin);
+					tail = &pin->artifacts;
+					while (*tail != NULL) tail = &(*tail)->next;
+					*tail = copies;
+					for (item = copies; item != NULL; item = item->next) {
+						item->selected = TRUE;
+						pin->selected_artifact = item;
+					}
+					rebuild_artifacts(pin);
+					InvalidateRect(hwnd, &pin->image_rect, FALSE);
+				} else free_artifacts(copies);
+			}
+			break;
 		case ID_UPDATE:
-			if (!replace_source(pin)) MessageBox(hwnd, TEXT("The original image is no longer available."), TEXT("CLCL"), MB_OK | MB_ICONWARNING);
+			if (!replace_source(pin)) MessageBox(hwnd, pin_text(IDS_PIN_SOURCE_MISSING), TEXT("CLCL"), MB_OK | MB_ICONWARNING);
 			break;
 		case ID_COLOR_RED: case ID_COLOR_BLUE: case ID_COLOR_GREEN: case ID_COLOR_BLACK:
 			pin->color_index = LOWORD(wparam) - ID_COLOR_RED;
 			pin->current_color = colors[pin->color_index];
+			change_selected_style(pin, TRUE);
 			sync_color_menu(pin);
 			update_color_button_icon(pin);
 			save_pinned_preferences(pin);
@@ -2410,6 +3546,8 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			break;
 		case ID_WIDTH_3: case ID_WIDTH_6: case ID_WIDTH_12:
 			pin->stroke_width = LOWORD(wparam) == ID_WIDTH_3 ? 3 : LOWORD(wparam) == ID_WIDTH_6 ? 6 : 12;
+			change_selected_style(pin, FALSE);
+			update_size_button_icon(pin);
 			CheckMenuRadioItem(GetSubMenu(pin->menu, 4), ID_WIDTH_3, ID_WIDTH_12,
 				LOWORD(wparam), MF_BYCOMMAND);
 			save_pinned_preferences(pin);
@@ -2419,25 +3557,105 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		return 0;
 	case WM_KEYDOWN:
 		if (wparam == VK_ESCAPE) { SendMessage(hwnd, WM_CLOSE, 0, 0); return 0; }
+		if (wparam == VK_DELETE && pin != NULL && pin->selected_artifact != NULL) {
+			SendMessage(hwnd, WM_COMMAND, ID_DELETE_MARK, 0); return 0;
+		}
 		if (pin != NULL && GetKeyState(VK_CONTROL) < 0) {
 			if (wparam == 'Z' && GetKeyState(VK_SHIFT) < 0) swap_history(pin, FALSE);
 			else if (wparam == 'Z') swap_history(pin, TRUE);
 			else if (wparam == 'Y') swap_history(pin, FALSE);
-			else if (wparam == 'C') SendMessage(hwnd, WM_COMMAND, ID_COPY, 0);
+			else if (wparam == 'C') SendMessage(hwnd, WM_COMMAND,
+				GetKeyState(VK_SHIFT) < 0 ? ID_COPY_KEEP : ID_COPY, 0);
+			else if (wparam == 'S') SendMessage(hwnd, WM_COMMAND, ID_SAVE_PNG, 0);
+			else if (wparam == 'D') SendMessage(hwnd, WM_COMMAND, ID_DUPLICATE, 0);
+			return 0;
+		}
+		break;
+	case WM_LBUTTONDBLCLK:
+		if (pin != NULL && pin->tool == ID_SELECT && pin->selected_artifact != NULL &&
+			(pin->selected_artifact->tool == ID_TEXT || pin->selected_artifact->tool == ID_CALLOUT)) {
+			begin_text_edit(pin, pin->selected_artifact, pin->selected_artifact->box);
+			return 0;
+		}
+		break;
+	case WM_MOUSEWHEEL:
+		if (pin != NULL && !pin->drawing) {
+			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, image;
+			ScreenToClient(hwnd, &point);
+			if (client_to_image(pin, point, &image))
+				zoom_image(pin, point, GET_WHEEL_DELTA_WPARAM(wparam));
+			return 0;
+		}
+		break;
+	case WM_RBUTTONDOWN:
+		if (pin != NULL && !pin->drawing) {
+			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, image;
+			if (client_to_image(pin, point, &image)) {
+				pin->panning = pin->pan_right = TRUE;
+				pin->pan_last = point;
+				SetCapture(hwnd);
+				return 0;
+			}
+		}
+		break;
+	case WM_RBUTTONUP:
+		if (pin != NULL && pin->panning && pin->pan_right) {
+			pin->panning = FALSE;
+			ReleaseCapture();
 			return 0;
 		}
 		break;
 	case WM_LBUTTONDOWN:
 		if (pin != NULL) {
 			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, image;
+			if (pin->panning) return 0;
+			if (pin->tool == ID_ZOOM || pin->tool == ID_PAN) {
+				if (client_to_image(pin, point, &image)) {
+					if (pin->tool == ID_ZOOM) zoom_image(pin, point, (wparam & MK_SHIFT) ? -1 : 1);
+					else {
+						pin->panning = TRUE;
+						pin->pan_right = FALSE;
+						pin->pan_last = point;
+						SetCapture(hwnd);
+					}
+				}
+				return 0;
+			}
 			if (PtInRect(&pin->image_rect, point) && pin->tool != ID_CROP &&
+				pin->tool != ID_SELECT && pin->tool != ID_FRAME_SELECT &&
 				!ensure_drawing_resolution(pin)) { MessageBeep(MB_ICONWARNING); return 0; }
 			if (client_to_image(pin, point, &image)) {
+				if (pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) {
+					PIN_ARTIFACT *hit = top_artifact_at(pin, image);
+					RECT bounds;
+					int handle = selected_bounds(pin->artifacts, &bounds) ?
+						selection_handle(bounds, image, max(5, image_stroke_width(pin, 2))) : 0;
+					if (handle == 0 && (hit == NULL || !hit->selected)) {
+						if (pin->tool == ID_SELECT) {
+							clear_selection(pin);
+							if (hit != NULL) { hit->selected = TRUE; pin->selected_artifact = hit; }
+						} else hit = NULL;
+					}
+					if (pin->drag_original != NULL) free_artifacts(pin->drag_original);
+					pin->drag_mode = handle != 0 ? handle : hit != NULL && hit->selected ? 1 :
+						pin->tool == ID_FRAME_SELECT ? 6 : 0;
+					pin->drag_original = pin->drag_mode >= 1 && pin->drag_mode <= 5 ? clone_artifacts(pin->artifacts) : NULL;
+					if (pin->drag_mode <= 5 && pin->drag_mode != 0 && pin->drag_original == NULL) pin->drag_mode = 0;
+					pin->drag_changed = FALSE;
+					pin->frame_additive = (wparam & MK_SHIFT) != 0;
+					pin->start = pin->last = image;
+					pin->drawing = pin->drag_mode != 0;
+					if (pin->drawing) SetCapture(hwnd);
+					InvalidateRect(hwnd, &pin->image_rect, FALSE);
+					return 0;
+				}
 				pin->drawing = TRUE;
 				pin->start = pin->last = image;
 				pin->erasing_changed = FALSE;
 				pin->active_artifact = NULL;
-				if (pin->tool != ID_ERASER && !begin_change(pin)) {
+				pin->text_anchor = image;
+				if (pin->tool != ID_ERASER && pin->tool != ID_TEXT && pin->tool != ID_CALLOUT &&
+					!begin_change(pin)) {
 					pin->drawing = FALSE; MessageBeep(MB_ICONWARNING); return 0;
 				}
 				if (pin->tool == ID_PEN || pin->tool == ID_MARKER) {
@@ -2455,10 +3673,23 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		return 0;
 	case WM_MOUSEMOVE:
+		if (pin != NULL && pin->panning) {
+			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+			RECT client;
+			pin->pan_offset.x += point.x - pin->pan_last.x;
+			pin->pan_offset.y += point.y - pin->pan_last.y;
+			pin->pan_last = point;
+			GetClientRect(hwnd, &client);
+			calculate_image_rect(pin, &client);
+			InvalidateRect(hwnd, NULL, FALSE);
+			return 0;
+		}
 		if (pin != NULL && pin->drawing) {
 			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, image;
 			if (client_to_image(pin, point, &image)) {
-				if ((pin->tool == ID_PEN || pin->tool == ID_MARKER) &&
+				if ((pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) && pin->drag_original != NULL) {
+					preview_selection_drag(pin, image);
+				} else if ((pin->tool == ID_PEN || pin->tool == ID_MARKER) &&
 					pin->active_artifact != NULL && append_artifact_point(pin->active_artifact, image))
 					draw_segment(pin, pin->last, image, FALSE);
 				else if (pin->tool == ID_ERASER) erase_artifacts(pin, pin->last, image);
@@ -2468,9 +3699,33 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		return 0;
 	case WM_LBUTTONUP:
+		if (pin != NULL && pin->panning && !pin->pan_right) {
+			pin->panning = FALSE;
+			ReleaseCapture();
+			return 0;
+		}
 		if (pin != NULL && pin->drawing) {
 			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, end = pin->last;
 			client_to_image(pin, point, &end);
+			if (pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) {
+				if (pin->drag_mode == 6) select_in_frame(pin, end);
+				else {
+					BOOL changed;
+					preview_selection_drag(pin, end);
+					changed = pin->drag_changed;
+					restore_selection_drag(pin);
+					if (changed && begin_change(pin)) {
+						preview_selection_drag(pin, end);
+						if (!rebuild_artifacts(pin)) restore_selection_drag(pin);
+					}
+				}
+				pin->drawing = FALSE;
+				pin->drag_mode = 0;
+				if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
+				ReleaseCapture();
+				InvalidateRect(hwnd, &pin->image_rect, FALSE);
+				return 0;
+			}
 			if ((pin->tool == ID_PEN || pin->tool == ID_MARKER) && pin->active_artifact != NULL &&
 				(end.x != pin->last.x || end.y != pin->last.y) &&
 				append_artifact_point(pin->active_artifact, end)) draw_segment(pin, pin->last, end, FALSE);
@@ -2478,7 +3733,20 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			pin->drawing = FALSE;
 			pin->active_artifact = NULL;
 			ReleaseCapture();
-			if (pin->tool == ID_LINE || pin->tool == ID_ARROW || pin->tool == ID_RECT ||
+			if (pin->tool == ID_TEXT || pin->tool == ID_CALLOUT) {
+				pin->text_edit_tool = pin->tool;
+				begin_text_edit(pin, NULL, text_box_for_drag(pin, pin->start, end, pin->tool == ID_CALLOUT));
+			} else if (pin->tool == ID_STEP || pin->tool == ID_REDACT || pin->tool == ID_SPOTLIGHT) {
+				PIN_ARTIFACT *item = add_artifact(pin, pin->tool, pin->start, image_stroke_width(pin, 1));
+				if (item != NULL) {
+					item->end = end;
+					item->box = (RECT){ min(pin->start.x, end.x), min(pin->start.y, end.y),
+						max(pin->start.x, end.x), max(pin->start.y, end.y) };
+					if (item->tool == ID_STEP) item->number = next_step_number(pin);
+					if (item->tool == ID_STEP || (item->box.right > item->box.left && item->box.bottom > item->box.top))
+						render_extra_artifact(pin, item);
+				}
+			} else if (pin->tool == ID_LINE || pin->tool == ID_ARROW || pin->tool == ID_FRAME_ARROW || pin->tool == ID_RECT ||
 				pin->tool == ID_ELLIPSE || pin->tool == ID_FILLED_RECT || pin->tool == ID_FILLED_ELLIPSE) {
 				PIN_ARTIFACT *item = add_artifact(pin, pin->tool, pin->start, image_stroke_width(pin, 1));
 				if (item != NULL) { item->end = end; finish_shape(pin, end); }
@@ -2507,11 +3775,8 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		return 0;
 	case WM_CAPTURECHANGED:
-		if (pin != NULL) {
-			pin->drawing = FALSE;
-			pin->active_artifact = NULL;
-			InvalidateRect(hwnd, &pin->image_rect, FALSE);
-		}
+		if (pin != NULL && (HWND)lparam != hwnd) pin->panning = FALSE;
+		if (pin != NULL && pin->drawing && (HWND)lparam != hwnd) cancel_annotation_drag(pin);
 		return 0;
 	case WM_PAINT:
 		if (pin != NULL) {
@@ -2520,8 +3785,9 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			HDC canvas = dc;
 			HBITMAP buffer = NULL, old_buffer = NULL;
 			HBITMAP old;
-			RECT client, image_border, shadow;
+			RECT client, image_border, shadow, viewport;
 			HBRUSH brush;
+			int saved_canvas;
 			BOOL dark = !dark_mode_is_dark();
 			GetClientRect(hwnd, &client);
 			buffer_dc = CreateCompatibleDC(dc);
@@ -2533,6 +3799,9 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			brush = CreateSolidBrush(dark ? RGB(35, 38, 43) : RGB(238, 241, 245));
 			FillRect(canvas, &client, brush);
 			DeleteObject(brush);
+			viewport = image_viewport(pin, &client);
+			saved_canvas = SaveDC(canvas);
+			IntersectClipRect(canvas, viewport.left, viewport.top, viewport.right, viewport.bottom);
 			shadow = pin->image_rect;
 			OffsetRect(&shadow, 3, 4);
 			brush = CreateSolidBrush(dark ? RGB(26, 28, 31) : RGB(205, 211, 218));
@@ -2549,7 +3818,8 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			brush = CreateSolidBrush(dark ? RGB(89, 95, 103) : RGB(188, 196, 205));
 			FrameRect(canvas, &image_border, brush);
 			DeleteObject(brush);
-			if (pin->drawing && pin->tool != ID_PEN && pin->tool != ID_MARKER && pin->tool != ID_ERASER) {
+			if (pin->drawing && pin->tool != ID_SELECT && pin->tool != ID_FRAME_SELECT && pin->tool != ID_PEN &&
+				pin->tool != ID_MARKER && pin->tool != ID_ERASER) {
 				POINT start = image_to_client(pin, pin->start), end = image_to_client(pin, pin->last);
 				int shown_w = pin->image_rect.right - pin->image_rect.left;
 				COLORREF preview_color = (pin->tool == ID_CROP) ?
@@ -2572,6 +3842,10 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 						MoveToEx(canvas, end.x, end.y, NULL); LineTo(canvas, wing1.x, wing1.y);
 						MoveToEx(canvas, end.x, end.y, NULL); LineTo(canvas, wing2.x, wing2.y);
 					}
+				} else if (pin->tool == ID_FRAME_ARROW) {
+					POINT points[7];
+					frame_arrow_points(start, end, preview_width, points);
+					Polygon(canvas, points, ARRAYSIZE(points));
 				} else if (pin->tool == ID_ELLIPSE || pin->tool == ID_FILLED_ELLIPSE) {
 					Ellipse(canvas, min(start.x, end.x), min(start.y, end.y), max(start.x, end.x), max(start.y, end.y));
 				} else {
@@ -2582,8 +3856,44 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				SelectObject(canvas, old_pen);
 				DeleteObject(preview);
 			}
+			if (pin->tool == ID_FRAME_SELECT && pin->drawing && pin->drag_mode == 6) {
+				POINT a = image_to_client(pin, pin->start), b = image_to_client(pin, pin->last);
+				HPEN outline = CreatePen(PS_DASH, 1, RGB(0, 120, 215));
+				HPEN previous = SelectObject(canvas, outline);
+				HBRUSH previous_brush = SelectObject(canvas, GetStockObject(HOLLOW_BRUSH));
+				Rectangle(canvas, min(a.x, b.x), min(a.y, b.y), max(a.x, b.x), max(a.y, b.y));
+				SelectObject(canvas, previous_brush);
+				SelectObject(canvas, previous);
+				DeleteObject(outline);
+			}
+			{
+				RECT box;
+				if ((pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) &&
+					selected_bounds(pin->artifacts, &box)) {
+				POINT a = image_to_client(pin, (POINT){box.left, box.top});
+				POINT b = image_to_client(pin, (POINT){box.right, box.bottom});
+				HPEN outline = CreatePen(PS_DASH, max(1, Scale(1)), RGB(0, 120, 215));
+				HPEN previous = SelectObject(canvas, outline);
+				HBRUSH previous_brush = SelectObject(canvas, GetStockObject(HOLLOW_BRUSH));
+				int x, y;
+				Rectangle(canvas, a.x, a.y, b.x, b.y);
+				SelectObject(canvas, previous_brush);
+				SelectObject(canvas, previous);
+				DeleteObject(outline);
+				for (x = 0; x < 2; x++) for (y = 0; y < 2; y++) {
+					RECT handle = { (x ? b.x : a.x) - Scale(4), (y ? b.y : a.y) - Scale(4),
+						(x ? b.x : a.x) + Scale(5), (y ? b.y : a.y) + Scale(5) };
+					HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
+					HBRUSH blue = CreateSolidBrush(RGB(0, 120, 215));
+					FillRect(canvas, &handle, white);
+					FrameRect(canvas, &handle, blue);
+					DeleteObject(white); DeleteObject(blue);
+				}
+				}
+			}
 			SelectObject(source, old);
 			DeleteDC(source);
+			RestoreDC(canvas, saved_canvas);
 			if (buffer != NULL) {
 				BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top,
 					ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top,
@@ -2596,11 +3906,17 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		return 0;
 	case WM_CLOSE:
+		if (pin != NULL) {
+			cancel_annotation_drag(pin);
+			if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
+		}
 		DestroyWindow(hwnd);
 		return 0;
 	case WM_DESTROY:
 		if (pin != NULL) {
 			PINNED_IMAGE **link = &pin_windows;
+			hide_editor_menu_tip(pin);
+			if (pin->menu_tip != NULL) DestroyWindow(pin->menu_tip);
 			if (current_color_popup_hwnd != NULL && IsWindow(current_color_popup_hwnd)) {
 				DestroyWindow(current_color_popup_hwnd);
 				current_color_popup_hwnd = NULL;
@@ -2614,6 +3930,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			clear_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts, &pin->undo_count);
 			clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
 			free_artifacts(pin->artifacts);
+			if (pin->drag_original != NULL) free_artifacts(pin->drag_original);
 			DeleteObject(pin->original);
 			DeleteObject(pin->bitmap);
 			SetMenu(hwnd, NULL);

@@ -78,6 +78,34 @@ int test_menu_show_align(HWND owner, HMENU menu, const POINT *pos, UINT align)
 #define CHECK(condition, message) do { if (!(condition)) { \
     printf("FAIL: %s (phase %d)\n", message, phase); failures++; } } while (0)
 
+static DWORD toolbar_icon_checksum(HIMAGELIST icons, int index)
+{
+    BITMAPINFO info = {0};
+    HDC screen = GetDC(NULL), dc = CreateCompatibleDC(screen);
+    HBITMAP bitmap, previous;
+    DWORD *pixels = NULL, hash = 2166136261u;
+    int width, height, i;
+    ImageList_GetIconSize(icons, &width, &height);
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, (void **)&pixels, NULL, 0);
+    if (bitmap == NULL) { DeleteDC(dc); ReleaseDC(NULL, screen); return 0; }
+    previous = SelectObject(dc, bitmap);
+    PatBlt(dc, 0, 0, width, height, BLACKNESS);
+    if (ImageList_Draw(icons, index, dc, 0, 0, ILD_NORMAL))
+        for (i = 0; i < width * height; i++) hash = (hash ^ pixels[i]) * 16777619u;
+    else hash = 0;
+    SelectObject(dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+    ReleaseDC(NULL, screen);
+    return hash;
+}
+
 static void test_pinned_image_edit_core(HWND owner)
 {
     HDC screen = GetDC(NULL), dc = CreateCompatibleDC(screen);
@@ -97,6 +125,31 @@ static void test_pinned_image_edit_core(HWND owner)
     SelectObject(dc, prior);
     DeleteDC(dc);
     ReleaseDC(NULL, screen);
+    {
+        BITMAPINFO info = {0};
+        DWORD *pixels = NULL;
+        DIBSECTION rotated_info;
+        HDC display = GetDC(NULL);
+        HBITMAP sample, rotated;
+        int i;
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 3;
+        info.bmiHeader.biHeight = -2;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        sample = CreateDIBSection(display, &info, DIB_RGB_COLORS, (void **)&pixels, NULL, 0);
+        ReleaseDC(NULL, display);
+        if (sample != NULL) for (i = 0; i < 6; i++) pixels[i] = i + 1;
+        rotated = sample != NULL ? rotate_bitmap_clockwise(sample) : NULL;
+        CHECK(rotated != NULL && GetObject(rotated, sizeof(rotated_info), &rotated_info) == sizeof(rotated_info) &&
+            rotated_info.dsBm.bmWidth == 2 && rotated_info.dsBm.bmHeight == 3 &&
+            ((DWORD *)rotated_info.dsBm.bmBits)[0] == 4 && ((DWORD *)rotated_info.dsBm.bmBits)[1] == 1 &&
+            ((DWORD *)rotated_info.dsBm.bmBits)[4] == 6 && ((DWORD *)rotated_info.dsBm.bmBits)[5] == 3,
+            "clockwise rotation swaps dimensions and preserves pixel positions");
+        if (rotated != NULL) DeleteObject(rotated);
+        if (sample != NULL) DeleteObject(sample);
+    }
     {
         const int tools[] = {ID_RECT, ID_FILLED_RECT, ID_ELLIPSE, ID_FILLED_ELLIPSE};
         int shape;
@@ -121,6 +174,37 @@ static void test_pinned_image_edit_core(HWND owner)
             DeleteDC(sample_dc);
             DeleteObject(sample.bitmap);
         }
+    }
+    {
+        PINNED_IMAGE sample = {0};
+        PIN_ARTIFACT item = {0};
+        HDC image_dc = CreateCompatibleDC(NULL);
+        HBITMAP old;
+        RECT bounds;
+        sample.bitmap = clone_bitmap(source, NULL, NULL);
+        sample.width = 80; sample.height = 40;
+        sample.tool = ID_FRAME_ARROW;
+        sample.stroke_width = 3;
+        sample.current_color = RGB(220, 32, 32);
+        sample.start = (POINT){10, 20};
+        SetRect(&sample.image_rect, 0, 0, 80, 40);
+        finish_shape(&sample, (POINT){70, 20});
+        old = SelectObject(image_dc, sample.bitmap);
+        CHECK(GetPixel(image_dc, 10, 20) == sample.current_color &&
+            GetPixel(image_dc, 35, 20) == RGB(255, 255, 255),
+            "Frame arrow draws a colored outline with a clear interior");
+        SelectObject(image_dc, old);
+        DeleteDC(image_dc);
+        DeleteObject(sample.bitmap);
+        item.tool = ID_FRAME_ARROW;
+        item.start = sample.start;
+        item.end = (POINT){70, 20};
+        item.stroke = 3;
+        bounds = artifact_bounds(&item);
+        CHECK(bounds.top < 20 && bounds.bottom > 20 &&
+            artifact_hit(&item, (POINT){10, 20}, 2) &&
+            !artifact_hit(&item, (POINT){35, 20}, 2),
+            "Frame arrow outline supports selection and erasing");
     }
     {
         PINNED_IMAGE marks = {0};
@@ -321,6 +405,10 @@ static void test_pinned_image_edit_core(HWND owner)
                 GetObject(item->child->data, sizeof(bm), &bm) &&
                 pin_windows != before && bm.bmWidth == pin_windows->width && bm.bmHeight == pin_windows->height,
                 "pending history item contains only cropped bitmap before persistence");
+            pinned_image_bind_history(item, 1006, TRUE);
+            CHECK(pin_windows != before && pin_windows->source_item == item &&
+                pin_windows->source_data == item->child,
+                "automatic screenshot editor binds to its saved history item");
             if (pin_windows != before) DestroyWindow(pin_windows->hwnd);
             data_free(item);
             if (copied_bitmap != NULL) DeleteObject(copied_bitmap);
@@ -329,13 +417,77 @@ static void test_pinned_image_edit_core(HWND owner)
         DeleteObject(screenshot);
         last_copy_sequence = last_auto_sequence = 0;
     }
-    editor = pinned_image_open(owner, &image_data);
+    {
+        HWND guard = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, TEXT("STATIC"),
+            TEXT(""), WS_POPUP, 1, 1, 2, 2, NULL, NULL, hInst, NULL);
+        HWND cursor;
+        if (guard != NULL) ShowWindow(guard, SW_SHOWNOACTIVATE);
+        editor = pinned_image_open(owner, &image_data);
+        for (cursor = GetTopWindow(NULL); cursor != NULL && cursor != guard && cursor != editor;
+            cursor = GetWindow(cursor, GW_HWNDNEXT)) {}
+        CHECK(guard != NULL && cursor == guard,
+            "editor remains below existing topmost windows");
+        if (guard != NULL && editor != NULL) {
+            SetWindowPos(editor, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            for (cursor = GetTopWindow(NULL); cursor != NULL && cursor != guard && cursor != editor;
+                cursor = GetWindow(cursor, GW_HWNDNEXT)) {}
+            CHECK(cursor == guard, "raising the editor keeps other topmost windows above it");
+        }
+        if (guard != NULL) DestroyWindow(guard);
+    }
     CHECK(dark_mode_window_is_dark(editor) != dark_mode_is_dark(), "editor theme is inverse of application theme");
     CHECK(editor != NULL && (GetWindowLongPtr(editor, GWL_EXSTYLE) & WS_EX_TOPMOST),
         "pinned editor opens topmost");
     CHECK(editor != NULL && (GetWindowLongPtr(editor, GWL_STYLE) & WS_OVERLAPPEDWINDOW) == WS_OVERLAPPEDWINDOW &&
         GetWindow(editor, GW_OWNER) == NULL && (GetWindowLongPtr(editor, GWL_EXSTYLE) & WS_EX_APPWINDOW),
         "pinned editor uses an independent standard Windows frame");
+    {
+        DATA_INFO first = {0}, second = {0};
+        DATA_INFO *saved_head = history_data.child, *history_item;
+        HBITMAP next = scale_bitmap(source, 40, 20);
+        HWND reused;
+        TCHAR error[BUF_SIZE];
+        first.type = second.type = TYPE_DATA;
+        first.format = second.format = CF_BITMAP;
+        first.format_name = second.format_name = TEXT("BITMAP");
+        first.data = source;
+        second.data = next;
+        reused = pinned_image_open(owner, &second);
+        CHECK(editor != NULL && reused == editor && pin_windows->next == NULL &&
+            pin_windows->width == 40 && pin_windows->height == 20,
+            "opening another bitmap reuses the editor window and replaces its canvas");
+        reused = pinned_image_open(owner, &first);
+        CHECK(editor != NULL && reused == editor && pin_windows->width == 80 && pin_windows->height == 40,
+            "reused editor loads the next bitmap without creating a second window");
+        history_item = data_create_item(TEXT("Previous image"), FALSE, error);
+        if (history_item != NULL) {
+            history_item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"),
+                clone_bitmap(source, NULL, NULL), 0, FALSE, error);
+            history_item->next = saved_head;
+            history_data.child = history_item;
+            if (history_item->child != NULL && pinned_image_open(owner, history_item) == editor) {
+                HDC memory = CreateCompatibleDC(NULL);
+                HBITMAP old = SelectObject(memory, pin_windows->bitmap);
+                SetPixelV(memory, 0, 0, RGB(220, 32, 32));
+                SelectObject(memory, old);
+                DeleteDC(memory);
+                pin_windows->dirty = TRUE;
+                reused = pinned_image_open(owner, &second);
+                memory = CreateCompatibleDC(NULL);
+                old = SelectObject(memory, history_item->child->data);
+                CHECK(reused == editor && GetPixel(memory, 0, 0) == RGB(220, 32, 32),
+                    "switching images updates the previous bitmap in history before reuse");
+                SelectObject(memory, old);
+                DeleteDC(memory);
+            }
+            pinned_image_open(owner, &first);
+            history_data.child = saved_head;
+            history_item->next = NULL;
+            data_free(history_item);
+        }
+        if (next != NULL) DeleteObject(next);
+    }
     {
         WINDOWPLACEMENT placement = { sizeof(placement) };
         MONITORINFO monitor = { sizeof(monitor) };
@@ -371,16 +523,75 @@ static void test_pinned_image_edit_core(HWND owner)
             if (info.hbmMask != NULL) DeleteObject(info.hbmMask);
             if (info.hbmColor != NULL) DeleteObject(info.hbmColor);
         }
+        {
+            ICONINFO info = {0};
+            int size = MulDiv(32, GetWindowDpi(editor), 96);
+            pin_windows->tool = ID_FRAME_ARROW;
+            CHECK(GetIconInfo(editor_tool_cursor(pin_windows), &info) && !info.fIcon &&
+                info.xHotspot == (DWORD)MulDiv(29, size, 32) &&
+                info.yHotspot == (DWORD)MulDiv(16, size, 32),
+                "Frame arrow has a cursor with its hotspot at the arrow tip");
+            if (info.hbmMask != NULL) DeleteObject(info.hbmMask);
+            if (info.hbmColor != NULL) DeleteObject(info.hbmColor);
+        }
         pin_windows->tool = ID_CROP;
     }
     menu = GetMenu(editor);
     CHECK(menu != NULL && GetMenuItemCount(menu) == 5, "editor has a standard five-part menu bar");
+    {
+        TCHAR label[64];
+        GetMenuString(menu, 0, label, ARRAYSIZE(label), MF_BYPOSITION);
+        CHECK(lstrcmp(label, pin_text(IDS_PIN_MENU_IMAGE)) == 0 &&
+            lstrlen(label) < 16, "resource menu titles end at their own text");
+    }
     image_menu = GetSubMenu(menu, 0);
     tools_menu = GetSubMenu(menu, 2);
     color_menu = GetSubMenu(menu, 3);
     size_menu = GetSubMenu(menu, 4);
-    CHECK(GetMenuItemID(image_menu, 0) == ID_COPY && GetMenuItemID(image_menu, 1) == ID_UPDATE,
-        "Image menu exposes copy and update");
+    {
+        LANGID previous = GetThreadUILanguage();
+        const LANGID languages[] = {
+            MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+            MAKELANGID(LANG_GERMAN, SUBLANG_GERMAN),
+            MAKELANGID(LANG_JAPANESE, SUBLANG_DEFAULT),
+            MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED),
+            MAKELANGID(LANG_UKRAINIAN, SUBLANG_DEFAULT)
+        };
+        TCHAR english_snip[64];
+        int language;
+        SetThreadUILanguage(languages[0]);
+        lstrcpyn(english_snip, pin_text(IDS_SNIP_NEW), ARRAYSIZE(english_snip));
+        for (language = 0; language < ARRAYSIZE(languages); language++) {
+            SetThreadUILanguage(languages[language]);
+            CHECK(*pin_text(IDS_SNIP_NEW) && *pin_text(IDS_PIN_TOOL_REDACT) &&
+                *pin_text(IDS_PIN_TOOL_FRAME_SELECT) && *pin_text(IDS_PIN_PALETTE_MARKER + 15),
+                "snip and image editor strings load in every supported language");
+            if (language != 0)
+                CHECK(lstrcmp(english_snip, pin_text(IDS_SNIP_NEW)) != 0,
+                    "selected UI language changes new snip text");
+        }
+        SetThreadUILanguage(previous);
+    }
+    CHECK(pin_windows->menu_tip != NULL, "editor creates a menu tooltip window");
+    CHECK(GetMenuState(tools_menu, ID_FRAME_SELECT, MF_BYCOMMAND) != (UINT)-1 &&
+        lstrlen(short_tool_tip(pin_windows, ID_REDACT)) < 32 &&
+        _tcschr(short_tool_tip(pin_windows, ID_REDACT), TEXT('&')) == NULL,
+        "Frame select is available and tooltips use short tool names");
+    for (id = 0; id < GetMenuItemCount(tools_menu); id++) {
+        UINT tool_id = GetMenuItemID(tools_menu, id);
+        if (tool_id != (UINT)-1 && tool_id != 0)
+            CHECK(editor_tool_help(tool_id) != NULL && *editor_tool_help(tool_id) != 0,
+                "every Tools menu command has help text");
+    }
+    SendMessage(editor, WM_MENUSELECT, MAKEWPARAM(ID_PEN, 0), (LPARAM)tools_menu);
+    CHECK(pin_windows->menu_tip_id == ID_PEN, "hovering a tool schedules its tooltip");
+    SendMessage(editor, WM_EXITMENULOOP, 0, 0);
+    CHECK(pin_windows->menu_tip_id == 0, "closing the menu cancels its tooltip");
+    CHECK(GetMenuItemID(image_menu, 0) == ID_COPY &&
+        GetMenuItemID(image_menu, 1) == ID_COPY_KEEP &&
+        GetMenuItemID(image_menu, 2) == ID_SAVE_PNG &&
+        GetMenuItemID(image_menu, 3) == ID_UPDATE,
+        "Image menu exposes copy, save, and update");
     CHECK(GetMenuState(image_menu, ID_UPDATE, MF_BYCOMMAND) & MF_GRAYED,
         "detached bitmap cannot overwrite a source");
     for (id = ID_PEN; id <= ID_CROP; id++)
@@ -389,6 +600,9 @@ static void test_pinned_image_edit_core(HWND owner)
     CHECK(GetMenuState(tools_menu, ID_FILLED_RECT, MF_BYCOMMAND) != (UINT)-1 &&
         GetMenuState(tools_menu, ID_FILLED_ELLIPSE, MF_BYCOMMAND) != (UINT)-1,
         "both filled shapes are present in the Tools menu");
+    CHECK(GetMenuItemCount(GetSubMenu(menu, 1)) == 4 &&
+        GetMenuState(tools_menu, ID_REDACT, MF_BYCOMMAND) != (UINT)-1,
+        "automatic face redaction is absent while manual redaction remains");
     CHECK(GetMenuState(tools_menu, ID_CROP, MF_BYCOMMAND) & MF_CHECKED,
         "Crop is initially checked");
     SendMessage(editor, WM_COMMAND, ID_RECT, 0);
@@ -413,9 +627,25 @@ static void test_pinned_image_edit_core(HWND owner)
         RECT toolbar_rect;
         CHECK(toolbar != NULL && (GetWindowLong(toolbar, GWL_STYLE) & TBSTYLE_FLAT),
             "editor uses a flat native toolbar");
-        CHECK(toolbar != NULL && SendMessage(toolbar, TB_BUTTONCOUNT, 0, 0) == 19 &&
-            ImageList_GetImageCount((HIMAGELIST)SendMessage(toolbar, TB_GETIMAGELIST, 0, 0)) == 15,
+        CHECK(toolbar != NULL && SendMessage(toolbar, TB_BUTTONCOUNT, 0, 0) == 30 &&
+            ImageList_GetImageCount((HIMAGELIST)SendMessage(toolbar, TB_GETIMAGELIST, 0, 0)) == 26,
             "undo, redo, editing tools, color and size dropdowns have icons");
+        CHECK(toolbar != NULL &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FRAME_SELECT, 0) ==
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_SELECT, 0) + 1 &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ZOOM, 0) ==
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FRAME_SELECT, 0) + 1 &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_PAN, 0) ==
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ZOOM, 0) + 1 &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FRAME_ARROW, 0) ==
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ARROW, 0) + 1 &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ROTATE, 0) ==
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_CROP, 0) + 1 &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_COPY, 0) ==
+                SendMessage(toolbar, TB_BUTTONCOUNT, 0, 0) - 1 &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_COLOR_DROPDOWN, 0) <
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_SIZE_DROPDOWN, 0),
+            "multi-select follows Select, Frame arrow follows Arrow, and Copy ends the row");
         CHECK(toolbar != NULL && SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FILLED_RECT, 0) >= 0 &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FILLED_ELLIPSE, 0) >= 0 &&
             FindResource(hInst, MAKEINTRESOURCE(IDR_PIN_FILLED_RECT), RT_GROUP_ICON) != NULL &&
@@ -450,6 +680,28 @@ static void test_pinned_image_edit_core(HWND owner)
                 "image canvas starts below the toolbar");
     }
     {
+        RECT before = pin_windows->image_rect, zoomed;
+        POINT anchor = { before.left + (before.right - before.left) / 3,
+            before.top + (before.bottom - before.top) / 3 }, image_before, image_after, screen = anchor;
+        client_to_image(pin_windows, anchor, &image_before);
+        ClientToScreen(editor, &screen);
+        SendMessage(editor, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), MAKELPARAM(screen.x, screen.y));
+        zoomed = pin_windows->image_rect;
+        client_to_image(pin_windows, anchor, &image_after);
+        CHECK(pin_windows->zoom_percent == 125 &&
+            zoomed.right - zoomed.left > before.right - before.left &&
+            abs(image_before.x - image_after.x) <= 1 && abs(image_before.y - image_after.y) <= 1,
+            "wheel zoom enlarges image around cursor without changing annotation coordinates");
+        SendMessage(editor, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(anchor.x, anchor.y));
+        SendMessage(editor, WM_MOUSEMOVE, MK_RBUTTON, MAKELPARAM(anchor.x - 20, anchor.y));
+        SendMessage(editor, WM_RBUTTONUP, 0, MAKELPARAM(anchor.x - 20, anchor.y));
+        CHECK(!pin_windows->panning && pin_windows->image_rect.left < zoomed.left,
+            "right-button drag pans the zoomed image and releases capture");
+        SendMessage(editor, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA), MAKELPARAM(screen.x, screen.y));
+        CHECK(pin_windows->zoom_percent == 100 && EqualRect(&pin_windows->image_rect, &before),
+            "zooming back to fit recenters the image");
+    }
+    {
         RECT before, after, restored;
         RECT image_after;
         POINT start = image_to_client(pin_windows, (POINT){10, 5});
@@ -482,6 +734,17 @@ static void test_pinned_image_edit_core(HWND owner)
         SendMessage(editor, WM_COMMAND, ID_UNDO, 0);
         GetWindowRect(editor, &after);
         CHECK(EqualRect(&before, &after), "undo crop preserves restored window bounds");
+        SendMessage(editor, WM_COMMAND, ID_ROTATE, 0);
+        CHECK(pin_windows->width == 40 && pin_windows->height == 80 &&
+            GetObject(pin_windows->original, sizeof(original), &original) &&
+            original.bmWidth == 40 && original.bmHeight == 80,
+            "rotate command turns the image and its editing base clockwise");
+        SendMessage(editor, WM_COMMAND, ID_UNDO, 0);
+        CHECK(pin_windows->width == 80 && pin_windows->height == 40,
+            "undo restores image orientation");
+        SendMessage(editor, WM_COMMAND, ID_REDO, 0);
+        CHECK(pin_windows->width == 40 && pin_windows->height == 80,
+            "redo reapplies image rotation");
     }
     if (editor != NULL) DestroyWindow(editor);
     {
@@ -613,6 +876,8 @@ static void test_pinned_image_edit_core(HWND owner)
             }
 
             /* 7. Test closing a dirty pinned window closes without confirmation dialog */
+            DestroyWindow(editor);
+            editor = NULL;
             {
                 HWND close_test = pinned_image_open(owner, &image_data);
                 CHECK(close_test != NULL, "editor opens for close check");
@@ -668,18 +933,31 @@ static void test_pinned_image_edit_core(HWND owner)
             {
                 HWND persist_editor;
                 PINNED_IMAGE *p;
+                editor = pinned_image_open(owner, &image_data);
+                CHECK(editor != NULL, "editor reopens for preference checks");
+                DWORD copy_before = toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons) - 1);
+                DWORD color_before = toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons));
+                DWORD size_before = toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons) + 1);
                 SendMessage(editor, WM_COMMAND, ID_ARROW, 0);
                 SendMessage(editor, WM_COMMAND, ID_WIDTH_12, 0);
+                CHECK(size_before != toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons) + 1),
+                    "size dropdown highlights the selected width");
                 pin_windows->current_color = standard_colors[5]; // Orange
                 update_color_button_icon(pin_windows);
+                CHECK(copy_before != 0 && copy_before ==
+                    toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons) - 1) &&
+                    color_before != toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons)),
+                    "changing color updates only its swatch and preserves Copy icon");
                 save_pinned_preferences(pin_windows);
 
                 CHECK(option.pinned_tool == ID_ARROW, "persisted tool is ID_ARROW");
                 CHECK(option.pinned_stroke_width == 12, "persisted stroke width is 12");
                 CHECK(option.pinned_color == standard_colors[5], "persisted color is standard orange");
 
+                DestroyWindow(editor);
+                editor = NULL;
                 persist_editor = pinned_image_open(owner, &image_data);
-                CHECK(persist_editor != NULL, "new editor window opens with persisted settings");
+                CHECK(persist_editor != NULL, "editor reopens with persisted settings");
                 if (persist_editor != NULL) {
                     p = (PINNED_IMAGE *)GetWindowLongPtr(persist_editor, GWLP_USERDATA);
                     CHECK(p != NULL && p->tool == ID_CROP, "new editor defaults to Crop despite previously selected Arrow");
@@ -691,6 +969,162 @@ static void test_pinned_image_edit_core(HWND owner)
 
             DestroyWindow(editor);
         }
+    }
+    {
+        HWND annotations = pinned_image_open(owner, &image_data);
+        PINNED_IMAGE *p = annotations != NULL ?
+            (PINNED_IMAGE *)GetWindowLongPtr(annotations, GWLP_USERDATA) : NULL;
+        CHECK(p != NULL, "editor opens for bitmap annotation checks");
+        if (p != NULL) {
+            POINT at = image_to_client(p, (POINT){10, 10});
+            SendMessage(annotations, WM_COMMAND, ID_STEP, 0);
+            SendMessage(annotations, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(at.x, at.y));
+            SendMessage(annotations, WM_LBUTTONUP, 0, MAKELPARAM(at.x, at.y));
+            CHECK(p->artifacts != NULL && p->artifacts->tool == ID_STEP &&
+                p->artifacts->number == 1, "first numbered step starts at one");
+            at = image_to_client(p, (POINT){60, 25});
+            SendMessage(annotations, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(at.x, at.y));
+            SendMessage(annotations, WM_LBUTTONUP, 0, MAKELPARAM(at.x, at.y));
+            CHECK(p->artifacts != NULL && p->artifacts->next != NULL &&
+                p->artifacts->next->number == 2, "numbered steps increment");
+            SendMessage(annotations, WM_COMMAND, ID_SELECT, 0);
+            p->selected_artifact = p->artifacts->next;
+            p->selected_artifact->selected = TRUE;
+            {
+                POINT from = image_to_client(p, p->selected_artifact->start);
+                POINT to = image_to_client(p, (POINT){p->selected_artifact->start.x + 5,
+                    p->selected_artifact->start.y + 4});
+                int old_x = p->selected_artifact->start.x;
+                SendMessage(annotations, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(from.x, from.y));
+                SendMessage(annotations, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(to.x, to.y));
+                SendMessage(annotations, WM_LBUTTONUP, 0, MAKELPARAM(to.x, to.y));
+                CHECK(p->selected_artifact != NULL && p->selected_artifact->start.x > old_x,
+                    "Select moves an annotation before flattening");
+                SendMessage(annotations, WM_COMMAND, ID_COLOR_BLUE, 0);
+                CHECK(p->selected_artifact != NULL && p->selected_artifact->color == colors[1],
+                    "selected annotation can be recolored");
+            }
+            p->selected_artifact = p->artifacts->next;
+            SendMessage(annotations, WM_COMMAND, ID_DUPLICATE, 0);
+            CHECK(p->selected_artifact != NULL && p->artifacts->next->next == p->selected_artifact,
+                "selected annotation duplicates");
+            SendMessage(annotations, WM_COMMAND, ID_UNDO, 0);
+            CHECK(p->selected_artifact == NULL && p->artifacts->next->next == NULL,
+                "undo removes duplicate and clears stale selection");
+            clipboard_available = TRUE;
+            SendMessage(annotations, WM_COMMAND, ID_COPY_KEEP, 0);
+            CHECK(IsWindow(annotations) && copied_bitmap != NULL,
+                "Copy keep open publishes bitmap without closing editor");
+            if (copied_bitmap != NULL) DeleteObject(copied_bitmap);
+            copied_bitmap = NULL;
+            DestroyWindow(annotations);
+        }
+    }
+    {
+        HWND editor = pinned_image_open(owner, &image_data);
+        PINNED_IMAGE *p = editor != NULL ? (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA) : NULL;
+        CHECK(p != NULL, "editor opens for multi-selection checks");
+        if (p != NULL) {
+            PIN_ARTIFACT *first = add_artifact(p, ID_FILLED_RECT, (POINT){20, 10}, 2);
+            PIN_ARTIFACT *second = add_artifact(p, ID_FILLED_RECT, (POINT){45, 10}, 2);
+            RECT before, after;
+            POINT start, end;
+            int undo_before;
+            first->end = (POINT){30, 20};
+            second->end = (POINT){55, 20};
+            CHECK(rebuild_artifacts(p), "two annotation fixtures render");
+            SendMessage(editor, WM_COMMAND, ID_FRAME_SELECT, 0);
+            start = image_to_client(p, (POINT){10, 5});
+            end = image_to_client(p, (POINT){65, 30});
+            SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(start.x, start.y));
+            SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(end.x, end.y));
+            SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(end.x, end.y));
+            CHECK(selected_bounds(p->artifacts, &before) == 2 &&
+                first->selected && second->selected, "frame selects both annotations");
+            start = image_to_client(p, (POINT){before.right, before.bottom});
+            end = image_to_client(p, (POINT){before.right + 5, before.bottom + 5});
+            undo_before = p->undo_count;
+            SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(start.x, start.y));
+            SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(end.x, end.y));
+            SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(end.x, end.y));
+            selected_bounds(p->artifacts, &after);
+            CHECK(after.right > before.right && after.bottom > before.bottom &&
+                first->end.x > 30 && second->end.x > 55 && p->undo_count == undo_before + 1,
+                "shared corner resizes selected annotations in one undo step");
+            start = image_to_client(p, (POINT){after.right, after.bottom});
+            end = image_to_client(p, (POINT){after.right + 3, after.bottom + 3});
+            SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(start.x, start.y));
+            SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(end.x, end.y));
+            SendMessage(editor, WM_CAPTURECHANGED, 0, (LPARAM)GetDesktopWindow());
+            {
+                RECT cancelled;
+                selected_bounds(p->artifacts, &cancelled);
+                CHECK(EqualRect(&after, &cancelled) && !p->drawing && p->drag_original == NULL,
+                    "lost capture restores unfinished group resize");
+            }
+            SendMessage(editor, WM_COMMAND, ID_UNDO, 0);
+            CHECK(p->artifacts->end.x == 30 && p->artifacts->next->end.x == 55,
+                "undo restores both annotation sizes");
+            {
+                PIN_ARTIFACT *note = add_artifact(p, ID_TEXT, (POINT){5, 5}, 2);
+                note->box = (RECT){5, 5, 35, 18};
+                begin_text_edit(p, note, note->box);
+                CHECK(p->text_edit != NULL, "text annotation edit is active");
+                if (p->text_edit != NULL) SetWindowText(p->text_edit, TEXT("edited note"));
+                SendMessage(editor, WM_COMMAND, ID_UNDO, 0);
+                CHECK(p->text_edit == NULL && p->editing_artifact == NULL,
+                    "undo completes text edit before replacing annotation objects");
+            }
+            DestroyWindow(editor);
+        }
+    }
+    {
+        BITMAPINFO info = {0};
+        HDC screen = GetDC(NULL);
+        HBITMAP first, second;
+        DWORD *pixels_a = NULL, *pixels_b = NULL;
+        int x, y;
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 80;
+        info.bmiHeader.biHeight = -100;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        first = CreateDIBSection(screen, &info, DIB_RGB_COLORS, (void **)&pixels_a, NULL, 0);
+        second = CreateDIBSection(screen, &info, DIB_RGB_COLORS, (void **)&pixels_b, NULL, 0);
+        if (first != NULL && second != NULL) {
+            for (y = 0; y < 100; y++) for (x = 0; x < 80; x++) {
+                pixels_a[y * 80 + x] = (DWORD)((y * 1009 + x * 37) & 0xFFFFFF);
+                pixels_b[y * 80 + x] = (DWORD)(((y + 15) * 1009 + x * 37) & 0xFFFFFF);
+            }
+            CHECK(find_scroll_shift(first, second) == 15,
+                "scroll capture finds exact overlap between adjacent pages");
+        }
+        if (first != NULL) DeleteObject(first);
+        if (second != NULL) DeleteObject(second);
+        ReleaseDC(NULL, screen);
+    }
+    {
+        TCHAR path[MAX_PATH], directory[MAX_PATH];
+        BYTE signature[8] = {0};
+        DWORD read = 0;
+        HANDLE file;
+        GetTempPath(ARRAYSIZE(directory), directory);
+        wsprintf(path, TEXT("%sCLCL-editor-save-test.png"), directory);
+        DeleteFile(path);
+        init_gdip();
+        CHECK(save_png(source, path), "Save PNG writes bitmap pixels");
+        file = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file != INVALID_HANDLE_VALUE) {
+            ReadFile(file, signature, sizeof(signature), &read, NULL);
+            CloseHandle(file);
+        }
+        CHECK(read == sizeof(signature) && signature[0] == 0x89 &&
+            signature[1] == 'P' && signature[2] == 'N' && signature[3] == 'G',
+            "saved file has PNG pixel format");
+        DeleteFile(path);
+        shutdown_gdip();
     }
     DeleteObject(source);
     printf("PASS: Pinned image crop and undo/redo core\n");
@@ -1558,8 +1992,9 @@ int main(void)
         for (i = 0; i < option.action_cnt; i++)
             if (option.action_info[i].action == ACTION_NEW_SNIP) break;
         CHECK(i < option.action_cnt && option.action_info[i].type == ACTION_TYPE_HOTKEY &&
-            option.action_info[i].virtkey == VK_F1 && option.action_info[i].modifiers == 0,
-            "New snip action defaults to F1 in shortcut settings");
+            option.action_info[i].virtkey == VK_F1 &&
+            option.action_info[i].modifiers == (MOD_CONTROL | MOD_SHIFT),
+            "New snip action defaults to Ctrl+Shift+F1 in shortcut settings");
         if (i < option.action_cnt) {
             MSG posted;
             HWND overlay;
@@ -1583,13 +2018,14 @@ int main(void)
         snip_items[3].content = MENU_CONTENT_OPTION;
         snip_items[4].content = MENU_CONTENT_EXIT;
         menu = menu_create(owner, snip_items, 5, NULL, NULL);
-        CHECK(menu != NULL && GetMenuItemCount(menu) == 6 &&
+        CHECK(menu != NULL && GetMenuItemCount(menu) == 7 &&
             GetMenuItemID(menu, 0) == ID_MENUITEM_VIEWER &&
             GetMenuItemID(menu, 1) == ID_MENUITEM_NEW_SNIP &&
-            GetSubMenu(menu, 2) != NULL &&
-            GetMenuItemID(menu, 4) == ID_MENUITEM_OPTION &&
-            GetMenuItemID(menu, 5) == ID_MENUITEM_EXIT,
-            "New snip appears below Viewer with no trailing empty rows");
+            GetMenuItemID(menu, 2) == ID_MENUITEM_SCROLLING_SNIP &&
+            GetSubMenu(menu, 3) != NULL &&
+            GetMenuItemID(menu, 5) == ID_MENUITEM_OPTION &&
+            GetMenuItemID(menu, 6) == ID_MENUITEM_EXIT,
+            "both snip commands appear below Viewer with no trailing empty rows");
         if (menu != NULL) { menu_destory(menu); menu_free(); }
         CHECK(pinned_image_start_snip(owner), "snip overlay opens");
         overlay = FindWindow(SNIP_CLASS, NULL);

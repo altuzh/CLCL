@@ -56,6 +56,10 @@ def icon(name):
         line(d, [(5, 26), (25, 6)], BLUE, 3)
         d.polygon([xy(15, 6), xy(27, 4), xy(25, 16)], fill=DEEP)
         d.polygon([xy(19, 8), xy(25, 6), xy(24, 12)], fill="#7ac4ff")
+    elif name == "frame-arrow":
+        points = [xy(x, y) for x, y in [(3, 12), (16, 12), (16, 5), (29, 16),
+                                        (16, 27), (16, 20), (3, 20)]]
+        d.line(points + [points[0]], fill="#e52528", width=3*S, joint="curve")
     elif name == "rect":
         d.rounded_rectangle(xy(5, 7, 27, 25), radius=2*S, outline="#7b55c7", width=2*S)
         for x, y in [(5, 7), (27, 7), (5, 25), (27, 25)]:
@@ -77,14 +81,66 @@ def icon(name):
         d.rounded_rectangle(xy(10, 9, 28, 29), radius=2*S, fill="#f5fbff", outline=BLUE, width=2*S)
         for y in (15, 20, 25):
             line(d, [(14, y), (24, y)], BLUE, 2)
-    elif name == "size":
-        for y, width in [(7, 2), (16, 4), (26, 6)]:
+    elif name.startswith("size"):
+        selected = {"size": 3, "size-3": 3, "size-6": 6, "size-12": 12}[name]
+        for y, width, value in [(7, 2, 3), (16, 4, 6), (26, 6, 12)]:
             d.line([xy(5, y), xy(26, y)], fill=DEEP, width=(width + 2) * S)
-            d.line([xy(5, y), xy(26, y)], fill=BLUE, width=width * S)
-        d.ellipse(xy(23, 23, 29, 29), fill=GOLD, outline=INK, width=S)
+            d.line([xy(5, y), xy(26, y)], fill=GOLD if value == selected else BLUE, width=width * S)
+    elif name == "select":
+        d.polygon([xy(6, 4), xy(6, 27), xy(12, 20), xy(17, 29), xy(21, 27), xy(16, 18), xy(26, 17)],
+                  fill="#eef7ff", outline=DEEP)
+    elif name == "frame-select":
+        d.rectangle(xy(2, 3, 29, 28), outline="#242424", width=3*S)
+        d.rectangle(xy(2, 3, 29, 28), outline="white", width=2*S)
+        arrow = [xy(9, 7), xy(9, 24), xy(13, 20), xy(17, 27), xy(20, 25), xy(16, 19), xy(23, 18)]
+        d.polygon(arrow, fill="white")
+        d.line(arrow + [arrow[0]], fill="#242424", width=2*S)
+    elif name == "zoom":
+        d.ellipse(xy(4, 3, 23, 22), outline=BLUE, width=3*S)
+        line(d, [(20, 20), (29, 29)], DEEP, 4)
+        line(d, [(9, 12), (18, 12)], DEEP, 2)
+        line(d, [(13.5, 8), (13.5, 17)], DEEP, 2)
+    elif name == "pan":
+        line(d, [(16, 3), (16, 29)], DEEP, 3)
+        line(d, [(3, 16), (29, 16)], DEEP, 3)
+        for points in (((16, 2), (11, 9), (21, 9)), ((16, 30), (11, 23), (21, 23)),
+                       ((2, 16), (9, 11), (9, 21)), ((30, 16), (23, 11), (23, 21))):
+            d.polygon([xy(x, y) for x, y in points], fill=BLUE)
+    elif name == "rotate":
+        reference = Image.open(OUT / "pin-rotate-source.png").convert("RGB")
+        alpha = Image.new("L", reference.size)
+        alpha.putdata([
+            max(0, min(255, round((247 - green) * 255 / 241)))
+            if red - green > 8 and red - blue > 8 else 0
+            for red, green, blue in reference.getdata()
+        ])
+        glyph = Image.new("RGBA", reference.size, (221, 6, 18, 0))
+        glyph.putalpha(alpha)
+        glyph = glyph.crop(alpha.getbbox())
+        glyph.thumbnail((25*S, 25*S), Image.Resampling.LANCZOS)
+        image.alpha_composite(glyph, ((32*S - glyph.width)//2, (32*S - glyph.height)//2))
+    elif name == "text":
+        d.rounded_rectangle(xy(3, 5, 29, 27), radius=3*S, outline=BLUE, width=2*S)
+        line(d, [(8, 11), (24, 11)], DEEP, 2)
+        line(d, [(16, 11), (16, 24)], DEEP, 2)
+    elif name == "callout":
+        d.rounded_rectangle(xy(3, 4, 28, 22), radius=4*S, fill="#f5fbff", outline=BLUE, width=2*S)
+        d.polygon([xy(10, 22), xy(8, 29), xy(18, 22)], fill="#f5fbff", outline=BLUE)
+        line(d, [(8, 11), (23, 11)], DEEP, 2)
+        line(d, [(8, 16), (19, 16)], DEEP, 2)
+    elif name == "step":
+        d.ellipse(xy(4, 4, 27, 27), fill=BLUE, outline=DEEP, width=2*S)
+        line(d, [(15, 9), (17, 9), (17, 22)], "white", 3)
+        line(d, [(13, 22), (21, 22)], "white", 2)
+    elif name == "redact":
+        d.rounded_rectangle(xy(4, 8, 28, 24), radius=2*S, fill=INK, outline=BLUE, width=2*S)
+        line(d, [(9, 15), (23, 15)], "#8aa4bb", 2)
+    elif name == "spotlight":
+        d.rectangle(xy(3, 4, 29, 28), fill=INK)
+        d.ellipse(xy(9, 8, 24, 24), fill=GOLD, outline="#ffeb9c", width=2*S)
     image.save(OUT / f"pin-{name}.ico", format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48)])
 
 
 if __name__ == "__main__":
-    for name in ("undo", "redo", "pen", "marker", "eraser", "line", "arrow", "rect", "filled-rect", "ellipse", "filled-ellipse", "crop", "copy", "size"):
+    for name in ("undo", "redo", "pen", "marker", "eraser", "line", "arrow", "frame-arrow", "rect", "filled-rect", "ellipse", "filled-ellipse", "crop", "rotate", "copy", "size", "size-6", "size-12", "select", "frame-select", "zoom", "pan", "text", "callout", "step", "redact", "spotlight"):
         icon(name)

@@ -13,16 +13,11 @@
 #define _INC_OLE
 #include <windows.h>
 #undef  _INC_OLE
-#include <vector>
 #include <gdiplus.h>
 
 using namespace Gdiplus;
 
 #include "gdip.h"
-
-extern "C" {
-#include "dpi.h"
-}
 
 #pragma comment(lib, "gdiplus.lib")
 
@@ -96,15 +91,17 @@ int save_png(HBITMAP hBmp, LPCWSTR lpszFilename)
 {
 	GpBitmap* pBitmap = NULL;
 	CLSID imageCLSID;
+	Status status;
 
 	if (_GdipCreateBitmapFromHBITMAP == NULL || _GdipSaveImageToFile == NULL || _GdipDisposeImage == NULL) {
 		return 0;
 	}
-	_GdipCreateBitmapFromHBITMAP(hBmp, NULL, &pBitmap);
+	status = _GdipCreateBitmapFromHBITMAP(hBmp, NULL, &pBitmap);
+	if (status != Ok || pBitmap == NULL) return 0;
 	CLSIDFromString(L"{557CF406-1A04-11D3-9A73-0000F81EF32E}", &imageCLSID);	//png
-	_GdipSaveImageToFile(pBitmap, lpszFilename, &imageCLSID, NULL);
+	status = _GdipSaveImageToFile(pBitmap, lpszFilename, &imageCLSID, NULL);
 	_GdipDisposeImage(pBitmap);
-	return 1;
+	return status == Ok;
 }
 
 /*

@@ -87,6 +87,19 @@ IDR_PIN_COPY           ICON                    "res\\pin-copy.ico"
 IDR_PIN_UNDO            ICON                    "res\\pin-undo.ico"
 IDR_PIN_REDO            ICON                    "res\\pin-redo.ico"
 IDR_PIN_SIZE            ICON                    "res\\pin-size.ico"
+IDR_PIN_SIZE_6          ICON                    "res\\pin-size-6.ico"
+IDR_PIN_SIZE_12         ICON                    "res\\pin-size-12.ico"
+IDR_PIN_SELECT          ICON                    "res\\pin-select.ico"
+IDR_PIN_FRAME_SELECT    ICON                    "res\\pin-frame-select.ico"
+IDR_PIN_FRAME_ARROW     ICON                    "res\\pin-frame-arrow.ico"
+IDR_PIN_ZOOM            ICON                    "res\\pin-zoom.ico"
+IDR_PIN_PAN             ICON                    "res\\pin-pan.ico"
+IDR_PIN_ROTATE          ICON                    "res\\pin-rotate.ico"
+IDR_PIN_TEXT            ICON                    "res\\pin-text.ico"
+IDR_PIN_CALLOUT         ICON                    "res\\pin-callout.ico"
+IDR_PIN_STEP            ICON                    "res\\pin-step.ico"
+IDR_PIN_REDACT          ICON                    "res\\pin-redact.ico"
+IDR_PIN_SPOTLIGHT       ICON                    "res\\pin-spotlight.ico"
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -2179,6 +2192,8 @@ END
 
 #endif    // German (Germany) resources
 /////////////////////////////////////////////////////////////////////////////
+
+#include "res/pinned_strings.rc"
 
 
 

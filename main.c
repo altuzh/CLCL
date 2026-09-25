@@ -2496,7 +2496,8 @@ static BOOL show_popup_menu(const HWND hWnd, const ACTION_INFO *ai, const BOOL c
 
 	} else {
 		// Command
-		if (ret == ID_MENUITEM_NEW_SNIP) PostMessage(hWnd, WM_COMMAND, ret, 0);
+		if (ret == ID_MENUITEM_NEW_SNIP || ret == ID_MENUITEM_SCROLLING_SNIP)
+			PostMessage(hWnd, WM_COMMAND, ret, 0);
 		else SendMessage(hWnd, WM_COMMAND, ret, 0);
 	}
 	// Free menu information
@@ -2624,7 +2625,7 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	DATA_INFO *di;
 	TCHAR err_str[BUF_SIZE];
 	TOOL_MENU_INFO cp_tmi;
-	DWORD sequence, clipboard_process = 0;
+	DWORD sequence, clipboard_sequence, clipboard_process = 0;
 
 	// Native menu tracking pumps timers on the UI thread. Do not replace/free
 	// history data or activate an editor until all menu references are gone.
@@ -2662,7 +2663,7 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	KillTimer(hWnd, ID_TOOL_TIMER);
 	ZeroMemory(&tmi, sizeof(TOOL_MENU_INFO));
 
-	sequence = GetClipboardSequenceNumber();
+	sequence = clipboard_sequence = GetClipboardSequenceNumber();
 	GetWindowThreadProcessId(GetClipboardOwner(), &clipboard_process);
 	// Ignore clipboard writes made by CLCL itself.
 	if (clipboard_process == GetCurrentProcessId()) sequence = 0;
@@ -2683,9 +2684,11 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	pinned_image_auto_open(hWnd, di, sequence);
 	// Add to history
 	if (history_add(&history_data.child, di, (cp_tmi.enable == TRUE) ? FALSE : TRUE) == FALSE) {
+		pinned_image_bind_history(di, clipboard_sequence, FALSE);
 		data_free(di);
 		return TRUE;
 	}
+	pinned_image_bind_history(di, clipboard_sequence, TRUE);
 	// Tool to execute when added to history
 	tool_execute_all(hWnd, CALLTYPE_ADD_HISTORY, di);
 
@@ -3639,6 +3642,9 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 		case ID_MENUITEM_NEW_SNIP:
 			if (!pinned_image_start_snip(hWnd)) MessageBeep(MB_ICONWARNING);
+			break;
+		case ID_MENUITEM_SCROLLING_SNIP:
+			if (!pinned_image_start_scrolling_snip(hWnd)) MessageBeep(MB_ICONWARNING);
 			break;
 
 		case ID_MENUITEM_OPTION:
