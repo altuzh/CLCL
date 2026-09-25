@@ -3,6 +3,7 @@
  * desktop. Menu creation, drawing, tracking, hooks and dialogs are real Win32. */
 #include <windows.h>
 #include <stdio.h>
+#include <winsqlite/winsqlite3.h>
 static POINT test_cursor = {300, 200};
 static BOOL test_get_cursor(LPPOINT pt) { *pt = test_cursor; return TRUE; }
 static BOOL test_set_cursor(int x, int y) { test_cursor.x = x; test_cursor.y = y; return TRUE; }
@@ -1739,6 +1740,81 @@ static HBITMAP create_solid_bitmap(int w, int h, COLORREF color)
     return hbmp;
 }
 
+static DWORD history_db_file_size(const TCHAR *path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA info;
+    CHECK(GetFileAttributesEx(path, GetFileExInfoStandard, &info), "history database file exists");
+    return info.nFileSizeLow;
+}
+
+static void test_sqlite_space_reclamation(void)
+{
+    TCHAR temp_dir[MAX_PATH], db_file[MAX_PATH];
+    sqlite3 *inspect = NULL;
+    sqlite3_stmt *stmt = NULL;
+    DWORD before, migrated, deleted;
+    DATA_INFO *remaining;
+    GetTempPath(MAX_PATH, temp_dir);
+    GetTempFileName(temp_dir, TEXT("clc"), 0, db_file);
+    DeleteFile(db_file);
+    lstrcpy(temp_dir, db_file);
+    CreateDirectory(temp_dir, NULL);
+    wsprintf(db_file, TEXT("%s\\history.db"), temp_dir);
+    db_history_close();
+    CHECK(db_history_init(temp_dir), "new reclaiming database initializes");
+    db_history_close();
+    CHECK(sqlite3_open16(db_file, &inspect) == SQLITE_OK, "open reclamation fixture");
+    CHECK(sqlite3_prepare_v2(inspect, "PRAGMA auto_vacuum;", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1,
+        "new databases enable FULL auto-vacuum");
+    sqlite3_finalize(stmt);
+    // Model an old database with live blobs and space left by deleted history.
+    CHECK(sqlite3_exec(inspect,
+        "PRAGMA auto_vacuum=NONE; VACUUM;"
+        "INSERT INTO items(id,created_at,title,total_size) VALUES(1,1,'keep',1048576),(2,2,'delete',2097152),(3,3,'newest',1048576);"
+        "INSERT INTO item_formats VALUES(1,'fixture',49152,1048576,zeroblob(1048576)),"
+        "(2,'fixture',49152,2097152,zeroblob(2097152)),(3,'fixture',49152,1048576,zeroblob(1048576));"
+        "INSERT INTO history_fts(docid,title) VALUES(1,'keep'),(2,'delete'),(3,'newest');"
+        "CREATE TABLE discarded(data BLOB); INSERT INTO discarded VALUES(zeroblob(4194304)); DROP TABLE discarded;",
+        NULL, NULL, NULL) == SQLITE_OK, "seed legacy database with reclaimable space");
+    sqlite3_close(inspect);
+    before = history_db_file_size(db_file);
+    CHECK(db_history_init(temp_dir), "legacy database migrates");
+    db_history_close();
+    migrated = history_db_file_size(db_file);
+    CHECK(migrated + 3000000 < before, "migration reclaims previously deleted payloads");
+    CHECK(db_history_init(temp_dir), "migrated database reopens");
+    CHECK(db_history_delete_item(2), "delete large history payload");
+    db_history_close(); // Closing checkpoints WAL, publishing the smaller main file.
+    deleted = history_db_file_size(db_file);
+    CHECK(deleted + 1500000 < migrated, "deletion returns blob pages to disk");
+    CHECK(db_history_init(temp_dir), "database reopens after deletion");
+    CHECK(db_history_get_item(2) == NULL, "deleted item stays deleted");
+    remaining = db_history_get_item(1);
+    CHECK(remaining != NULL, "deletion preserves remaining item ID");
+    data_free(remaining);
+    CHECK(db_history_trim(1), "trim old history payload");
+    db_history_close();
+    CHECK(history_db_file_size(db_file) + 750000 < deleted, "trimming also returns pages to disk");
+    CHECK(sqlite3_open16(db_file, &inspect) == SQLITE_OK, "open compacted database for verification");
+    CHECK(sqlite3_prepare_v2(inspect,
+        "SELECT (SELECT count(*) FROM items), (SELECT count(*) FROM item_formats),"
+        "(SELECT count(*) FROM history_fts), length(data) FROM item_formats WHERE item_id=3;",
+        -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW &&
+        sqlite3_column_int(stmt, 0) == 1 && sqlite3_column_int(stmt, 1) == 1 &&
+        sqlite3_column_int(stmt, 2) == 1 && sqlite3_column_int(stmt, 3) == 1048576,
+        "compaction preserves newest payload and matching index rows");
+    sqlite3_finalize(stmt);
+    CHECK(sqlite3_prepare_v2(inspect, "PRAGMA integrity_check;", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && lstrcmpA((LPCSTR)sqlite3_column_text(stmt, 0), "ok") == 0,
+        "compacted history passes SQLite integrity check");
+    sqlite3_finalize(stmt);
+    sqlite3_close(inspect);
+    DeleteFile(db_file);
+    RemoveDirectory(temp_dir);
+    printf("PASS: SQLite migration, deletion and trimming reclaim disk space\n");
+}
+
 static void test_sqlite_multiple_bitmap_persistence(void)
 {
     TCHAR err_str[BUF_SIZE] = {0};
@@ -2291,6 +2367,7 @@ int main(void)
     DestroyWindow(owner);
     test_bitmap_serialization();
     test_sqlite_multiple_bitmap_persistence();
+    test_sqlite_space_reclamation();
     test_date_folder_deletion();
     printf("%s: 21 native-menu scenarios + pinned image editor + bitmap serialization + SQLite multiple bitmap persistence + date folder deletion\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

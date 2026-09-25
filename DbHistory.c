@@ -87,6 +87,7 @@ BOOL db_history_init(const TCHAR *work_path)
 	}
 
 	// Optimize for desktop app WAL performance
+	sqlite3_exec(db, "PRAGMA auto_vacuum=FULL;", NULL, NULL, NULL);
 	sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
 	sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
 	sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
@@ -148,6 +149,25 @@ BOOL db_history_init(const TCHAR *work_path)
 	sqlite3_exec(db, "DELETE FROM items WHERE id NOT IN (SELECT DISTINCT item_id FROM item_formats);", NULL, NULL, NULL);
 	sqlite3_exec(db, "DELETE FROM item_formats WHERE item_id NOT IN (SELECT id FROM items);", NULL, NULL, NULL);
 	sqlite3_exec(db, "DELETE FROM history_fts WHERE docid NOT IN (SELECT id FROM items);", NULL, NULL, NULL);
+
+	// Existing databases need one rebuild to enable automatic space reclamation.
+	// Keep history usable if the rebuild fails (e.g. insufficient disk space);
+	// auto_vacuum remains NONE and initialization retries on the next launch.
+	{
+		sqlite3_stmt *stmt = NULL;
+		BOOL needs_vacuum = FALSE;
+		if (sqlite3_prepare_v2(db, "PRAGMA auto_vacuum;", -1, &stmt, NULL) == SQLITE_OK &&
+			sqlite3_step(stmt) == SQLITE_ROW) {
+			needs_vacuum = (sqlite3_column_int(stmt, 0) == 0);
+		}
+		sqlite3_finalize(stmt);
+		if (needs_vacuum) {
+			if (sqlite3_exec(db, "VACUUM;", NULL, NULL, NULL) != SQLITE_OK)
+				OutputDebugString(TEXT("CLCL: history database compaction failed; will retry next launch.\n"));
+			else
+				sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
+		}
+	}
 
 	return TRUE;
 }
