@@ -53,6 +53,7 @@
 #define IDR_PIN_ZOOM                    84
 #define IDR_PIN_PAN                     85
 #define IDR_PIN_ROTATE                  86
+#define IDR_PIN_APPLY_COLOR             87
 #define IDS_ERROR_END                   100
 #define IDS_ERROR_HOTKEY                101
 #define IDS_ERROR_WINDOW_INIT           102
@@ -159,6 +160,7 @@
 #define IDS_PIN_GREEN                  1252
 #define IDS_PIN_BLACK                  1253
 #define IDS_PIN_TOOL_ROTATE             1254
+#define IDS_PIN_TOOL_APPLY_COLOR        1255
 #define IDS_PIN_TIP_UNDO               1280
 #define IDS_PIN_TIP_REDO               1281
 #define IDS_PIN_TIP_COPY               1282

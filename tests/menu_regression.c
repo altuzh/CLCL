@@ -39,6 +39,16 @@ static BOOL test_close_clipboard(void) { return TRUE; }
 #define SetClipboardData test_set_clipboard
 #define CloseClipboard test_close_clipboard
 #include "../PinnedImage.c"
+
+static COLORREF bitmap_pixel(HBITMAP bitmap, int x, int y)
+{
+    HDC dc = CreateCompatibleDC(NULL);
+    HBITMAP old = SelectObject(dc, bitmap);
+    COLORREF color = GetPixel(dc, x, y);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    return color;
+}
 #undef OpenClipboard
 #undef EmptyClipboard
 #undef SetClipboardData
@@ -460,6 +470,37 @@ static void test_pinned_image_edit_core(HWND owner)
         reused = pinned_image_open(owner, &first);
         CHECK(editor != NULL && reused == editor && pin_windows->width == 80 && pin_windows->height == 40,
             "reused editor loads the next bitmap without creating a second window");
+        {
+            int missing;
+            int saved_max = option.history_max;
+            option.history_max = 0;
+            for (missing = 0; missing < 2; missing++) {
+                DATA_INFO *recovered;
+                HDC dc = CreateCompatibleDC(NULL);
+                HBITMAP old = SelectObject(dc, pin_windows->bitmap);
+                SetPixelV(dc, 0, 0, RGB(123, 45, 67));
+                SelectObject(dc, old);
+                DeleteDC(dc);
+                pin_windows->dirty = TRUE;
+                // Model either an unbound snip or source nodes already removed from history.
+                pin_windows->source_item = missing ? (DATA_INFO *)(UINT_PTR)1 : NULL;
+                pin_windows->source_data = missing ? (DATA_INFO *)(UINT_PTR)2 : NULL;
+                reused = pinned_image_open(owner, &second);
+                recovered = history_data.child;
+                CHECK(reused == editor && pin_windows->width == 40 && !pin_windows->dirty,
+                    "switching an edited image with a missing source loads the next canvas");
+                CHECK(recovered != saved_head && recovered != NULL && recovered->child != NULL &&
+                    bitmap_pixel(recovered->child->data, 0, 0) == RGB(123, 45, 67),
+                    "missing-source switch preserves the edited pixels as a history image");
+                if (recovered != saved_head && recovered != NULL) {
+                    history_data.child = recovered->next;
+                    recovered->next = NULL;
+                    data_free(recovered);
+                }
+                pinned_image_open(owner, &first);
+            }
+            option.history_max = saved_max;
+        }
         history_item = data_create_item(TEXT("Previous image"), FALSE, error);
         if (history_item != NULL) {
             history_item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"),
@@ -627,14 +668,14 @@ static void test_pinned_image_edit_core(HWND owner)
         RECT toolbar_rect;
         CHECK(toolbar != NULL && (GetWindowLong(toolbar, GWL_STYLE) & TBSTYLE_FLAT),
             "editor uses a flat native toolbar");
-        CHECK(toolbar != NULL && SendMessage(toolbar, TB_BUTTONCOUNT, 0, 0) == 30 &&
-            ImageList_GetImageCount((HIMAGELIST)SendMessage(toolbar, TB_GETIMAGELIST, 0, 0)) == 26,
+        CHECK(toolbar != NULL && SendMessage(toolbar, TB_BUTTONCOUNT, 0, 0) == 31 &&
+            ImageList_GetImageCount((HIMAGELIST)SendMessage(toolbar, TB_GETIMAGELIST, 0, 0)) == 27,
             "undo, redo, editing tools, color and size dropdowns have icons");
         CHECK(toolbar != NULL &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FRAME_SELECT, 0) ==
                 SendMessage(toolbar, TB_COMMANDTOINDEX, ID_SELECT, 0) + 1 &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ZOOM, 0) ==
-                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FRAME_SELECT, 0) + 1 &&
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_APPLY_COLOR, 0) + 1 &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_PAN, 0) ==
                 SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ZOOM, 0) + 1 &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FRAME_ARROW, 0) ==
@@ -873,6 +914,58 @@ static void test_pinned_image_edit_core(HWND owner)
                 SelectObject(test_dc, old_bm);
                 DeleteDC(test_dc);
                 CHECK(line_col == colors[2], "finished line matches tool color and thickness");
+            }
+
+            /* Color application targets the clicked annotation and shares normal history. */
+            {
+                POINT point = image_to_client(pin_windows, (POINT){20, 10});
+                PIN_ARTIFACT *hit;
+                int history;
+                HWND toolbar = pin_windows->toolbar;
+                SendMessage(editor, WM_COMMAND, ID_APPLY_COLOR, 0);
+                CHECK(SendMessage(toolbar, TB_COMMANDTOINDEX, ID_APPLY_COLOR, 0) ==
+                    SendMessage(toolbar, TB_COMMANDTOINDEX, ID_FRAME_SELECT, 0) + 1,
+                    "apply color tool sits immediately after frame selection");
+                SendMessage(editor, WM_COMMAND, ID_COLOR_BLUE, 0);
+                history = pin_windows->undo_count;
+                SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+                SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(point.x, point.y));
+                hit = top_artifact_at(pin_windows, (POINT){20, 10});
+                CHECK(hit != NULL && hit->color == colors[1] && !pin_windows->drawing &&
+                    pin_windows->undo_count == history + 1,
+                    "click recolors the top annotation with one undo step");
+                CHECK(bitmap_pixel(pin_windows->bitmap, 20, 10) == colors[1],
+                    "applied color is rendered into the image");
+                SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+                SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(point.x, point.y));
+                SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(0, 0));
+                CHECK(pin_windows->undo_count == history + 1,
+                    "unchanged color and empty clicks do not create history");
+                SendMessage(editor, WM_COMMAND, ID_UNDO, 0);
+                CHECK(bitmap_pixel(pin_windows->bitmap, 20, 10) == colors[2], "undo restores annotation color");
+                SendMessage(editor, WM_COMMAND, ID_REDO, 0);
+                CHECK(bitmap_pixel(pin_windows->bitmap, 20, 10) == colors[1], "redo reapplies annotation color");
+            }
+            {
+                ICONINFO info = {0};
+                BITMAP mask = {0};
+                SendMessage(editor, WM_COMMAND, ID_MARKER, 0);
+                CHECK(GetIconInfo(editor_tool_cursor(pin_windows), &info), "highlighter cursor is created");
+                if (info.hbmMask != NULL) {
+                    GetObject(info.hbmMask, sizeof(mask), &mask);
+                    CHECK(!info.fIcon && info.hbmColor != NULL &&
+                        info.xHotspot == (DWORD)(mask.bmWidth / 2) &&
+                        info.yHotspot == (DWORD)(mask.bmHeight / 2),
+                        "highlighter bar has a centered cursor hotspot");
+                    CHECK(info.hbmColor != NULL && bitmap_pixel(info.hbmColor,
+                        info.xHotspot, info.yHotspot) == RGB(255, 230, 0),
+                        "highlighter cursor bar is yellow");
+                    CHECK(bitmap_pixel(info.hbmMask, info.xHotspot, 1) == RGB(0, 0, 0) &&
+                        bitmap_pixel(info.hbmMask, info.xHotspot - 2, 1) == RGB(255, 255, 255),
+                        "highlighter cursor has transparent rounded corners");
+                    DeleteObject(info.hbmMask);
+                }
+                if (info.hbmColor != NULL) DeleteObject(info.hbmColor);
             }
 
             /* 7. Test closing a dirty pinned window closes without confirmation dialog */
@@ -1686,6 +1779,24 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     BOOL s2 = db_history_save_item(item2);
     BOOL s3 = db_history_save_item(item3);
     CHECK(s1 && s2 && s3, "db_history_save_item succeeds for all 3 bitmaps");
+    {
+        PINNED_IMAGE recovery = {0};
+        DATA_INFO *saved_head = history_data.child;
+        int saved_max = option.history_max;
+        recovery.bitmap = create_solid_bitmap(18, 9, RGB(123, 45, 67));
+        recovery.dirty = TRUE;
+        option.history_max = 0;
+        CHECK(replace_source(&recovery) && !recovery.dirty && recovery.source_item != NULL &&
+            recovery.source_item->param1 > 0, "missing editor source is saved to SQLite before switching");
+        if (history_data.child != saved_head) {
+            DATA_INFO *recovered = history_data.child;
+            history_data.child = recovered->next;
+            recovered->next = NULL;
+            data_free(recovered);
+        }
+        DeleteObject(recovery.bitmap);
+        option.history_max = saved_max;
+    }
     DeleteObject((HBITMAP)item1->child->data);
     item1->child->data = create_solid_bitmap(40, 20, RGB(255, 120, 0));
     item1->child->size = 0;
@@ -1707,13 +1818,15 @@ static void test_sqlite_multiple_bitmap_persistence(void)
     option.history_max = 30;
     CHECK(load_history(NULL, 0), "startup history load succeeds");
 
-    int verified = 0, updated_found = 0;
+    int verified = 0, updated_found = 0, recovered_found = 0;
     DATA_INFO *cur;
     for (cur = history_data.child; cur != NULL; cur = cur->next) {
         CHECK(cur->child != NULL, "loaded bitmap item has child format node");
         CHECK(cur->child != NULL && cur->child->format == CF_BITMAP, "child format is CF_BITMAP");
         CHECK(cur->param2 != 0 && cur->child != NULL && cur->child->data != NULL,
             "startup loaded bitmap data before menu creation");
+        if (cur->child != NULL && cur->child->data != NULL &&
+            bitmap_pixel(cur->child->data, 0, 0) == RGB(123, 45, 67)) recovered_found++;
         if (cur->title != NULL && lstrcmp(cur->title, TEXT("Updated bitmap")) == 0) {
             BITMAP updated;
             CHECK(GetObject(cur->child->data, sizeof(updated), &updated) != 0 &&
@@ -1723,7 +1836,7 @@ static void test_sqlite_multiple_bitmap_persistence(void)
         }
         verified++;
     }
-    CHECK(verified == 3, "verified all 3 loaded bitmap items");
+    CHECK(verified == 4 && recovered_found == 1, "all bitmaps including recovered editor edits survive restart");
     CHECK(updated_found == 1, "bitmap update replaces one row without duplication");
 
     data_free(history_data.child);

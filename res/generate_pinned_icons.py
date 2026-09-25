@@ -38,6 +38,16 @@ def icon(name):
         d.polygon([xy(5, 27), xy(8, 18), xy(14, 24)], fill=GOLD)
         d.polygon([xy(5, 27), xy(7, 23), xy(9, 25)], fill=INK)
         line(d, [(22, 4), (28, 10)], DEEP, 2)
+    elif name == "apply-color":
+        arrow = [xy(6, 4), xy(6, 27), xy(12, 20), xy(17, 29), xy(21, 27), xy(16, 18), xy(26, 17)]
+        mask = Image.new("L", image.size, 0)
+        ImageDraw.Draw(mask).polygon(arrow, fill=255)
+        rainbow = Image.new("RGBA", image.size)
+        bands = ImageDraw.Draw(rainbow)
+        for i, color in enumerate(("#ff4545", "#ff982b", "#ffe13b", "#36c96c", "#379aff", "#9255df")):
+            bands.rectangle(xy(0, 4 + i*5, 32, 9 + i*5), fill=color)
+        image.paste(rainbow, (0, 0), mask)
+        d.line(arrow + [arrow[0]], fill=INK, width=S, joint="curve")
     elif name == "marker":
         d.rounded_rectangle(xy(9, 3, 23, 22), radius=3*S, fill=GOLD, outline="#bb7627", width=2*S)
         d.rectangle(xy(10, 7, 22, 11), fill="#fff3b6")
@@ -142,5 +152,6 @@ def icon(name):
 
 
 if __name__ == "__main__":
+    icon("apply-color")
     for name in ("undo", "redo", "pen", "marker", "eraser", "line", "arrow", "frame-arrow", "rect", "filled-rect", "ellipse", "filled-ellipse", "crop", "rotate", "copy", "size", "size-6", "size-12", "select", "frame-select", "zoom", "pan", "text", "callout", "step", "redact", "spotlight"):
         icon(name)

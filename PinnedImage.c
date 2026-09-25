@@ -16,6 +16,7 @@
 #include "Clipboard.h"
 #include "Format.h"
 #include "DbHistory.h"
+#include "History.h"
 #include "DarkMode.h"
 #include "Dpi.h"
 #include "Ini.h"
@@ -72,6 +73,7 @@
 #define ID_ZOOM 6151
 #define ID_PAN 6152
 #define ID_ROTATE 6153
+#define ID_APPLY_COLOR 6154
 #define MENU_TIP_TIMER 6
 #define WM_FINISH_TEXT (WM_APP + 150)
 
@@ -758,7 +760,41 @@ static HCURSOR editor_tool_cursor(PINNED_IMAGE *pin)
 		pin->cursor_width == pin->stroke_width && pin->cursor_dpi == dpi) return pin->tool_cursor;
 	if (pin->tool_cursor != NULL) DestroyCursor(pin->tool_cursor);
 	pin->tool_cursor = NULL;
-	if (pin->tool == ID_ERASER) {
+	if (pin->tool == ID_MARKER) {
+		int height = max(9, MulDiv(pin->stroke_width * 3, dpi, 96));
+		int width = max(5, height / 3) | 1;
+		int size = (height | 1) + 2, stride = ((size + 15) / 16) * 2, x, y;
+		int radius = width / 2, half_stem = (size - 2 - width) / 2;
+		BITMAPINFO bi = {0};
+		ICONINFO info = {0};
+		DWORD *pixels = NULL;
+		BYTE *mask = mem_alloc(stride * size);
+		bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		bi.bmiHeader.biWidth = size;
+		bi.bmiHeader.biHeight = -size;
+		bi.bmiHeader.biPlanes = 1;
+		bi.bmiHeader.biBitCount = 32;
+		bi.bmiHeader.biCompression = BI_RGB;
+		info.hbmColor = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)&pixels, NULL, 0);
+		if (mask != NULL && info.hbmColor != NULL) {
+			memset(mask, 255, stride * size);
+			ZeroMemory(pixels, size * size * sizeof(*pixels));
+			for (y = 0; y < size; y++) for (x = 0; x < size; x++) {
+				int dx = x - size / 2, dy = max(0, abs(y - size / 2) - half_stem);
+				int distance = dx * dx + dy * dy;
+				if (distance > radius * radius) continue;
+				mask[y * stride + x / 8] &= ~(0x80 >> (x % 8));
+				pixels[y * size + x] = distance > (radius - 1) * (radius - 1) ?
+					0xFF806600 : 0xFFFFE600;
+			}
+			info.hbmMask = CreateBitmap(size, size, 1, 1, mask);
+			info.xHotspot = info.yHotspot = size / 2;
+			if (info.hbmMask != NULL) pin->tool_cursor = CreateIconIndirect(&info);
+		}
+		if (info.hbmMask != NULL) DeleteObject(info.hbmMask);
+		if (info.hbmColor != NULL) DeleteObject(info.hbmColor);
+		if (mask != NULL) mem_free(&mask);
+	} else if (pin->tool == ID_ERASER) {
 		int radius = max(1, MulDiv(pin->stroke_width * 3, dpi, 96));
 		int size = radius * 2 + 3, stride = ((size + 15) / 16) * 2, x, y;
 		BYTE *mask = mem_alloc(stride * size * 2);
@@ -1607,6 +1643,36 @@ static BOOL save_bitmap_as_png(PINNED_IMAGE *pin)
 }
 
 
+static BOOL save_editor_copy_to_history(PINNED_IMAGE *pin)
+{
+	TCHAR error[BUF_SIZE];
+	DATA_INFO *item = data_create_item(TEXT("(BITMAP)"), TRUE, error);
+	HBITMAP bitmap;
+	if (item == NULL) return FALSE;
+	bitmap = clone_bitmap(pin->bitmap, NULL, NULL);
+	if (bitmap != NULL)
+		item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), bitmap, 0, FALSE, error);
+	if (item->child == NULL) {
+		if (bitmap != NULL) DeleteObject(bitmap);
+		data_free(item);
+		return FALSE;
+	}
+	// Persist before switching canvases; a failed save must keep the edits open.
+	if (db_history_is_open() && !db_history_save_item(item)) {
+		data_free(item);
+		return FALSE;
+	}
+	history_add(&history_data.child, item, FALSE);
+	pin->source_item = item;
+	pin->source_data = item->child;
+	pin->pending_item = NULL;
+	pin->pending_sequence = 0;
+	pin->dirty = FALSE;
+	EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE, MF_BYCOMMAND | MF_ENABLED);
+	SendMessage(pin->owner, WM_HISTORY_CHANGED, 0, 0);
+	return TRUE;
+}
+
 static BOOL replace_source(PINNED_IMAGE *pin)
 {
 	DATA_INFO *owner, *parent;
@@ -1616,9 +1682,13 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	DWORD size = 0;
 	BYTE *dib;
 	if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
-	if (pin->source_data == NULL) return FALSE;
 	owner = pin->source_item;
-	if (owner != pin->source_data && data_check(&history_data, owner) == NULL && data_check(&regist_data, owner) == NULL) return FALSE;
+	// History deduplication/deletion can remove the source while the editor owns its copy.
+	// Validate both nodes before dereferencing pointers retained by the editor.
+	if (owner == NULL || pin->source_data == NULL ||
+		(data_check(&history_data, owner) == NULL && data_check(&regist_data, owner) == NULL) ||
+		(owner != pin->source_data && data_check(owner, pin->source_data) == NULL))
+		return save_editor_copy_to_history(pin);
 	if (pin->source_data->format == CF_BITMAP ||
 		(pin->source_data->format_name && lstrcmpi(pin->source_data->format_name, TEXT("BITMAP")) == 0)) {
 		replacement = clone_bitmap(pin->bitmap, NULL, NULL);
@@ -1646,7 +1716,7 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	if (owner != pin->source_data) {
 		owner->content_hash = 0;
 		if (data_check(&history_data, owner) != NULL && db_history_is_open()) {
-			if (!db_history_update_item(owner)) {
+			if (!(owner->param1 > 0 ? db_history_update_item(owner) : db_history_save_item(owner))) {
 				pin->source_data->data = old_data;
 				pin->source_data->size = old_size;
 				if (!format_free_data(pin->source_data->format_name, replacement))
@@ -1705,6 +1775,7 @@ static const TCHAR *editor_tool_help(UINT id)
 	switch (id) {
 	case ID_SELECT: return pin_text(IDS_PIN_TOOL_SELECT);
 	case ID_FRAME_SELECT: return pin_text(IDS_PIN_TOOL_FRAME_SELECT);
+	case ID_APPLY_COLOR: return pin_text(IDS_PIN_TOOL_APPLY_COLOR);
 	case ID_ZOOM: return pin_text(IDS_PIN_TOOL_ZOOM);
 	case ID_PAN: return pin_text(IDS_PIN_TOOL_PAN);
 	case ID_ROTATE: return pin_text(IDS_PIN_TOOL_ROTATE);
@@ -1810,6 +1881,7 @@ static HMENU create_editor_menu(BOOL can_update)
 		!AppendMenu(edit, MF_STRING, ID_DUPLICATE, pin_text(IDS_PIN_DUPLICATE)) ||
 		!AppendMenu(tools, MF_STRING, ID_SELECT, pin_text(IDS_PIN_TOOL_SELECT)) ||
 		!AppendMenu(tools, MF_STRING, ID_FRAME_SELECT, pin_text(IDS_PIN_TOOL_FRAME_SELECT)) ||
+		!AppendMenu(tools, MF_STRING, ID_APPLY_COLOR, pin_text(IDS_PIN_TOOL_APPLY_COLOR)) ||
 		!AppendMenu(tools, MF_STRING, ID_ZOOM, pin_text(IDS_PIN_TOOL_ZOOM)) ||
 		!AppendMenu(tools, MF_STRING, ID_PAN, pin_text(IDS_PIN_TOOL_PAN)) ||
 		!AppendMenu(tools, MF_SEPARATOR, 0, NULL) ||
@@ -1852,14 +1924,14 @@ static HMENU create_editor_menu(BOOL can_update)
 
 static const UINT toolbar_icons[] = {
 	IDR_PIN_UNDO, IDR_PIN_REDO,
-	IDR_PIN_SELECT, IDR_PIN_FRAME_SELECT, IDR_PIN_ZOOM, IDR_PIN_PAN, IDR_PIN_PEN, IDR_PIN_MARKER, IDR_PIN_ERASER,
+	IDR_PIN_SELECT, IDR_PIN_FRAME_SELECT, IDR_PIN_APPLY_COLOR, IDR_PIN_ZOOM, IDR_PIN_PAN, IDR_PIN_PEN, IDR_PIN_MARKER, IDR_PIN_ERASER,
 	IDR_PIN_LINE, IDR_PIN_ARROW, IDR_PIN_FRAME_ARROW,
 	IDR_PIN_RECT, IDR_PIN_FILLED_RECT, IDR_PIN_ELLIPSE,
 	IDR_PIN_FILLED_ELLIPSE, IDR_PIN_TEXT, IDR_PIN_CALLOUT, IDR_PIN_STEP,
 	IDR_PIN_REDACT, IDR_PIN_SPOTLIGHT, IDR_PIN_CROP, IDR_PIN_ROTATE, IDR_PIN_COPY
 };
 static const UINT toolbar_commands[] = {
-	ID_UNDO, ID_REDO, ID_SELECT, ID_FRAME_SELECT, ID_ZOOM, ID_PAN, ID_PEN, ID_MARKER, ID_ERASER,
+	ID_UNDO, ID_REDO, ID_SELECT, ID_FRAME_SELECT, ID_APPLY_COLOR, ID_ZOOM, ID_PAN, ID_PEN, ID_MARKER, ID_ERASER,
 	ID_LINE, ID_ARROW, ID_FRAME_ARROW,
 	ID_RECT, ID_FILLED_RECT, ID_ELLIPSE, ID_FILLED_ELLIPSE, ID_TEXT, ID_CALLOUT,
 	ID_STEP, ID_REDACT, ID_SPOTLIGHT, ID_CROP, ID_ROTATE, ID_COPY
@@ -2343,11 +2415,11 @@ static void show_size_popup(PINNED_IMAGE *pin)
 
 static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 {
-	TBBUTTON buttons[30];
+	TBBUTTON buttons[ARRAYSIZE(toolbar_icons) + 7];
 	HICON icon;
 	RECT bounds;
 	int i, count = 0, size = Scale(TOOL_ICON_SIZE);
-	pin->icons = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, 26, 0);
+	pin->icons = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, ARRAYSIZE(toolbar_icons) + 2, 0);
 	if (pin->icons == NULL) return FALSE;
 	for (i = 0; i < ARRAYSIZE(toolbar_icons); i++) {
 		icon = (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(toolbar_icons[i]), IMAGE_ICON,
@@ -2390,7 +2462,7 @@ static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 	SendMessage(pin->toolbar, TB_SETINDENT, Scale(5), 0);
 	ZeroMemory(buttons, sizeof(buttons));
 	for (i = 0; i < ARRAYSIZE(toolbar_icons) - 1; i++) {
-		if (i == 2 || i == 6 || i == 16) {
+		if (i == 2 || i == 7 || i == 17) {
 			buttons[count].fsStyle = TBSTYLE_SEP;
 			buttons[count++].iBitmap = Scale(8);
 		}
@@ -2497,7 +2569,7 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 		if (pin->dirty && !replace_source(pin)) {
 			DeleteObject(original);
 			DeleteObject(bitmap);
-			MessageBox(pin->hwnd, pin_text(IDS_PIN_SOURCE_MISSING), TEXT("CLCL"), MB_OK | MB_ICONWARNING);
+			MessageBeep(MB_ICONWARNING);
 			SetForegroundWindow(pin->hwnd);
 			return NULL;
 		}
@@ -3456,7 +3528,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		switch (LOWORD(wparam)) {
 		case ID_PEN: case ID_MARKER: case ID_ERASER: case ID_LINE: case ID_ARROW: case ID_FRAME_ARROW:
 		case ID_RECT: case ID_ELLIPSE: case ID_CROP: case ID_FILLED_RECT: case ID_FILLED_ELLIPSE:
-		case ID_SELECT: case ID_FRAME_SELECT: case ID_ZOOM: case ID_PAN:
+		case ID_SELECT: case ID_FRAME_SELECT: case ID_APPLY_COLOR: case ID_ZOOM: case ID_PAN:
 		case ID_TEXT: case ID_CALLOUT: case ID_STEP: case ID_REDACT: case ID_SPOTLIGHT:
 			pin->tool = LOWORD(wparam);
 			if (pin->tool != ID_SELECT && pin->tool != ID_FRAME_SELECT) clear_selection(pin);
@@ -3528,7 +3600,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			}
 			break;
 		case ID_UPDATE:
-			if (!replace_source(pin)) MessageBox(hwnd, pin_text(IDS_PIN_SOURCE_MISSING), TEXT("CLCL"), MB_OK | MB_ICONWARNING);
+			if (!replace_source(pin)) MessageBeep(MB_ICONWARNING);
 			break;
 		case ID_COLOR_RED: case ID_COLOR_BLUE: case ID_COLOR_GREEN: case ID_COLOR_BLACK:
 			pin->color_index = LOWORD(wparam) - ID_COLOR_RED;
@@ -3617,6 +3689,18 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 						pin->pan_right = FALSE;
 						pin->pan_last = point;
 						SetCapture(hwnd);
+					}
+				}
+				return 0;
+			}
+			if (pin->tool == ID_APPLY_COLOR) {
+				if (client_to_image(pin, point, &image)) {
+					PIN_ARTIFACT *hit = top_artifact_at(pin, image);
+					if (hit != NULL && hit->color != pin->current_color && begin_change(pin)) {
+						COLORREF old_color = hit->color;
+						hit->color = pin->current_color;
+						if (!rebuild_artifacts(pin)) hit->color = old_color;
+						InvalidateRect(hwnd, &pin->image_rect, FALSE);
 					}
 				}
 				return 0;

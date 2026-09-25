@@ -14,6 +14,7 @@ See [.ai-context/PROJECT.md](file:///C:/Users/al/projects/CLCL/.ai-context/PROJE
   ```
   Target directory: `C:\Users\al\000\clcl\`.
   Must compile with **0 errors, 0 warnings** and restart process cleanly.
+- Always kill and restart CLCL when deploying. The user authorizes this even with open image edits; do not ask for restart confirmation.
 
 ## Token Economy Principles (Zero-Bloat Pair Programming)
 - **Surgical Changes**: Use targeted diff replacements (`replace_file_content`) rather than replacing whole files.
