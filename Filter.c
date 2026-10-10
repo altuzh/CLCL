@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Filter.c
@@ -24,15 +24,14 @@
 /* Define */
 
 /* Global Variables */
-// オプション
+// Options
 extern OPTION_INFO option;
 
 /* Local Function Prototypes */
-static BOOL filter_save_check(const TCHAR *format_name);
 static DATA_INFO *filter_item_copy(const DATA_INFO *di, TCHAR *err_str);
 
 /*
- * filter_get_index - フィルタ情報のインデックスを取得
+ * filter_get_index - get filter information index
  */
 int filter_get_index(const TCHAR *format_name, const int name_hash)
 {
@@ -62,7 +61,7 @@ int filter_get_index(const TCHAR *format_name, const int name_hash)
 }
 
 /*
- * filter_format_check - 形式のチェック
+ * filter_format_check - check format
  */
 BOOL filter_format_check(const TCHAR *format_name)
 {
@@ -75,7 +74,7 @@ BOOL filter_format_check(const TCHAR *format_name)
 }
 
 /*
- * filter_size_check - サイズのチェック
+ * filter_size_check - check size
  */
 BOOL filter_size_check(const TCHAR *format_name, const DWORD size)
 {
@@ -94,9 +93,9 @@ BOOL filter_size_check(const TCHAR *format_name, const DWORD size)
 }
 
 /*
- * filter_save_check - 形式の保存チェック
+ * filter_save_check - check format saving
  */
-static BOOL filter_save_check(const TCHAR *format_name)
+BOOL filter_save_check(const TCHAR *format_name)
 {
 	int i;
 
@@ -108,7 +107,7 @@ static BOOL filter_save_check(const TCHAR *format_name)
 }
 
 /*
- * filter_list_save_check - 保存フィルタが有効がチェック
+ * filter_list_save_check - check if save filter is enabled
  */
 BOOL filter_list_save_check(DATA_INFO *di)
 {
@@ -124,7 +123,7 @@ BOOL filter_list_save_check(DATA_INFO *di)
 
 		case TYPE_ITEM:
 			for (cdi = di->child; cdi != NULL; cdi = cdi->next) {
-				// 保存フィルタのチェック
+				// Check save filter
 				if (filter_save_check(cdi->format_name) == FALSE) {
 					return TRUE;
 				}
@@ -136,7 +135,7 @@ BOOL filter_list_save_check(DATA_INFO *di)
 }
 
 /*
- * filter_item_copy - フィルタをかけてアイテムのコピー
+ * filter_item_copy - copy item with filter applied
  */
 static DATA_INFO *filter_item_copy(const DATA_INFO *di, TCHAR *err_str)
 {
@@ -167,7 +166,7 @@ static DATA_INFO *filter_item_copy(const DATA_INFO *di, TCHAR *err_str)
 		new_item->plugin_param = di->plugin_param;
 
 		for (cdi = di->child; cdi != NULL; cdi = cdi->next) {
-			// 保存フィルタのチェック
+			// Check save filter
 			if (filter_save_check(cdi->format_name) == TRUE) {
 				if ((copy_di = data_item_copy(cdi, FALSE, FALSE, err_str)) == NULL) {
 					data_free(new_item);
@@ -192,7 +191,7 @@ static DATA_INFO *filter_item_copy(const DATA_INFO *di, TCHAR *err_str)
 }
 
 /*
- * filter_list_copy - フィルタをかけてアイテムリストのコピー
+ * filter_list_copy - copy item list with filter applied
  */
 DATA_INFO *filter_list_copy(DATA_INFO *di, TCHAR *err_str)
 {

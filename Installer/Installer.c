@@ -307,23 +307,8 @@ static void set_language(void)
 	LANGID langid = GetUserDefaultUILanguage();
 	LANGID res_langid = MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
 
-	switch (PRIMARYLANGID(langid)) {
-	case LANG_JAPANESE:
-		res_langid = MAKELANGID(LANG_JAPANESE, SUBLANG_DEFAULT);
-		break;
-	case LANG_GERMAN:
-		res_langid = MAKELANGID(LANG_GERMAN, SUBLANG_GERMAN);
-		break;
-	case LANG_UKRAINIAN:
-		res_langid = MAKELANGID(LANG_UKRAINIAN, SUBLANG_DEFAULT);
-		break;
-	case LANG_CHINESE:
-		if (SUBLANGID(langid) == SUBLANG_CHINESE_SIMPLIFIED ||
-			SUBLANGID(langid) == SUBLANG_CHINESE_SINGAPORE) {
-			res_langid = MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED);
-		}
-		break;
-	}
+	if (PRIMARYLANGID(langid) == LANG_RUSSIAN)
+		res_langid = MAKELANGID(LANG_RUSSIAN, SUBLANG_DEFAULT);
 	SetThreadUILanguage(res_langid);
 }
 

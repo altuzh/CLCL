@@ -29,6 +29,8 @@
 void dark_mode_init(void);
 void dark_mode_free(void);
 BOOL dark_mode_is_dark(void);
+BOOL dark_mode_window_is_dark(HWND hwnd);
+void dark_mode_set_inverse_window(HWND hwnd);
 BOOL dark_mode_update(void);
 BOOL dark_mode_is_color_change(const UINT msg, const LPARAM lParam);
 

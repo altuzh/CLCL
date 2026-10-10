@@ -20,6 +20,7 @@
 /* Function Prototypes */
 DATA_INFO *regist_path_to_item(DATA_INFO *di, TCHAR *path);
 DATA_INFO *regist_create_folder(DATA_INFO **root, const TCHAR *title, TCHAR *err_str);
+DATA_INFO *regist_create_folder_path(DATA_INFO **root, TCHAR *path, TCHAR *err_str);
 DATA_INFO *regist_merge_item(DATA_INFO **root, const DATA_INFO *from_di, const BOOL move_flag, TCHAR *err_str);
 BOOL regist_regist_hotkey(const HWND hWnd, DATA_INFO *di, int *id);
 void regist_unregist_hotkey(const HWND hWnd, DATA_INFO *di);

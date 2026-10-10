@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Ini.h
@@ -26,6 +26,7 @@
 #define ACTION_OPTION					2
 #define ACTION_CLIPBOARD_WATCH			3
 #define ACTION_EXIT						4
+#define ACTION_NEW_SNIP					5
 
 #define ACTION_TYPE_HOTKEY				0
 #define ACTION_TYPE_CTRL_CTRL			1
@@ -45,6 +46,7 @@
 #define OPTION_SHOW_WINDOW				TEXT("6")
 #define OPTION_SHOW_SENDKEY				TEXT("7")
 #define OPTION_SHOW_TOOL				TEXT("8")
+#define OPTION_SHOW_CLOUD				TEXT("9")
 
 /* Struct */
 // color info
@@ -246,6 +248,16 @@ typedef struct _OPTION_INFO {
 	int fmt_file_font_weight;
 	int fmt_file_font_italic;
 	int fmt_file_font_charset;
+
+	// pinned image editor
+	int pinned_tool;
+	int pinned_stroke_width;
+	int pinned_color;
+
+	// cloud
+	int cloud_enable;
+	TCHAR cloud_client_id[64];
+	TCHAR cloud_token[512];
 } OPTION_INFO;
 
 /* Function Prototypes */

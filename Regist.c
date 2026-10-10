@@ -120,6 +120,44 @@ DATA_INFO *regist_create_folder(DATA_INFO **root, const TCHAR *title, TCHAR *err
 	return new_item;
 }
 
+/* Create a slash-separated folder path, reusing existing ancestors. */
+DATA_INFO *regist_create_folder_path(DATA_INFO **root, TCHAR *path, TCHAR *err_str)
+{
+	DATA_INFO **child = root, **first_root = NULL;
+	DATA_INFO *di, *first_created = NULL;
+	TCHAR *part, *end;
+	BOOL last;
+
+	if (path == NULL || *path == TEXT('\0')) return NULL;
+	for (part = path; *part != TEXT('\0'); part++) {
+		if ((*part == TEXT('/') || *part == TEXT('\\')) &&
+			(part == path || part[1] == TEXT('\0') || part[1] == TEXT('/') || part[1] == TEXT('\\')))
+			return NULL;
+	}
+	for (part = path; ; part = end + 1) {
+		for (end = part; *end != TEXT('\0') && *end != TEXT('/') && *end != TEXT('\\'); end++)
+			;
+		last = *end == TEXT('\0');
+		*end = TEXT('\0');
+		for (di = *child; di != NULL; di = di->next) {
+			if (di->type == TYPE_FOLDER && lstrcmpi(di->title, part) == 0) break;
+		}
+		if (di != NULL && last) break;
+		if (di == NULL) {
+			di = regist_create_folder(child, part, err_str);
+			if (di == NULL) break;
+			if (first_created == NULL) {
+				first_created = di;
+				first_root = child;
+			}
+		}
+		if (last) return di;
+		child = &di->child;
+	}
+	if (first_created != NULL) data_delete(first_root, first_created, TRUE);
+	return NULL;
+}
+
 /*
  * regist_merge_item - 登録アイテムのマージ
  */

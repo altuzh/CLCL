@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * File.h
@@ -25,7 +25,7 @@ BOOL file_check_file(const TCHAR *path);
 BYTE *file_read_buf(const TCHAR *path, DWORD *ret_size, TCHAR *err_str);
 BOOL file_write_buf(const TCHAR *path, const BYTE *data, const DWORD size, TCHAR *err_str);
 BOOL file_read_data(const TCHAR *path, DATA_INFO **root, TCHAR *err_str);
-BOOL file_write_data(const TCHAR *path, DATA_INFO *di, TCHAR *err_str);
+BOOL file_write_data(const TCHAR *path, DATA_INFO *di, const BOOL filter_save, TCHAR *err_str);
 BOOL shell_open(const TCHAR *file_name, const TCHAR *command_line);
 
 #endif

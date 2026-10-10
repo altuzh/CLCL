@@ -1,4 +1,4 @@
-﻿/*
+/*
  * CLCL
  *
  * Ini.c
@@ -30,6 +30,9 @@
 #endif
 
 #include "resource.h"
+#ifdef OPTION_SET
+#include "CLCLSet/SetCloud.h"
+#endif
 
 /* Define */
 #define USER_INI_OLD					TEXT("user.ini")
@@ -46,7 +49,7 @@ static BOOL ini_put_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INF
 void ini_set_language(const TCHAR* locale_name);
 
 /*
- * ini_get_format_name - 形式名の取得
+ * ini_get_format_name - get format names
  */
 static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 {
@@ -55,7 +58,7 @@ static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 	TCHAR *p, *r;
 	int i;
 
-	// 項目数の取得
+	// Get number of items
 	p = format_name;
 	*cnt = 0;
 	while (1) {
@@ -73,13 +76,13 @@ static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 		}
 	}
 
-	// 確保
+	// Allocate
 	if ((ret = mem_calloc(sizeof(FORMAT_NAME) * (*cnt))) == NULL) {
 		*cnt = 0;
 		return NULL;
 	}
 
-	// 項目を切り出す
+	// Extract items
 	p = format_name;
 	r = buf;
 	i = 0;
@@ -107,7 +110,7 @@ static FORMAT_NAME *ini_get_format_name(TCHAR *format_name, int *cnt)
 }
 
 /*
- * ini_get_option - メニューオプションを取得
+ * ini_get_option - get menu options
  */
 static BOOL ini_get_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INFO *mi, const int mcnt, TCHAR *err_str)
 {
@@ -149,7 +152,7 @@ static BOOL ini_get_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INF
 }
 
 /*
- * ini_get_option - オプションを取得
+ * ini_get_option - get options
  */
 BOOL ini_get_option(TCHAR *err_str)
 {
@@ -169,7 +172,7 @@ BOOL ini_get_option(TCHAR *err_str)
 	wsprintf(ini_path, TEXT("%s\\%s"), work_path, USER_INI);
 	wsprintf(ini_path_old, TEXT("%s\\%s"), work_path, USER_INI_OLD);
 	if (file_check_file(ini_path) == FALSE && file_check_file(ini_path_old) == TRUE) {
-		// INIファイル名変更 (Ver 1.0.8)
+		// Change INI file name (Ver 1.0.8)
 		MoveFile(ini_path_old, ini_path);
 	}
 	profile_initialize(ini_path, TRUE);
@@ -183,6 +186,7 @@ BOOL ini_get_option(TCHAR *err_str)
 	int cnt = profile_get_string(TEXT("main"), TEXT("language"), TEXT(""), option.main_language, LOCALE_NAME_MAX_LENGTH, ini_path);
 	if (cnt > 0) {
 		ini_set_language(option.main_language);
+		lstrcpy(option.main_language, PRIMARYLANGID(GetThreadUILanguage()) == LANG_RUSSIAN ? TEXT("ru") : TEXT("en"));
 	}
 
 	// data
@@ -280,7 +284,7 @@ BOOL ini_get_option(TCHAR *err_str)
 	option.action_cnt = profile_get_int(TEXT("action"), TEXT("cnt"), -1, ini_path);
 	if (option.action_cnt < 0) {
 		// Default
-		option.action_cnt = 4;
+		option.action_cnt = 5;
 		if ((option.action_info = mem_calloc(sizeof(ACTION_INFO) * option.action_cnt)) == NULL) {
 			message_get_error(GetLastError(), err_str);
 			return FALSE;
@@ -385,6 +389,15 @@ BOOL ini_get_option(TCHAR *err_str)
 		((option.action_info + i)->menu_info + 0)->content = MENU_CONTENT_TOOL;
 		((option.action_info + i)->menu_info + 1)->content = MENU_CONTENT_SEPARATOR;
 		((option.action_info + i)->menu_info + 2)->content = MENU_CONTENT_CANCEL;
+
+		// hotkey (Ctrl + Shift + Z): new snip
+		i++;
+		(option.action_info + i)->action = ACTION_NEW_SNIP;
+		(option.action_info + i)->type = ACTION_TYPE_HOTKEY;
+		(option.action_info + i)->enable = 1;
+		(option.action_info + i)->id = HKEY_ID + i;
+		(option.action_info + i)->modifiers = MOD_CONTROL | MOD_SHIFT;
+		(option.action_info + i)->virtkey = 'Z';
 	} else {
 		if ((option.action_info = mem_calloc(sizeof(ACTION_INFO) * option.action_cnt)) == NULL) {
 			message_get_error(GetLastError(), err_str);
@@ -420,6 +433,71 @@ BOOL ini_get_option(TCHAR *err_str)
 				}
 			}
 		}
+		// Add the shortcut once to existing profiles; a later user deletion stays deleted.
+		if (!profile_get_int(TEXT("action"), TEXT("new_snip_added"), 0, ini_path)) {
+			for (i = 0; i < option.action_cnt; i++)
+				if ((option.action_info + i)->action == ACTION_NEW_SNIP) break;
+			if (i == option.action_cnt) {
+				ACTION_INFO *actions = mem_calloc(sizeof(ACTION_INFO) * (option.action_cnt + 1));
+				if (actions == NULL) {
+					message_get_error(GetLastError(), err_str);
+					return FALSE;
+				}
+				CopyMemory(actions, option.action_info, sizeof(ACTION_INFO) * option.action_cnt);
+				mem_free(&option.action_info);
+				option.action_info = actions;
+				(option.action_info + i)->action = ACTION_NEW_SNIP;
+				(option.action_info + i)->type = ACTION_TYPE_HOTKEY;
+				(option.action_info + i)->enable = 1;
+				(option.action_info + i)->id = HKEY_ID + i;
+				(option.action_info + i)->modifiers = MOD_CONTROL | MOD_SHIFT;
+				(option.action_info + i)->virtkey = 'Z';
+				option.action_cnt++;
+				wsprintf(buf, TEXT("action-%d"), i);
+				profile_write_int(TEXT("action"), buf, ACTION_NEW_SNIP, ini_path);
+				wsprintf(buf, TEXT("type-%d"), i);
+				profile_write_int(TEXT("action"), buf, ACTION_TYPE_HOTKEY, ini_path);
+				wsprintf(buf, TEXT("enable-%d"), i);
+				profile_write_int(TEXT("action"), buf, 1, ini_path);
+				wsprintf(buf, TEXT("modifiers-%d"), i);
+				profile_write_int(TEXT("action"), buf, MOD_CONTROL | MOD_SHIFT, ini_path);
+				wsprintf(buf, TEXT("virtkey-%d"), i);
+				profile_write_int(TEXT("action"), buf, 'Z', ini_path);
+				profile_write_int(TEXT("action"), TEXT("cnt"), option.action_cnt, ini_path);
+			}
+			profile_write_int(TEXT("action"), TEXT("new_snip_added"), 1, ini_path);
+			profile_flush(ini_path);
+		}
+	}
+	// Move only the original F1 default; leave user-chosen shortcuts alone.
+	if (!profile_get_int(TEXT("action"), TEXT("new_snip_hotkey_updated"), 0, ini_path)) {
+		for (i = 0; i < option.action_cnt; i++) {
+			if ((option.action_info + i)->action == ACTION_NEW_SNIP &&
+				(option.action_info + i)->type == ACTION_TYPE_HOTKEY &&
+				(option.action_info + i)->virtkey == VK_F1 &&
+				(option.action_info + i)->modifiers == 0) {
+				(option.action_info + i)->modifiers = MOD_CONTROL | MOD_SHIFT;
+				wsprintf(buf, TEXT("modifiers-%d"), i);
+				profile_write_int(TEXT("action"), buf, MOD_CONTROL | MOD_SHIFT, ini_path);
+			}
+		}
+		profile_write_int(TEXT("action"), TEXT("new_snip_hotkey_updated"), 1, ini_path);
+		profile_flush(ini_path);
+	}
+	// Update only the previous default; keep user-assigned shortcuts.
+	if (!profile_get_int(TEXT("action"), TEXT("new_snip_hotkey_z_updated"), 0, ini_path)) {
+		for (i = 0; i < option.action_cnt; i++) {
+			if ((option.action_info + i)->action == ACTION_NEW_SNIP &&
+				(option.action_info + i)->type == ACTION_TYPE_HOTKEY &&
+				(option.action_info + i)->virtkey == VK_F1 &&
+				(option.action_info + i)->modifiers == (MOD_CONTROL | MOD_SHIFT)) {
+				(option.action_info + i)->virtkey = 'Z';
+				wsprintf(buf, TEXT("virtkey-%d"), i);
+				profile_write_int(TEXT("action"), buf, 'Z', ini_path);
+			}
+		}
+		profile_write_int(TEXT("action"), TEXT("new_snip_hotkey_z_updated"), 1, ini_path);
+		profile_flush(ini_path);
 	}
 
 	// format
@@ -444,7 +522,7 @@ BOOL ini_get_option(TCHAR *err_str)
 		(option.format_info + 3)->func_header = alloc_copy(TEXT("file_"));
 
 		for (i = 0; i < option.format_cnt; i++) {
-			// 形式名の取得
+			// Get format name
 			(option.format_info + i)->fn = ini_get_format_name((option.format_info + i)->format_name,
 				&(option.format_info + i)->fn_cnt);
 		}
@@ -461,7 +539,7 @@ BOOL ini_get_option(TCHAR *err_str)
 			wsprintf(buf, TEXT("func_header-%d"), i);
 			(option.format_info + i)->func_header = profile_alloc_string(TEXT("format"), buf, TEXT(""), ini_path);
 
-			// 形式名の取得
+			// Get format name
 			(option.format_info + i)->fn = ini_get_format_name((option.format_info + i)->format_name,
 				&(option.format_info + i)->fn_cnt);
 		}
@@ -516,7 +594,7 @@ BOOL ini_get_option(TCHAR *err_str)
 		(option.filter_info + 2)->limit_size = 0;
 
 		for (i = 0; i < option.filter_cnt; i++) {
-			// 形式名の取得
+			// Get format name
 			(option.filter_info + i)->fn = ini_get_format_name((option.filter_info + i)->format_name,
 				&(option.filter_info + i)->fn_cnt);
 		}
@@ -535,7 +613,7 @@ BOOL ini_get_option(TCHAR *err_str)
 			wsprintf(buf, TEXT("limit_size-%d"), i);
 			(option.filter_info + i)->limit_size = profile_get_int(TEXT("filter"), buf, 0, ini_path);
 
-			// 形式名の取得
+			// Get format name
 			(option.filter_info + i)->fn = ini_get_format_name((option.filter_info + i)->format_name,
 				&(option.filter_info + i)->fn_cnt);
 		}
@@ -716,7 +794,7 @@ BOOL ini_get_option(TCHAR *err_str)
 	option.bin_font_charset = profile_get_int(TEXT("binview"), TEXT("font_charset"), char_set, ini_path);
 
 	// text format
-	option.fmt_txt_menu_tooltip_size = profile_get_int(TEXT("fmt_text"), TEXT("menu_tooltip_size"), 1024, ini_path);
+	option.fmt_txt_menu_tooltip_size = profile_get_int(TEXT("fmt_text"), TEXT("menu_tooltip_size"), 65536, ini_path);
 	option.fmt_txt_viewer_word_wrap = profile_get_int(TEXT("fmt_text"), TEXT("viewer_word_wrap"), 0, ini_path);
 	option.fmt_txt_tab_size = profile_get_int(TEXT("fmt_text"), TEXT("tab_size"), 8, ini_path);
 	option.fmt_txt_font_name = profile_alloc_string(TEXT("fmt_text"), TEXT("font_name"), TEXT(""), ini_path);
@@ -738,12 +816,28 @@ BOOL ini_get_option(TCHAR *err_str)
 	option.fmt_file_font_italic = profile_get_int(TEXT("fmt_file"), TEXT("font_italic"), 0, ini_path);
 	option.fmt_file_font_charset = profile_get_int(TEXT("fmt_file"), TEXT("font_charset"), char_set, ini_path);
 
+	// pinned image editor
+	option.pinned_tool = profile_get_int(TEXT("pinned"), TEXT("tool"), 6100 /* ID_PEN */, ini_path);
+	option.pinned_stroke_width = profile_get_int(TEXT("pinned"), TEXT("stroke_width"), 3, ini_path);
+	option.pinned_color = profile_get_int(TEXT("pinned"), TEXT("color"), (int)RGB(220, 32, 32), ini_path);
+
+#ifdef OPTION_SET
+	// cloud
+	option.cloud_enable = profile_get_int(TEXT("cloud"), TEXT("enable"), 0, ini_path);
+	profile_get_string(TEXT("cloud"), TEXT("client_id"), TEXT("8a6ce5d366014eb4b2b0ab1f65926a6b"), option.cloud_client_id, sizeof(option.cloud_client_id) / sizeof(TCHAR), ini_path);
+	if (lstrcmp(option.cloud_client_id, TEXT("23fd2dfd52bc4766a1d90102b125910e")) == 0 ||
+		option.cloud_client_id[0] == TEXT('\0')) {
+		lstrcpy(option.cloud_client_id, TEXT("8a6ce5d366014eb4b2b0ab1f65926a6b"));
+	}
+	cloud_load_token(ini_path, option.cloud_token, sizeof(option.cloud_token) / sizeof(TCHAR));
+#endif
+
 	profile_free();
 	return TRUE;
 }
 
 /*
- * ini_put_menu - メニューオプションを書きこむ
+ * ini_put_menu - write menu options
  */
 static BOOL ini_put_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INFO *mi, const int mcnt)
 {
@@ -785,7 +879,7 @@ static BOOL ini_put_menu(const TCHAR *ini_path, const TCHAR *menu_path, MENU_INF
 }
 
 /*
- * ini_put_option - オプションを書きこむ
+ * ini_put_option - write options
  */
 BOOL ini_put_option(void)
 {
@@ -1096,13 +1190,25 @@ BOOL ini_put_option(void)
 	profile_write_int(TEXT("fmt_file"), TEXT("font_italic"), option.fmt_file_font_italic, ini_path);
 	profile_write_int(TEXT("fmt_file"), TEXT("font_charset"), option.fmt_file_font_charset, ini_path);
 
+	// pinned image editor
+	profile_write_int(TEXT("pinned"), TEXT("tool"), option.pinned_tool, ini_path);
+	profile_write_int(TEXT("pinned"), TEXT("stroke_width"), option.pinned_stroke_width, ini_path);
+	profile_write_int(TEXT("pinned"), TEXT("color"), option.pinned_color, ini_path);
+
+#ifdef OPTION_SET
+	// cloud
+	profile_write_int(TEXT("cloud"), TEXT("enable"), option.cloud_enable, ini_path);
+	profile_write_string(TEXT("cloud"), TEXT("client_id"), option.cloud_client_id, ini_path);
+	cloud_save_token(ini_path, option.cloud_token);
+#endif
+
 	profile_flush(ini_path);
 	profile_free();
 	return TRUE;
 }
 
 /*
- * ini_free_format_name - 形式名を解放
+ * ini_free_format_name - free format names
  */
 void ini_free_format_name(FORMAT_NAME *fn, const int fn_cnt)
 {
@@ -1117,7 +1223,7 @@ void ini_free_format_name(FORMAT_NAME *fn, const int fn_cnt)
 }
 
 /*
- * ini_free_menu - メニューオプションを解放
+ * ini_free_menu - free menu options
  */
 void ini_free_menu(MENU_INFO *mi, const int mcnt)
 {
@@ -1141,7 +1247,7 @@ void ini_free_menu(MENU_INFO *mi, const int mcnt)
 }
 
 /*
- * ini_free - オプションを解放
+ * ini_free - free options
  */
 BOOL ini_free(void)
 {
@@ -1260,31 +1366,13 @@ void ini_set_language(const TCHAR* locale_name)
 		if (lcid > 0 && (langid = LANGIDFROMLCID(lcid)) > 0) {
 			// the language of the resource to be used
 			LANGID res_langid;
-			switch (PRIMARYLANGID(langid))
-			{
-			case LANG_GERMAN:
-				res_langid = MAKELANGID(LANG_GERMAN, SUBLANG_GERMAN);
-				break;
-			case LANG_ENGLISH:
-				res_langid = MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
-				break;
-			case LANG_JAPANESE:
-				res_langid = MAKELANGID(LANG_JAPANESE, SUBLANG_DEFAULT);
-				break;
-			case LANG_UKRAINIAN:
-				res_langid = MAKELANGID(LANG_UKRAINIAN, SUBLANG_DEFAULT);
-				break;
-			case LANG_CHINESE:
-				if (SUBLANGID(langid) != SUBLANG_CHINESE_SIMPLIFIED &&
-					SUBLANGID(langid) != SUBLANG_CHINESE_SINGAPORE) {
-					// traditional chinese resources not yet available
-					return;
-				}
-				res_langid = MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED);
+			switch (PRIMARYLANGID(langid)) {
+			case LANG_RUSSIAN:
+				res_langid = MAKELANGID(LANG_RUSSIAN, SUBLANG_DEFAULT);
 				break;
 			default:
-				// language specific resources not yet available
-				return;
+				res_langid = MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
+				break;
 			}
 			LANGID old_langid = GetThreadUILanguage();
 			if (SetThreadUILanguage(res_langid) != res_langid) {

@@ -796,6 +796,7 @@ static BOOL CALLBACK set_action_item_proc(HWND hDlg, UINT uMsg, WPARAM wParam, L
 		SET_COMBO_ITEM(IDC_COMBO_ACTION, message_get_res(IDS_ACTION_OPTION));
 		SET_COMBO_ITEM(IDC_COMBO_ACTION, message_get_res(IDS_ACTION_CLIPBOARD_WATCH));
 		SET_COMBO_ITEM(IDC_COMBO_ACTION, message_get_res(IDS_ACTION_EXIT));
+		SET_COMBO_ITEM(IDC_COMBO_ACTION, message_get_res(IDS_ACTION_NEW_SNIP));
 
 		SET_COMBO_ITEM(IDC_COMBO_TYPE, message_get_res(IDS_ACTION_TYPE_HOTKEY));
 		SET_COMBO_ITEM(IDC_COMBO_TYPE, message_get_res(IDS_ACTION_TYPE_CTRL_CTRL));
@@ -1237,6 +1238,10 @@ static void listview_set_text(const HWND hListView, const int i)
 
 	case ACTION_EXIT:
 		p = message_get_res(IDS_ACTION_EXIT);
+		break;
+
+	case ACTION_NEW_SNIP:
+		p = message_get_res(IDS_ACTION_NEW_SNIP);
 		break;
 	}
 	ListView_SetItemText(hListView, i, 0, p);

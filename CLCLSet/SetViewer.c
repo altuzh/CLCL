@@ -33,11 +33,8 @@ extern int prop_ret;
 // オプション
 extern OPTION_INFO option;
 
-const TCHAR jpn_locale[] = TEXT("ja");
 const TCHAR eng_locale[] = TEXT("en");
-const TCHAR ger_locale[] = TEXT("de");
-const TCHAR ukr_locale[] = TEXT("uk");
-const TCHAR chs_locale[] = TEXT("zh-Hans");
+const TCHAR rus_locale[] = TEXT("ru");
 
 /* Local Function Prototypes */
 
@@ -115,16 +112,10 @@ BOOL CALLBACK set_viewer_proc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam
 		index = (int)SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_ADDSTRING, 0, (LPARAM)TEXT(""));
 		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETITEMDATA, index, (LPARAM)NULL);
 		// now the available languages
-		index = (int)SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_ADDSTRING, 0, (LPARAM)message_get_res(IDS_MAIN_JAPANESE));
-		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETITEMDATA, index, (LPARAM)jpn_locale);
 		index = (int)SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_ADDSTRING, 0, (LPARAM)message_get_res(IDS_MAIN_ENGLISH));
 		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETITEMDATA, index, (LPARAM)eng_locale);
-		index = (int)SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_ADDSTRING, 0, (LPARAM)message_get_res(IDS_MAIN_GERMAN));
-		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETITEMDATA, index, (LPARAM)ger_locale);
-		index = (int)SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_ADDSTRING, 0, (LPARAM)message_get_res(IDS_MAIN_UKRAINIAN));
-		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETITEMDATA, index, (LPARAM)ukr_locale);
-		index = (int)SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_ADDSTRING, 0, (LPARAM)message_get_res(IDS_MAIN_SIMP_CHINESE));
-		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETITEMDATA, index, (LPARAM)chs_locale);
+		index = (int)SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_ADDSTRING, 0, (LPARAM)message_get_res(IDS_MAIN_RUSSIAN));
+		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETITEMDATA, index, (LPARAM)rus_locale);
 
 		// init with no selection
 		SendDlgItemMessage(hDlg, IDC_UI_LANGUAGE, CB_SETCURSEL, -1, 0);

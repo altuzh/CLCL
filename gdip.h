@@ -32,6 +32,8 @@ extern "C" {
 
 	int save_jpeg(HBITMAP hBmp, LPCWSTR lpszFilename, ULONG uQuality);
 	int save_png(HBITMAP hBmp, LPCWSTR lpszFilename);
+	BYTE *bitmap_to_png(HBITMAP bitmap, DWORD *size);
+	HBITMAP png_to_bitmap(const BYTE *data, DWORD size);
 
 	HBITMAP image_to_bitmap(HDC hdc, LPCWSTR lpszFilename);
 #ifdef __cplusplus
