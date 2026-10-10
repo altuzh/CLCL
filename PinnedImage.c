@@ -30,6 +30,7 @@
 #define PIN_CLASS TEXT("CLCL_PinnedImage")
 #define SNIP_CLASS TEXT("CLCL_SnipOverlay")
 #define HISTORY_MAX 16
+#define PIN_MAX_STROKE_WIDTH 100
 #define ID_PIN_TOOLBAR 6140
 #define TOOL_ICON_SIZE 22
 
@@ -51,9 +52,21 @@
 #define ID_COLOR_GREEN 6122
 #define ID_COLOR_BLACK 6123
 #define ID_COLOR_DROPDOWN 6125
-#define ID_WIDTH_3     6130
-#define ID_WIDTH_6     6131
-#define ID_WIDTH_12    6132
+#define ID_WIDTH_1     6170
+#define ID_WIDTH_2     6171
+#define ID_WIDTH_3     6172
+#define ID_WIDTH_4     6173
+#define ID_WIDTH_5     6174
+#define ID_WIDTH_6     6175
+#define ID_WIDTH_7     6176
+#define ID_WIDTH_8     6177
+#define ID_WIDTH_9     6178
+#define ID_WIDTH_10    6179
+#define ID_WIDTH_11    6180
+#define ID_WIDTH_12    6181
+#define ID_WIDTH_CUSTOM 6182
+#define ID_WIDTH_EDIT   6183
+#define ID_WIDTH_APPLY  6184
 #define ID_SIZE_DROPDOWN 6133
 #define ID_FILLED_RECT  6134
 #define ID_FILLED_ELLIPSE 6135
@@ -1302,10 +1315,13 @@ static BOOL rebuild_artifacts(PINNED_IMAGE *pin)
 	BOOL effects_ok;
 	if (rebuilt == NULL) return FALSE;
 	pin->bitmap = rebuilt;
+	/* Invert the image before applying highlight colors and other annotations. */
+	for (item = pin->artifacts; item != NULL; item = item->next)
+		if (!item->deleted && item->tool == ID_INVERT) render_extra_artifact(pin, item);
 	effects_ok = render_frame_effects(pin);
 	for (item = pin->artifacts; effects_ok && item != NULL; item = item->next) {
 		int i;
-		if (item->deleted || item->tool == ID_SPOTLIGHT || item->tool == ID_HIGHLIGHT_BLOCK || item->tool == ID_ROUGH_HIGHLIGHT) continue;
+		if (item->deleted || item->tool == ID_INVERT || item->tool == ID_SPOTLIGHT || item->tool == ID_HIGHLIGHT_BLOCK || item->tool == ID_ROUGH_HIGHLIGHT) continue;
 		pin->tool = item->tool;
 		pin->current_color = item->color;
 		pin->stroke_override = item->stroke;
@@ -1321,7 +1337,7 @@ static BOOL rebuild_artifacts(PINNED_IMAGE *pin)
 				draw_segment(pin, i ? item->points[i - 1] : item->points[0], item->points[i], FALSE);
 			if (pin->marker_base != NULL) { DeleteObject(pin->marker_base); pin->marker_base = NULL; }
 		} else if (item->tool == ID_TEXT || item->tool == ID_CALLOUT || item->tool == ID_DIMENSION || item->tool == ID_STEP ||
-			item->tool == ID_REDACT || item->tool == ID_INVERT || item->tool == ID_HIGHLIGHT)
+			item->tool == ID_REDACT || item->tool == ID_HIGHLIGHT)
 			render_extra_artifact(pin, item);
 		else finish_shape(pin, item->end);
 	}
@@ -2321,17 +2337,29 @@ static HMENU create_editor_menu(BOOL can_update)
 		!AppendMenu(color, MF_STRING, ID_COLOR_RED, pin_text(IDS_PIN_RED)) ||
 		!AppendMenu(color, MF_STRING, ID_COLOR_BLUE, pin_text(IDS_PIN_BLUE)) ||
 		!AppendMenu(color, MF_STRING, ID_COLOR_GREEN, pin_text(IDS_PIN_GREEN)) ||
-		!AppendMenu(color, MF_STRING, ID_COLOR_BLACK, pin_text(IDS_PIN_BLACK)) ||
-		!AppendMenu(size, MF_STRING, ID_WIDTH_3, TEXT("&3 px")) ||
-		!AppendMenu(size, MF_STRING, ID_WIDTH_6, TEXT("&6 px")) ||
-		!AppendMenu(size, MF_STRING, ID_WIDTH_12, TEXT("&12 px"))) {
+		!AppendMenu(color, MF_STRING, ID_COLOR_BLACK, pin_text(IDS_PIN_BLACK))) {
 		DestroyMenu(menu);
 		return NULL;
+	}
+	{
+		int width;
+		for (width = 1; width <= 12; width++) {
+			TCHAR label[16];
+			wsprintf(label, width <= 9 ? TEXT("&%d px") : TEXT("%d px"), width);
+			if (!AppendMenu(size, MF_STRING, ID_WIDTH_1 + width - 1, label)) {
+				DestroyMenu(menu);
+				return NULL;
+			}
+		}
 	}
 	if (!can_update) EnableMenuItem(image, ID_UPDATE, MF_BYCOMMAND | MF_GRAYED);
 	CheckMenuItem(tools, ID_CROP, MF_BYCOMMAND | MF_CHECKED);
 	CheckMenuRadioItem(color, ID_COLOR_RED, ID_COLOR_BLACK, ID_COLOR_RED, MF_BYCOMMAND);
-	CheckMenuRadioItem(size, ID_WIDTH_3, ID_WIDTH_12, ID_WIDTH_3, MF_BYCOMMAND);
+	if (!AppendMenu(size, MF_STRING, ID_WIDTH_CUSTOM, pin_text(IDS_PIN_CUSTOM_SIZE))) {
+		DestroyMenu(menu);
+		return NULL;
+	}
+	CheckMenuRadioItem(size, ID_WIDTH_1, ID_WIDTH_CUSTOM, ID_WIDTH_3, MF_BYCOMMAND);
 	return menu;
 }
 
@@ -2449,8 +2477,8 @@ static void update_size_button_icon(PINNED_IMAGE *pin)
 	HICON icon;
 	UINT resource;
 	if (pin == NULL || pin->icons == NULL || pin->toolbar == NULL) return;
-	resource = pin->stroke_width == 12 ? IDR_PIN_SIZE_12 :
-		pin->stroke_width == 6 ? IDR_PIN_SIZE_6 : IDR_PIN_SIZE;
+	resource = pin->stroke_width >= 10 ? IDR_PIN_SIZE_12 :
+		pin->stroke_width >= 5 ? IDR_PIN_SIZE_6 : IDR_PIN_SIZE;
 	icon = (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(resource), IMAGE_ICON,
 		Scale(TOOL_ICON_SIZE), Scale(TOOL_ICON_SIZE), LR_DEFAULTCOLOR);
 	if (icon != NULL) {
@@ -2815,18 +2843,235 @@ static void show_color_popup(PINNED_IMAGE *pin)
 	}
 }
 
+static HWND current_size_popup_hwnd = NULL;
+static DWORD last_size_popup_toggle = 0;
+
+static void set_stroke_width(PINNED_IMAGE *pin, int width)
+{
+	if (width < 1 || width > PIN_MAX_STROKE_WIDTH) return;
+	pin->stroke_width = width;
+	change_selected_style(pin, FALSE);
+	update_size_button_icon(pin);
+	CheckMenuRadioItem(GetSubMenu(pin->menu, 4), ID_WIDTH_1, ID_WIDTH_CUSTOM,
+		width <= 12 ? ID_WIDTH_1 + width - 1 : ID_WIDTH_CUSTOM, MF_BYCOMMAND);
+	save_pinned_preferences(pin);
+	InvalidateRect(pin->hwnd, NULL, FALSE);
+}
+
+static void apply_custom_width(HWND popup)
+{
+	TCHAR text[16];
+	int i, width = 0, length = GetWindowTextLength(GetDlgItem(popup, ID_WIDTH_EDIT));
+	GetDlgItemText(popup, ID_WIDTH_EDIT, text, ARRAYSIZE(text));
+	for (i = 0; i < length && i < ARRAYSIZE(text) - 1; i++) {
+		if (text[i] < TEXT('0') || text[i] > TEXT('9')) break;
+		width = width * 10 + text[i] - TEXT('0');
+		if (width > PIN_MAX_STROKE_WIDTH) break;
+	}
+	if (length == 0 || i != length || width < 1 || width > PIN_MAX_STROKE_WIDTH) {
+		MessageBeep(MB_ICONWARNING);
+		SetFocus(GetDlgItem(popup, ID_WIDTH_EDIT));
+		SendDlgItemMessage(popup, ID_WIDTH_EDIT, EM_SETSEL, 0, -1);
+		return;
+	}
+	set_stroke_width((PINNED_IMAGE *)GetWindowLongPtr(popup, GWLP_USERDATA), width);
+	DestroyWindow(popup);
+}
+
+static LRESULT CALLBACK size_control_proc(HWND hwnd, UINT msg, WPARAM wparam,
+	LPARAM lparam, UINT_PTR id, DWORD_PTR data)
+{
+	HWND popup = GetParent(hwnd);
+	int command = GetDlgCtrlID(hwnd);
+	if (msg == WM_SETFOCUS && command == ID_WIDTH_EDIT) SendMessage(hwnd, EM_SETSEL, 0, -1);
+	if (msg == WM_GETDLGCODE) return DefSubclassProc(hwnd, msg, wparam, lparam) | DLGC_WANTALLKEYS;
+	if (msg == WM_KEYDOWN) {
+		if (wparam == VK_ESCAPE) { DestroyWindow(popup); return 0; }
+		if (wparam == VK_RETURN) {
+			if (command >= ID_WIDTH_1 && command <= ID_WIDTH_12) SendMessage(hwnd, BM_CLICK, 0, 0);
+			else apply_custom_width(popup);
+			return 0;
+		}
+		if (wparam == VK_TAB) {
+			SetFocus(GetNextDlgTabItem(popup, hwnd, GetKeyState(VK_SHIFT) < 0));
+			return 0;
+		}
+		if (command >= ID_WIDTH_1 && command <= ID_WIDTH_12 &&
+			(wparam == VK_LEFT || wparam == VK_RIGHT || wparam == VK_UP || wparam == VK_DOWN)) {
+			int delta = wparam == VK_LEFT ? -1 : wparam == VK_RIGHT ? 1 : wparam == VK_UP ? -6 : 6;
+			SetFocus(GetDlgItem(popup, ID_WIDTH_1 + (command - ID_WIDTH_1 + delta + 12) % 12));
+			return 0;
+		}
+	}
+	/* Suppress translated Enter/Tab/Escape after handling their key-down. */
+	if (msg == WM_CHAR && (wparam == VK_RETURN || wparam == VK_TAB || wparam == VK_ESCAPE)) return 0;
+	if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, size_control_proc, id);
+	return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+	PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+	BOOL dark = !dark_mode_is_dark();
+	switch (msg) {
+	case WM_CREATE:
+	{
+		int i;
+		TCHAR text[16];
+		HWND control;
+		pin = (PINNED_IMAGE *)((CREATESTRUCT *)lparam)->lpCreateParams;
+		SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pin);
+		dark_mode_set_inverse_window(hwnd);
+		for (i = 0; i < 12; i++) {
+			wsprintf(text, TEXT("%d px"), i + 1);
+			control = CreateWindowEx(0, TEXT("BUTTON"), text,
+				WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+				Scale(8 + (i % 6) * 36), Scale(8 + (i / 6) * 44), Scale(32), Scale(40),
+				hwnd, (HMENU)(INT_PTR)(ID_WIDTH_1 + i), pin_instance, NULL);
+			if (control == NULL) return -1;
+			SetWindowSubclass(control, size_control_proc, 1, 0);
+		}
+		control = CreateWindowEx(0, TEXT("STATIC"), pin_text(IDS_PIN_CUSTOM_WIDTH),
+			WS_CHILD | WS_VISIBLE, Scale(8), Scale(99), Scale(212), Scale(18),
+			hwnd, NULL, pin_instance, NULL);
+		if (control == NULL) return -1;
+		SendMessage(control, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+		wsprintf(text, TEXT("%d"), pin->stroke_width);
+		control = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), text,
+			WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+			Scale(8), Scale(120), Scale(128), Scale(24),
+			hwnd, (HMENU)ID_WIDTH_EDIT, pin_instance, NULL);
+		if (control == NULL) return -1;
+		SendMessage(control, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+		SendMessage(control, EM_SETLIMITTEXT, 3, 0);
+		SetWindowSubclass(control, size_control_proc, 1, 0);
+		dark_mode_set_control(control);
+		control = CreateWindowEx(0, TEXT("BUTTON"), pin_text(IDS_PIN_APPLY_WIDTH),
+			WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+			Scale(144), Scale(120), Scale(76), Scale(24),
+			hwnd, (HMENU)ID_WIDTH_APPLY, pin_instance, NULL);
+		if (control == NULL) return -1;
+		SetWindowSubclass(control, size_control_proc, 1, 0);
+		return 0;
+	}
+	case WM_COMMAND:
+		if (HIWORD(wparam) == BN_CLICKED) {
+			int command = LOWORD(wparam);
+			if (command >= ID_WIDTH_1 && command <= ID_WIDTH_12) {
+				set_stroke_width(pin, command - ID_WIDTH_1 + 1);
+				DestroyWindow(hwnd);
+			} else if (command == ID_WIDTH_APPLY) apply_custom_width(hwnd);
+		}
+		return 0;
+	case WM_ACTIVATE:
+		if (LOWORD(wparam) == WA_INACTIVE) DestroyWindow(hwnd);
+		return 0;
+	case WM_KEYDOWN:
+		if (wparam == VK_ESCAPE) DestroyWindow(hwnd);
+		return 0;
+	case WM_DESTROY:
+		if (current_size_popup_hwnd == hwnd) current_size_popup_hwnd = NULL;
+		last_size_popup_toggle = GetTickCount();
+		return 0;
+	case WM_CTLCOLORSTATIC:
+	case WM_CTLCOLOREDIT:
+		SetTextColor((HDC)wparam, dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
+		SetBkColor((HDC)wparam, dark ? RGB(34, 38, 44) : RGB(255, 255, 255));
+		SetDCBrushColor((HDC)wparam, dark ? RGB(34, 38, 44) : RGB(255, 255, 255));
+		return (LRESULT)GetStockObject(DC_BRUSH);
+	case WM_DRAWITEM:
+	{
+		DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lparam;
+		RECT r = item->rcItem, line = r, label = r;
+		BOOL preset = item->CtlID >= ID_WIDTH_1 && item->CtlID <= ID_WIDTH_12;
+		int width = preset ? item->CtlID - ID_WIDTH_1 + 1 : 0;
+		BOOL selected = preset && pin->stroke_width == width;
+		HBRUSH brush = (HBRUSH)GetStockObject(DC_BRUSH);
+		HFONT old_font = SelectObject(item->hDC, GetStockObject(DEFAULT_GUI_FONT));
+		TCHAR text[32];
+		SetDCBrushColor(item->hDC, dark ? RGB(48, 54, 64) : RGB(235, 242, 252));
+		FillRect(item->hDC, &r, brush);
+		SetDCBrushColor(item->hDC, selected ? (dark ? RGB(80, 160, 255) : RGB(0, 120, 215)) :
+			(dark ? RGB(68, 73, 82) : RGB(204, 209, 216)));
+		FrameRect(item->hDC, &r, brush);
+		if (selected || (item->itemState & ODS_SELECTED)) {
+			InflateRect(&r, -1, -1);
+			FrameRect(item->hDC, &r, brush);
+		}
+		if (preset) {
+			line.left += Scale(6); line.right -= Scale(6);
+			line.top = Scale(13) - Scale(width) / 2; line.bottom = line.top + max(1, Scale(width));
+			SetDCBrushColor(item->hDC, dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
+			FillRect(item->hDC, &line, brush);
+			label.top = Scale(23);
+			wsprintf(text, TEXT("%d"), width);
+		} else GetWindowText(item->hwndItem, text, ARRAYSIZE(text));
+		SetBkMode(item->hDC, TRANSPARENT);
+		SetTextColor(item->hDC, dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
+		DrawText(item->hDC, text, -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		if (item->itemState & ODS_FOCUS) { InflateRect(&r, -2, -2); DrawFocusRect(item->hDC, &r); }
+		SelectObject(item->hDC, old_font);
+		return TRUE;
+	}
+	case WM_PAINT:
+	{
+		PAINTSTRUCT ps;
+		HDC dc = BeginPaint(hwnd, &ps);
+		RECT r;
+		HBRUSH brush = (HBRUSH)GetStockObject(DC_BRUSH);
+		GetClientRect(hwnd, &r);
+		SetDCBrushColor(dc, dark ? RGB(34, 38, 44) : RGB(255, 255, 255));
+		FillRect(dc, &r, brush);
+		SetDCBrushColor(dc, dark ? RGB(68, 73, 82) : RGB(204, 209, 216));
+		FrameRect(dc, &r, brush);
+		r.left = Scale(8); r.right -= Scale(8); r.top = Scale(95); r.bottom = r.top + 1;
+		FillRect(dc, &r, brush);
+		EndPaint(hwnd, &ps);
+		return 0;
+	}
+	}
+	return DefWindowProc(hwnd, msg, wparam, lparam);
+}
+
 static void show_size_popup(PINNED_IMAGE *pin)
 {
 	RECT button;
-	UINT command;
-	if (pin == NULL || pin->toolbar == NULL ||
+	MONITORINFO monitor = { sizeof(monitor) };
+	WNDCLASSEX wc = { sizeof(wc) };
+	HWND popup;
+	int width = Scale(228), height = Scale(152), x, y;
+	DWORD now = GetTickCount();
+	if (pin == NULL || pin->toolbar == NULL || now - last_size_popup_toggle < 150 ||
 		!SendMessage(pin->toolbar, TB_GETRECT, ID_SIZE_DROPDOWN, (LPARAM)&button)) return;
+	last_size_popup_toggle = now;
+	if (current_size_popup_hwnd != NULL) { DestroyWindow(current_size_popup_hwnd); return; }
+	if (current_color_popup_hwnd != NULL) DestroyWindow(current_color_popup_hwnd);
+	wc.style = CS_DROPSHADOW;
+	wc.lpfnWndProc = size_popup_proc;
+	wc.hInstance = pin_instance;
+	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+	wc.lpszClassName = TEXT("CLCL_SizePopup");
+	if (!RegisterClassEx(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
 	MapWindowPoints(pin->toolbar, NULL, (LPPOINT)&button, 2);
-	command = TrackPopupMenuEx(GetSubMenu(pin->menu, 4),
-		TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
-		button.left, button.bottom, pin->hwnd, NULL);
-	if (command != 0) SendMessage(pin->hwnd, WM_COMMAND, MAKEWPARAM(command, 0), 0);
+	x = button.left; y = button.bottom + Scale(2);
+	if (GetMonitorInfo(MonitorFromRect(&button, MONITOR_DEFAULTTONEAREST), &monitor)) {
+		if (x + width > monitor.rcWork.right) x = monitor.rcWork.right - width;
+		if (x < monitor.rcWork.left) x = monitor.rcWork.left;
+		if (y + height > monitor.rcWork.bottom) y = button.top - height - Scale(2);
+		if (y < monitor.rcWork.top) y = monitor.rcWork.top;
+	}
+	popup = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
+		wc.lpszClassName, pin_text(IDS_PIN_TIP_SIZE), WS_POPUP | WS_CLIPCHILDREN,
+		x, y, width, height, pin->hwnd, NULL, pin_instance, pin);
+	current_size_popup_hwnd = popup;
+	if (popup != NULL) {
+		ShowWindow(popup, SW_SHOW);
+		SetFocus(GetDlgItem(popup, pin->stroke_width <= 12 ?
+			ID_WIDTH_1 + pin->stroke_width - 1 : ID_WIDTH_EDIT));
+		UpdateWindow(popup);
+	}
 }
+
 
 static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 {
@@ -2853,8 +3098,8 @@ static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 		DestroyIcon(icon);
 	}
 	icon = (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(
-		pin->stroke_width == 12 ? IDR_PIN_SIZE_12 :
-		pin->stroke_width == 6 ? IDR_PIN_SIZE_6 : IDR_PIN_SIZE), IMAGE_ICON,
+		pin->stroke_width >= 10 ? IDR_PIN_SIZE_12 :
+		pin->stroke_width >= 5 ? IDR_PIN_SIZE_6 : IDR_PIN_SIZE), IMAGE_ICON,
 		size, size, LR_DEFAULTCOLOR);
 	if (icon != NULL) {
 		ImageList_AddIcon(pin->icons, icon);
@@ -3083,9 +3328,10 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 	pin->height = height;
 	pin->zoom_percent = 100;
 	pin->tool = initial_tool;
-	pin->stroke_width = (option.pinned_stroke_width == 6 || option.pinned_stroke_width == 12) ? option.pinned_stroke_width : 3;
+	pin->stroke_width = (option.pinned_stroke_width >= 1 && option.pinned_stroke_width <= PIN_MAX_STROKE_WIDTH) ? option.pinned_stroke_width : 3;
 	pin->current_color = (option.pinned_color != 0 || option.pinned_tool != 0) ? option.pinned_color : PIN_DEFAULT_COLOR;
 	if (pin->current_color == 0 && option.pinned_tool == 0) pin->current_color = PIN_DEFAULT_COLOR;
+	if (pin->tool == ID_DIMENSION) pin->current_color = RGB(0, 0, 0);
 	pin->menu = create_editor_menu(pin->source_data != NULL);
 	if (pin->menu == NULL) {
 		DeleteObject(pin->original);
@@ -3655,8 +3901,8 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		theme_editor_popups(pin->menu);
 		CheckMenuItem(GetSubMenu(pin->menu, 2), pin->tool, MF_BYCOMMAND | MF_CHECKED);
 		sync_color_menu(pin);
-		CheckMenuRadioItem(GetSubMenu(pin->menu, 4), ID_WIDTH_3, ID_WIDTH_12,
-			pin->stroke_width == 6 ? ID_WIDTH_6 : pin->stroke_width == 12 ? ID_WIDTH_12 : ID_WIDTH_3, MF_BYCOMMAND);
+		CheckMenuRadioItem(GetSubMenu(pin->menu, 4), ID_WIDTH_1, ID_WIDTH_CUSTOM,
+			pin->stroke_width <= 12 ? ID_WIDTH_1 + pin->stroke_width - 1 : ID_WIDTH_CUSTOM, MF_BYCOMMAND);
 		return 0;
 	case WM_SETCURSOR:
 		if (pin != NULL && (HWND)wparam == hwnd && LOWORD(lparam) == HTCLIENT) {
@@ -4001,7 +4247,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		case ID_HIGHLIGHT: case ID_HIGHLIGHT_BLOCK: case ID_ROUGH_HIGHLIGHT: case ID_MAGNIFY:
 			pin->tool = LOWORD(wparam);
 			if (pin->tool != ID_SELECT && pin->tool != ID_FRAME_SELECT) clear_selection(pin);
-			if (pin->tool == ID_REDACT) pin->current_color = RGB(0, 0, 0);
+			if (pin->tool == ID_REDACT || pin->tool == ID_DIMENSION) pin->current_color = RGB(0, 0, 0);
 			if (pin->tool == ID_HIGHLIGHT || pin->tool == ID_HIGHLIGHT_BLOCK || pin->tool == ID_ROUGH_HIGHLIGHT) pin->current_color = RGB(255, 190, 0);
 			{
 				int i;
@@ -4083,16 +4329,14 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		case ID_COLOR_DROPDOWN:
 			show_color_popup(pin);
 			break;
+		case ID_WIDTH_CUSTOM:
 		case ID_SIZE_DROPDOWN:
 			show_size_popup(pin);
 			break;
-		case ID_WIDTH_3: case ID_WIDTH_6: case ID_WIDTH_12:
-			pin->stroke_width = LOWORD(wparam) == ID_WIDTH_3 ? 3 : LOWORD(wparam) == ID_WIDTH_6 ? 6 : 12;
-			change_selected_style(pin, FALSE);
-			update_size_button_icon(pin);
-			CheckMenuRadioItem(GetSubMenu(pin->menu, 4), ID_WIDTH_3, ID_WIDTH_12,
-				LOWORD(wparam), MF_BYCOMMAND);
-			save_pinned_preferences(pin);
+		case ID_WIDTH_1: case ID_WIDTH_2: case ID_WIDTH_3: case ID_WIDTH_4:
+		case ID_WIDTH_5: case ID_WIDTH_6: case ID_WIDTH_7: case ID_WIDTH_8:
+		case ID_WIDTH_9: case ID_WIDTH_10: case ID_WIDTH_11: case ID_WIDTH_12:
+			set_stroke_width(pin, LOWORD(wparam) - ID_WIDTH_1 + 1);
 			break;
 		case ID_CLOSE: SendMessage(hwnd, WM_CLOSE, 0, 0); break;
 		}
@@ -4304,7 +4548,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 						max(pin->start.x, end.x), max(pin->start.y, end.y) };
 					if (item->tool == ID_STEP) item->number = next_step_number(pin);
 					if (item->tool != ID_STEP && IsRectEmpty(&item->box)) item->deleted = TRUE;
-					else if (item->tool == ID_HIGHLIGHT || item->tool == ID_HIGHLIGHT_BLOCK || item->tool == ID_ROUGH_HIGHLIGHT || item->tool == ID_MAGNIFY || item->tool == ID_SPOTLIGHT) {
+					else if (item->tool == ID_INVERT || item->tool == ID_HIGHLIGHT || item->tool == ID_HIGHLIGHT_BLOCK || item->tool == ID_ROUGH_HIGHLIGHT || item->tool == ID_MAGNIFY || item->tool == ID_SPOTLIGHT) {
 						item->stroke = max(1, MulDiv(Scale(2), pin->width,
 							max(1, pin->image_rect.right - pin->image_rect.left)));
 						if (item->tool == ID_MAGNIFY) {
@@ -4509,6 +4753,9 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				DestroyWindow(current_color_popup_hwnd);
 				current_color_popup_hwnd = NULL;
 			}
+			if (current_size_popup_hwnd != NULL &&
+				(PINNED_IMAGE *)GetWindowLongPtr(current_size_popup_hwnd, GWLP_USERDATA) == pin)
+				DestroyWindow(current_size_popup_hwnd);
 			save_pinned_preferences(pin);
 			if (pin->toolbar != NULL) DestroyWindow(pin->toolbar);
 			if (pin->icons != NULL) ImageList_Destroy(pin->icons);

@@ -177,6 +177,9 @@
 #define IDS_PIN_TIP_COPY               1282
 #define IDS_PIN_TIP_COLOR              1283
 #define IDS_PIN_TIP_SIZE               1284
+#define IDS_PIN_CUSTOM_SIZE            1285
+#define IDS_PIN_CUSTOM_WIDTH           1286
+#define IDS_PIN_APPLY_WIDTH            1287
 #define IDS_PIN_PALETTE_STANDARD       1300
 #define IDS_PIN_PALETTE_MARKER         1316
 #define IDC_TREE                        1000

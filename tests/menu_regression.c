@@ -216,6 +216,43 @@ static void test_frame_annotations(HBITMAP source)
     }
     CHECK(artifact_hit(a, (POINT){10, 20}, 0), "rough highlight supports selection");
     {
+        PIN_ARTIFACT *inverted = add_artifact(&pin, ID_INVERT, (POINT){0, 0}, 1);
+        int tools[] = { ID_HIGHLIGHT, ID_HIGHLIGHT_BLOCK, ID_ROUGH_HIGHLIGHT };
+        int i, order;
+        CHECK(inverted != NULL, "highlight inversion fixture allocates");
+        if (inverted != NULL) {
+            inverted->box = (RECT){0, 0, 80, 40};
+            for (order = 0; order < 2; order++) {
+                if (order) { pin.artifacts = inverted; inverted->next = a; b->next = NULL; }
+                for (i = 0; i < 3; i++) {
+                    a->tool = tools[i];
+                    CHECK(rebuild_artifacts(&pin) && bitmap_pixel(pin.bitmap, 10, 20) == a->color &&
+                        bitmap_pixel(pin.bitmap, 15, 15) == RGB(255, 255, 255) &&
+                        bitmap_pixel(pin.bitmap, 14, 14) == RGB(225, 225, 225) &&
+                        bitmap_pixel(pin.bitmap, 16, 16) == (RGB(190, 35, 90) ^ 0x00ffffff) &&
+                        bitmap_pixel(pin.bitmap, 70, 20) == RGB(0, 0, 0),
+                        "both tool orders preserve highlight color and invert foreground");
+                    if (tools[i] == ID_HIGHLIGHT)
+                        CHECK(bitmap_pixel(pin.bitmap, 5, 20) == a->color,
+                            "inversion preserves the highlight frame border color");
+                }
+            }
+            pin.artifacts = a; b->next = inverted; inverted->next = NULL;
+            CHECK(begin_change(&pin), "inversion removal records undo");
+            inverted->deleted = TRUE;
+            CHECK(rebuild_artifacts(&pin) && bitmap_pixel(pin.bitmap, 10, 20) == a->color &&
+                bitmap_pixel(pin.bitmap, 15, 15) == RGB(0, 0, 0) &&
+                bitmap_pixel(pin.bitmap, 70, 20) == RGB(255, 255, 255),
+                "removing inversion restores foreground while retaining highlights");
+            swap_history(&pin, TRUE);
+            CHECK(bitmap_pixel(pin.bitmap, 10, 20) == single &&
+                bitmap_pixel(pin.bitmap, 15, 15) == RGB(255, 255, 255),
+                "undo restores inversion without changing highlight color");
+            swap_history(&pin, FALSE);
+            a = pin.artifacts; b = a->next;
+        }
+    }
+    {
         HBITMAP preview = clone_bitmap(source, NULL, NULL);
         HBITMAP previous = SelectObject(dc, preview);
         int x, painted = 0, clear = 0;
@@ -348,6 +385,9 @@ static void test_dimension_annotations(HWND owner)
         SendMessage(pin->toolbar, TB_COMMANDTOINDEX, ID_DIMENSION, 0) >= 0 &&
         editor_tool_cursor(pin) == LoadCursor(NULL, IDC_CROSS),
         "Dimension is available in menu and toolbar with a crosshair");
+    CHECK(pin->current_color == RGB(0, 0, 0), "Dimension starts with black");
+    SendMessage(editor, WM_COMMAND, ID_COLOR_BLUE, 0);
+    CHECK(pin->current_color == colors[1], "Dimension still allows an explicit color choice");
     CHECK(ensure_drawing_resolution(pin), "dimension uses the editor drawing resolution");
     for (i = 0; i < ARRAYSIZE(starts); i++) {
         starts[i].x = MulDiv(starts[i].x, pin->width, 320);
@@ -361,7 +401,9 @@ static void test_dimension_annotations(HWND owner)
         RECT box, first_line, bounds;
         POINT wings[4];
         int before = pin->undo_count, j;
+        SendMessage(editor, WM_COMMAND, ID_COLOR_BLUE, 0);
         SendMessage(editor, WM_COMMAND, ID_DIMENSION, 0);
+        CHECK(pin->current_color == RGB(0, 0, 0), "selecting Dimension defaults to black");
         SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(from.x, from.y));
         SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(to.x, to.y));
         SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(to.x, to.y));
@@ -921,6 +963,92 @@ static void test_pinned_image_edit_core(HWND owner)
     tools_menu = GetSubMenu(menu, 2);
     color_menu = GetSubMenu(menu, 3);
     size_menu = GetSubMenu(menu, 4);
+    CHECK(GetMenuItemCount(size_menu) == 13, "size menu offers widths 1 through 12 px and Custom");
+    {
+        int width, other;
+        for (width = 1; width <= 12; width++) {
+            TCHAR expected[16], label[16];
+            UINT command = GetMenuItemID(size_menu, width - 1);
+            wsprintf(expected, width <= 9 ? TEXT("&%d px") : TEXT("%d px"), width);
+            GetMenuString(size_menu, width - 1, label, ARRAYSIZE(label), MF_BYPOSITION);
+            CHECK(lstrcmp(label, expected) == 0, "size menu labels match each pixel width");
+            SendMessage(editor, WM_COMMAND, command, 0);
+            CHECK(pin_windows->stroke_width == width && option.pinned_stroke_width == width,
+                "each size menu command applies and saves its exact width");
+            for (other = 0; other < 12; other++)
+                CHECK(!!(GetMenuState(size_menu, other, MF_BYPOSITION) & MF_CHECKED) == (other == width - 1),
+                    "only the selected width is checked");
+        }
+        for (width = 1; width <= 12; width++) {
+            HWND popup, choice;
+            last_size_popup_toggle = 0;
+            SendMessage(editor, WM_COMMAND, ID_SIZE_DROPDOWN, 0);
+            popup = current_size_popup_hwnd;
+            CHECK(popup != NULL && GetDlgItem(popup, ID_WIDTH_EDIT) != NULL &&
+                GetDlgItem(popup, ID_WIDTH_APPLY) != NULL, "width palette includes custom input and Apply");
+            if (popup == NULL) break;
+            choice = GetDlgItem(popup, ID_WIDTH_1 + width - 1);
+            CHECK(choice != NULL, "width palette includes each preset");
+            SendMessage(choice, BM_CLICK, 0, 0);
+            CHECK(current_size_popup_hwnd == NULL && pin_windows->stroke_width == width &&
+                option.pinned_stroke_width == width, "width palette applies each preset and closes");
+        }
+        {
+            const TCHAR *invalid[] = { TEXT(""), TEXT("0"), TEXT("-1"), TEXT("101"), TEXT("12x"),
+                TEXT("9999999999999999") };
+            const int custom[] = { 1, 100, 37 };
+            HWND popup, input;
+            int i, previous;
+            TCHAR text[16];
+            last_size_popup_toggle = 0;
+            SendMessage(editor, WM_COMMAND, ID_WIDTH_CUSTOM, 0);
+            popup = current_size_popup_hwnd;
+            CHECK(popup != NULL, "Custom menu entry opens the width palette");
+            if (popup != NULL) {
+                input = GetDlgItem(popup, ID_WIDTH_EDIT);
+                previous = pin_windows->stroke_width;
+                for (i = 0; i < ARRAYSIZE(invalid); i++) {
+                    SetWindowText(input, invalid[i]);
+                    SendMessage(GetDlgItem(popup, ID_WIDTH_APPLY), BM_CLICK, 0, 0);
+                    CHECK(IsWindow(popup) && pin_windows->stroke_width == previous &&
+                        option.pinned_stroke_width == previous,
+                        "invalid custom widths preserve the current width and keep the input open");
+                }
+                SendMessage(input, WM_KEYDOWN, VK_ESCAPE, 0);
+                CHECK(current_size_popup_hwnd == NULL && pin_windows->stroke_width == previous,
+                    "Escape dismisses width input without changing the width");
+            }
+            for (i = 0; i < ARRAYSIZE(custom); i++) {
+                last_size_popup_toggle = 0;
+                show_size_popup(pin_windows);
+                popup = current_size_popup_hwnd;
+                CHECK(popup != NULL, "custom width palette reopens");
+                if (popup == NULL) break;
+                input = GetDlgItem(popup, ID_WIDTH_EDIT);
+                wsprintf(text, TEXT("%d"), custom[i]);
+                SetWindowText(input, text);
+                SendMessage(input, WM_KEYDOWN, VK_RETURN, 0);
+                CHECK(current_size_popup_hwnd == NULL && pin_windows->stroke_width == custom[i] &&
+                    option.pinned_stroke_width == custom[i],
+                    "Enter applies and saves custom widths including both bounds");
+            }
+            CHECK(GetMenuState(size_menu, ID_WIDTH_CUSTOM, MF_BYCOMMAND) & MF_CHECKED,
+                "a custom width highlights the Custom menu entry");
+            last_size_popup_toggle = 0;
+            show_size_popup(pin_windows);
+            popup = current_size_popup_hwnd;
+            if (popup != NULL) {
+                input = GetDlgItem(popup, ID_WIDTH_EDIT);
+                SetFocus(input);
+                SendMessage(input, WM_KEYDOWN, VK_TAB, 0);
+                CHECK(GetFocus() == GetDlgItem(popup, ID_WIDTH_APPLY),
+                    "Tab moves from width input to Apply");
+                SendMessage(popup, WM_ACTIVATE, WA_INACTIVE, (LPARAM)editor);
+                CHECK(current_size_popup_hwnd == NULL, "width palette closes when focus leaves the popup");
+            }
+        }
+        SendMessage(editor, WM_COMMAND, ID_WIDTH_3, 0);
+    }
     {
         LANGID previous = GetThreadUILanguage();
         const LANGID languages[] = {
@@ -1478,9 +1606,10 @@ static void test_pinned_image_edit_core(HWND owner)
                 CHECK(editor != NULL, "editor reopens for preference checks");
                 DWORD copy_before = toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons) - 1);
                 DWORD color_before = toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons));
+                SendMessage(editor, WM_COMMAND, ID_WIDTH_3, 0);
                 DWORD size_before = toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons) + 1);
                 SendMessage(editor, WM_COMMAND, ID_ARROW, 0);
-                SendMessage(editor, WM_COMMAND, ID_WIDTH_12, 0);
+                set_stroke_width(pin_windows, 37);
                 CHECK(size_before != toolbar_icon_checksum(pin_windows->icons, ARRAYSIZE(toolbar_icons) + 1),
                     "size dropdown highlights the selected width");
                 pin_windows->current_color = standard_colors[5]; // Orange
@@ -1492,7 +1621,7 @@ static void test_pinned_image_edit_core(HWND owner)
                 save_pinned_preferences(pin_windows);
 
                 CHECK(option.pinned_tool == ID_ARROW, "persisted tool is ID_ARROW");
-                CHECK(option.pinned_stroke_width == 12, "persisted stroke width is 12");
+                CHECK(option.pinned_stroke_width == 37, "persisted custom stroke width is 37");
                 CHECK(option.pinned_color == standard_colors[5], "persisted color is standard orange");
 
                 DestroyWindow(editor);
@@ -1502,9 +1631,15 @@ static void test_pinned_image_edit_core(HWND owner)
                 if (persist_editor != NULL) {
                     p = (PINNED_IMAGE *)GetWindowLongPtr(persist_editor, GWLP_USERDATA);
                     CHECK(p != NULL && p->tool == ID_CROP, "new editor defaults to Crop despite previously selected Arrow");
-                    CHECK(p != NULL && p->stroke_width == 12, "restored editor stroke width matches persisted width");
+                    CHECK(p != NULL && p->stroke_width == 37 &&
+                        (GetMenuState(GetSubMenu(p->menu, 4), ID_WIDTH_CUSTOM, MF_BYCOMMAND) & MF_CHECKED),
+                        "restored editor stroke width and menu check match persisted width");
                     CHECK(p != NULL && p->current_color == standard_colors[5], "restored editor color matches persisted color");
+                    last_size_popup_toggle = 0;
+                    show_size_popup(p);
+                    CHECK(current_size_popup_hwnd != NULL, "width palette opens in restored editor");
                     DestroyWindow(persist_editor);
+                    CHECK(current_size_popup_hwnd == NULL, "closing editor destroys its width palette");
                 }
             }
 
@@ -1915,7 +2050,7 @@ static void test_insert_menu_step(HWND hwnd)
         return;
     }
     if (insert_phase == 1 && insert_case != 7) {
-        const TCHAR *target = insert_case == 4 ? TEXT("Root anchor") : TEXT("Outer");
+        const TCHAR *target = (insert_case == 4 || insert_case == 10) ? TEXT("Root anchor") : TEXT("Outer");
         for (index = 0; index < GetMenuItemCount(menu); index++) {
             GetMenuString(menu, index, label, 128, MF_BYPOSITION);
             if (lstrcmp(label, target) == 0) break;
@@ -1930,18 +2065,18 @@ static void test_insert_menu_step(HWND hwnd)
         CHECK(index < GetMenuItemCount(menu), "nested and empty folders expand");
     } else if (insert_phase == 3 || (insert_phase == 1 && insert_case == 7)) {
         MENUITEMINFO info = {0};
-        index = insert_case == 0 ? 3 : insert_case == 2 ? 4 : insert_case == 5 ? 6 : 2;
+        index = insert_case == 0 ? 3 : insert_case == 2 ? 4 : insert_case == 5 ? 6 : insert_case == 9 ? 5 : 2;
         info.cbSize = sizeof(info);
         info.fMask = MIIM_STATE | MIIM_FTYPE;
         CHECK(GetMenuItemInfo(menu, index, TRUE, &info) &&
             !(info.fState & MFS_DISABLED) && !(info.fType & MFT_SEPARATOR),
             "favourite item and placeholder rows are selectable");
         GetMenuString(menu, index, label, 128, MF_BYPOSITION);
-        CHECK(lstrcmp(label, insert_case == 0 ? TEXT("First && existing") : TEXT(" ")) == 0,
+        CHECK(lstrcmp(label, insert_case == 0 ? TEXT("First && existing") : insert_case == 9 ? TEXT("Second existing") : TEXT(" ")) == 0,
             "favourite label is literal and placeholder is blank");
     }
     SendMessage(idle_menu, 0x01E5, index, 0);
-    key(hwnd, insert_phase == 3 || (insert_phase == 1 && (insert_case == 4 || insert_case == 7)) ?
+    key(hwnd, insert_phase == 3 || (insert_phase == 1 && (insert_case == 4 || insert_case == 7 || insert_case == 10)) ?
         VK_RETURN : VK_RIGHT);
     insert_phase++;
 }
@@ -2700,7 +2835,8 @@ static void test_favourite_insertions(HWND owner)
 {
     TCHAR error[BUF_SIZE] = {0};
     POINT pt = {300, 200};
-    for (insert_case = 0; insert_case < 8; insert_case++) {
+    for (insert_case = 0; insert_case < 11; insert_case++) {
+        if (insert_case == 8) continue; /* Reserved for bitmap edit context. */
         DATA_INFO *outer = data_create_folder(TEXT("Outer"), error);
         DATA_INFO *nested = data_create_folder(TEXT("Nested"), error);
         DATA_INFO *empty = data_create_folder(TEXT("Empty"), error);
@@ -2708,7 +2844,8 @@ static void test_favourite_insertions(HWND owner)
         DATA_INFO *second = data_create_item(TEXT("Second existing"), FALSE, error);
         DATA_INFO *anchor = data_create_item(TEXT("Root anchor"), FALSE, error);
         DATA_INFO *source = data_create_item(TEXT("Clipboard copy"), FALSE, error);
-        DATA_INFO **slot, *old_next, *copy;
+        DATA_INFO **slot, *old_next, *expected_next, *copy;
+        BOOL replace = insert_case == 0 || insert_case == 4 || insert_case == 9 || insert_case == 10;
         BOOL deleted = FALSE, selected;
         HGLOBAL payload = GlobalAlloc(GMEM_MOVEABLE, sizeof(TEXT("Clipboard payload")));
         lstrcpy((TCHAR *)GlobalLock(payload), TEXT("Clipboard payload"));
@@ -2722,14 +2859,27 @@ static void test_favourite_insertions(HWND owner)
         nested->next = empty;
         nested->child = first;
         first->next = second;
-        slot = insert_case == 1 ? &nested->child : insert_case == 3 ? &empty->child :
-            insert_case == 4 ? &anchor->next : insert_case == 5 ? &second->next : &first->next;
+        slot = (insert_case == 0 || insert_case == 1) ? &nested->child : insert_case == 3 ? &empty->child :
+            insert_case == 4 ? &outer->next : insert_case == 5 ? &second->next : &first->next;
+        if (insert_case == 10) {
+            regist_data.child = anchor;
+            anchor->next = outer;
+            outer->next = NULL;
+            slot = &regist_data.child;
+        }
         if (insert_case == 7) {
             data_free(regist_data.child);
             regist_data.child = NULL;
             slot = &regist_data.child;
         }
         old_next = *slot;
+        expected_next = replace ? old_next->next : old_next;
+        if (replace) {
+            old_next->hkey_id = 123;
+            old_next->op_modifiers = MOD_CONTROL;
+            old_next->op_virtkey = 'J';
+            old_next->op_paste = 1;
+        }
         insert_phase = insert_ticks = 0;
         idle_menu = NULL;
         SetTimer(owner, 78, 100, NULL);
@@ -2743,7 +2893,9 @@ static void test_favourite_insertions(HWND owner)
             CHECK(selected && copy != NULL && copy != old_next && copy != source,
                 "selected destination receives a new favourite");
             if (copy != NULL && copy != old_next) {
-                CHECK(copy->next == old_next, "favourite is inserted at chosen position");
+                CHECK(copy->next == expected_next, "favourite replaces or inserts at chosen position without changing siblings");
+                if (replace) CHECK(copy->hkey_id == 123 && copy->op_modifiers == MOD_CONTROL &&
+                    copy->op_virtkey == 'J' && copy->op_paste == 1, "replacement preserves the favourite hotkey");
                 CHECK(lstrcmp(copy->title, source->title) == 0 && copy->window_name == NULL,
                     "inserted favourite retains title without source window name");
                 CHECK(copy->child && copy->child->data && copy->child->data != payload,
@@ -2756,7 +2908,7 @@ static void test_favourite_insertions(HWND owner)
         regist_data.child = NULL;
         data_free(source);
     }
-    printf("PASS: Favourite insertion into existing rows, blank slots, nested and empty folders, root and cancellation\n");
+    printf("PASS: Favourite replacement of first/last nested and root items, hotkeys, blank insertion slots, empty folders and cancellation\n");
 }
 
 static BOOL test_window_above(HWND above, HWND below)
