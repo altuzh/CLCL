@@ -62,10 +62,14 @@ def icon(name):
         line(d, [(6, 25), (26, 7)], BLUE, 3)
         for x, y in [(6, 25), (26, 7)]:
             d.ellipse(xy(x-3, y-3, x+3, y+3), fill="white", outline=DEEP, width=2*S)
-    elif name == "dimension":
+    elif name in ("dimension", "dimension-slash"):
         line(d, [(3, 16), (29, 16)], BLUE, 2)
-        line(d, [(8, 11), (3, 16), (8, 21)], DEEP, 2)
-        line(d, [(24, 11), (29, 16), (24, 21)], DEEP, 2)
+        if name == "dimension-slash":
+            line(d, [(2, 21), (10, 11)], DEEP, 2)
+            line(d, [(22, 21), (30, 11)], DEEP, 2)
+        else:
+            line(d, [(8, 11), (3, 16), (8, 21)], DEEP, 2)
+            line(d, [(24, 11), (29, 16), (24, 21)], DEEP, 2)
         d.rounded_rectangle(xy(11, 9, 21, 23), radius=2*S, fill="#fffbe9")
         line(d, [(13, 20), (16, 12), (19, 20)], INK, 1)
         line(d, [(14, 18), (18, 18)], INK, 1)
@@ -192,5 +196,6 @@ if __name__ == "__main__":
     icon("rough-highlight")
     icon("magnify")
     icon("dimension")
+    icon("dimension-slash")
     for name in ("undo", "redo", "pen", "marker", "eraser", "line", "arrow", "frame-arrow", "rect", "filled-rect", "ellipse", "filled-ellipse", "crop", "rotate", "copy", "size", "size-6", "size-12", "select", "frame-select", "zoom", "pan", "text", "callout", "step", "redact", "spotlight"):
         icon(name)

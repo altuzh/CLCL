@@ -19,6 +19,8 @@
 #include "Memory.h"
 #include "String.h"
 #include "Data.h"
+#include "Ini.h"
+#include "Format.h"
 #include "Regist.h"
 #include "DarkMode.h"
 #include "dpi.h"
@@ -31,6 +33,7 @@
 extern HINSTANCE hInst;
 extern DATA_INFO regist_data;
 extern DATA_INFO history_data;
+extern OPTION_INFO option;
 extern BOOL save_regist(const HWND hWnd);
 
 /* Menu Command IDs */
@@ -595,6 +598,13 @@ static BOOL favorites_append_insert_row(HMENU menu, UINT *next_id, UINT limit, c
 	info.wID = (*next_id)++;
 	info.dwTypeData = label;
 	info.dwItemData = (ULONG_PTR)insert_at;
+	if (info.wID >= ID_FAV_REPLACE_BASE && option.menu_show_icon == 1 && option.menu_show_bitmap == 1) {
+		DATA_INFO *show_di = format_get_priority_highest(*insert_at);
+		if (format_get_menu_bitmap(show_di) && show_di->menu_bitmap != NULL) {
+			info.fMask |= MIIM_BITMAP;
+			info.hbmpItem = show_di->menu_bitmap;
+		}
+	}
 	return InsertMenuItem(menu, (UINT)GetMenuItemCount(menu), TRUE, &info);
 }
 

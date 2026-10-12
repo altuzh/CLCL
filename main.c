@@ -2680,6 +2680,8 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	}
 	CloseClipboard();
 
+	// Editor copies retain their layer even when their automatic opening is suppressed.
+	pinned_image_restore_clipboard_layer(di, clipboard_sequence);
 	// Crop detected screenshots before deduplication or persistence.
 	pinned_image_auto_open(hWnd, di, sequence);
 	// Add to history
@@ -4724,6 +4726,7 @@ int WINAPI _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdL
 	hAccel = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDR_ACCELERATOR));
 	// Window message processing
 	while (GetMessage(&msg, NULL, 0, 0) == TRUE) {
+		if (pinned_image_dialog_message(&msg)) continue;
 		if (accel_flag == TRUE && hViewerWnd != NULL && hViewerWnd == GetForegroundWindow() &&
 			(TranslateAccelerator(hViewerWnd, hAccel, &msg) == TRUE)) {
 			continue;

@@ -8,6 +8,9 @@
 #include <math.h>
 #include <limits.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
 
 #include "General.h"
 #include "Memory.h"
@@ -31,6 +34,7 @@
 #define SNIP_CLASS TEXT("CLCL_SnipOverlay")
 #define HISTORY_MAX 16
 #define PIN_MAX_STROKE_WIDTH 100
+#define PIN_MAX_TEXT_SIZE 512
 #define ID_PIN_TOOLBAR 6140
 #define TOOL_ICON_SIZE 22
 
@@ -67,6 +71,7 @@
 #define ID_WIDTH_CUSTOM 6182
 #define ID_WIDTH_EDIT   6183
 #define ID_WIDTH_APPLY  6184
+#define ID_FONT_LIST    6190
 #define ID_SIZE_DROPDOWN 6133
 #define ID_FILLED_RECT  6134
 #define ID_FILLED_ELLIPSE 6135
@@ -93,6 +98,7 @@
 #define ID_HIGHLIGHT_BLOCK 6158
 #define ID_ROUGH_HIGHLIGHT 6159
 #define ID_DIMENSION 6160
+#define ID_DIMENSION_SLASH 6161
 #define MENU_TIP_TIMER 6
 #define WM_FINISH_TEXT (WM_APP + 150)
 
@@ -108,6 +114,8 @@ typedef struct _PIN_ARTIFACT {
 	POINT *points;
 	RECT box;
 	TCHAR *text;
+	int text_size;
+	TCHAR font_face[LF_FACESIZE];
 	HBITMAP magnified_source;
 	int number;
 } PIN_ARTIFACT;
@@ -133,6 +141,7 @@ typedef struct _PINNED_IMAGE {
 	DATA_INFO *pending_item;
 	DWORD pending_sequence;
 	HBITMAP original;
+	HBITMAP initial;
 	HBITMAP bitmap;
 	HBITMAP undo[HISTORY_MAX];
 	HBITMAP redo[HISTORY_MAX];
@@ -146,6 +155,17 @@ typedef struct _PINNED_IMAGE {
 	BOOL drag_changed;
 	BOOL frame_additive;
 	HWND text_edit;
+	HWND properties;
+	HIMAGELIST property_icons;
+	COLORREF property_color;
+	int property_stroke;
+	int property_text_size;
+	TCHAR property_font[LF_FACESIZE];
+	UINT property_mixed;
+	UINT property_changes;
+	BOOL property_live;
+	BOOL property_dirty;
+	BOOL updating_properties;
 	HFONT text_edit_font;
 	HBRUSH text_edit_brush;
 	PIN_ARTIFACT *editing_artifact;
@@ -211,6 +231,7 @@ static const COLORREF marker_colors[] = {
 static HINSTANCE pin_instance;
 static PINNED_IMAGE *pin_windows;
 static DWORD last_auto_sequence, last_copy_sequence;
+static int last_copy_edit_id;
 extern OPTION_INFO option;
 extern TCHAR work_path[];
 
@@ -236,6 +257,23 @@ static COLORREF get_pin_color(const PINNED_IMAGE *pin)
 {
 	if (pin == NULL) return PIN_DEFAULT_COLOR;
 	return pin->current_color;
+}
+
+static int text_font_size(const PIN_ARTIFACT *item, int stroke)
+{
+	return item != NULL && item->text_size > 0 ? item->text_size : max(16, stroke * 5);
+}
+
+static const TCHAR *text_font_face(const PIN_ARTIFACT *item)
+{
+	return item != NULL && item->font_face[0] ? item->font_face : TEXT("Segoe UI");
+}
+
+static HFONT create_text_font(const PIN_ARTIFACT *item, int stroke, int pixels)
+{
+	return CreateFont(-(pixels > 0 ? pixels : text_font_size(item, stroke)), 0, 0, 0,
+		FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+		CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, text_font_face(item));
 }
 
 static void sync_color_menu(PINNED_IMAGE *pin)
@@ -274,6 +312,13 @@ static LRESULT CALLBACK editor_toolbar_proc(HWND hwnd, UINT msg, WPARAM wparam, 
 	UINT_PTR id, DWORD_PTR ref);
 static void refit_image(PINNED_IMAGE *pin);
 static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept);
+static void update_properties(PINNED_IMAGE *pin);
+static BOOL create_property_toolbars(PINNED_IMAGE *pin, HWND dialog);
+static void update_property_buttons(PINNED_IMAGE *pin);
+static void show_color_popup_at(PINNED_IMAGE *pin, HWND toolbar, UINT command);
+static void show_size_popup_at(PINNED_IMAGE *pin, HWND toolbar, UINT command);
+static void set_stroke_width(PINNED_IMAGE *pin, int width);
+static void show_font_popup(PINNED_IMAGE *pin, HWND toolbar);
 static void cancel_annotation_drag(PINNED_IMAGE *pin);
 static void calculate_image_rect(PINNED_IMAGE *pin, const RECT *client);
 
@@ -446,6 +491,7 @@ static void transform_artifacts(PINNED_IMAGE *pin, int old_width, int old_height
 		item->box.right = MulDiv(item->box.right - left, new_width, old_width);
 		item->box.bottom = MulDiv(item->box.bottom - top, new_height, old_height);
 		item->stroke = max(1, MulDiv(item->stroke, new_width, old_width));
+		if (item->text_size > 0) item->text_size = max(1, MulDiv(item->text_size, new_width, old_width));
 		for (i = 0; i < item->count; i++) {
 			item->points[i].x = MulDiv(item->points[i].x - left, new_width, old_width);
 			item->points[i].y = MulDiv(item->points[i].y - top, new_height, old_height);
@@ -564,6 +610,7 @@ static BOOL begin_change_with_base(PINNED_IMAGE *pin, BOOL include_base)
 	push_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts,
 		pin->undo_window, &pin->undo_count, snapshot, base, items, r);
 	clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
+	pin->property_live = FALSE;
 	pin->dirty = TRUE;
 	refresh_history_buttons(pin);
 	return TRUE;
@@ -627,6 +674,7 @@ static void swap_history(PINNED_IMAGE *pin, BOOL undo)
 	}
 	pin->dirty = TRUE;
 	refresh_history_buttons(pin);
+	update_properties(pin);
 	InvalidateRect(pin->hwnd, NULL, FALSE);
 }
 
@@ -944,26 +992,39 @@ static void frame_arrow_points(POINT start, POINT end, int stroke, POINT points[
 	}
 }
 
-static void dimension_wings(POINT start, POINT end, int stroke, POINT wings[4])
+static BOOL is_dimension_tool(int tool)
+{
+	return tool == ID_DIMENSION || tool == ID_DIMENSION_SLASH;
+}
+
+static void dimension_wings(int tool, POINT start, POINT end, int text_size, POINT wings[4])
 {
 	double dx = end.x - start.x, dy = end.y - start.y;
 	double length = sqrt(dx * dx + dy * dy);
-	double angle = atan2(dy, dx), size = min(length / 3, max(1, stroke) * 4);
+	double angle = atan2(dy, dx), size = min(length / 3, max(1, text_size) * 0.75);
 	int i;
 	for (i = 0; i < 2; i++) {
-		double side = i ? 0.55 : -0.55;
-		wings[i] = (POINT){ end.x - (LONG)(cos(angle + side) * size),
-			end.y - (LONG)(sin(angle + side) * size) };
-		wings[i + 2] = (POINT){ start.x + (LONG)(cos(angle + side) * size),
-			start.y + (LONG)(sin(angle + side) * size) };
+		if (tool == ID_DIMENSION_SLASH) {
+			double offset = (i ? -0.5 : 0.5) * size;
+			LONG x = (LONG)(cos(angle - 0.7853981633974483) * offset);
+			LONG y = (LONG)(sin(angle - 0.7853981633974483) * offset);
+			wings[i] = (POINT){ end.x + x, end.y + y };
+			wings[i + 2] = (POINT){ start.x + x, start.y + y };
+		} else {
+			double side = i ? 0.55 : -0.55;
+			wings[i] = (POINT){ end.x - (LONG)(cos(angle + side) * size),
+				end.y - (LONG)(sin(angle + side) * size) };
+			wings[i + 2] = (POINT){ start.x + (LONG)(cos(angle + side) * size),
+				start.y + (LONG)(sin(angle + side) * size) };
+		}
 	}
 }
 
-static void draw_dimension_line(HDC dc, POINT start, POINT end, int stroke)
+static void draw_dimension_line(HDC dc, int tool, POINT start, POINT end, int text_size)
 {
 	POINT wings[4];
 	int i;
-	dimension_wings(start, end, stroke, wings);
+	dimension_wings(tool, start, end, text_size, wings);
 	MoveToEx(dc, start.x, start.y, NULL); LineTo(dc, end.x, end.y);
 	for (i = 0; i < 4; i++) {
 		POINT tip = i < 2 ? end : start;
@@ -1242,7 +1303,7 @@ static void render_extra_artifact(PINNED_IMAGE *pin, const PIN_ARTIFACT *item)
 	pen = CreatePen(PS_SOLID, item->tool == ID_HIGHLIGHT ? 1 : max(1, item->stroke), item->color);
 	old_pen = SelectObject(dc, pen);
 	brush = CreateSolidBrush(item->tool == ID_REDACT ? item->color :
-		(item->tool == ID_CALLOUT || item->tool == ID_DIMENSION) ? RGB(255, 255, 245) : item->color);
+		(item->tool == ID_CALLOUT || is_dimension_tool(item->tool)) ? RGB(255, 255, 245) : item->color);
 	old_brush = SelectObject(dc, brush);
 	if (item->tool == ID_HIGHLIGHT) {
 		SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
@@ -1270,11 +1331,11 @@ static void render_extra_artifact(PINNED_IMAGE *pin, const PIN_ARTIFACT *item)
 		DrawText(dc, label, -1, &label_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 		SelectObject(dc, old_font);
 		DeleteObject(font);
-	} else if (item->tool == ID_TEXT || item->tool == ID_CALLOUT || item->tool == ID_DIMENSION) {
+	} else if (item->tool == ID_TEXT || item->tool == ID_CALLOUT || is_dimension_tool(item->tool)) {
 		HFONT font, old_font;
 		RECT text_rect = box;
-		if (item->tool == ID_DIMENSION) {
-			draw_dimension_line(dc, item->start, item->end, item->stroke);
+		if (is_dimension_tool(item->tool)) {
+			draw_dimension_line(dc, item->tool, item->start, item->end, text_font_size(item, item->stroke));
 			RoundRect(dc, box.left, box.top, box.right, box.bottom, max(8, item->stroke * 4), max(8, item->stroke * 4));
 			InflateRect(&text_rect, -max(6, item->stroke * 2), -max(4, item->stroke));
 		} else if (item->tool == ID_CALLOUT) {
@@ -1286,14 +1347,12 @@ static void render_extra_artifact(PINNED_IMAGE *pin, const PIN_ARTIFACT *item)
 			RoundRect(dc, box.left, box.top, box.right, box.bottom, max(8, item->stroke * 4), max(8, item->stroke * 4));
 			InflateRect(&text_rect, -max(6, item->stroke * 2), -max(4, item->stroke));
 		}
-		font = CreateFont(-max(16, item->stroke * 5), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-			DEFAULT_PITCH, TEXT("Segoe UI"));
+		font = create_text_font(item, item->stroke, 0);
 		old_font = SelectObject(dc, font);
 		SetBkMode(dc, TRANSPARENT);
-		SetTextColor(dc, (item->tool == ID_CALLOUT || item->tool == ID_DIMENSION) ? RGB(25, 25, 25) : item->color);
+		SetTextColor(dc, (item->tool == ID_CALLOUT || is_dimension_tool(item->tool)) ? RGB(25, 25, 25) : item->color);
 		if (item->text != NULL) DrawText(dc, item->text, -1, &text_rect,
-			(item->tool == ID_DIMENSION ? DT_CENTER : DT_LEFT) | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+			(is_dimension_tool(item->tool) ? DT_CENTER : DT_LEFT) | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
 		SelectObject(dc, old_font);
 		DeleteObject(font);
 	}
@@ -1336,7 +1395,7 @@ static BOOL rebuild_artifacts(PINNED_IMAGE *pin)
 			for (i = 0; i < item->count; i++)
 				draw_segment(pin, i ? item->points[i - 1] : item->points[0], item->points[i], FALSE);
 			if (pin->marker_base != NULL) { DeleteObject(pin->marker_base); pin->marker_base = NULL; }
-		} else if (item->tool == ID_TEXT || item->tool == ID_CALLOUT || item->tool == ID_DIMENSION || item->tool == ID_STEP ||
+		} else if (item->tool == ID_TEXT || item->tool == ID_CALLOUT || is_dimension_tool(item->tool) || item->tool == ID_STEP ||
 			item->tool == ID_REDACT || item->tool == ID_HIGHLIGHT)
 			render_extra_artifact(pin, item);
 		else finish_shape(pin, item->end);
@@ -1377,11 +1436,11 @@ static BOOL artifact_hit(const PIN_ARTIFACT *item, POINT p, int eraser_radius)
 		item->tool == ID_HIGHLIGHT || item->tool == ID_HIGHLIGHT_BLOCK || item->tool == ID_ROUGH_HIGHLIGHT || item->tool == ID_MAGNIFY || item->tool == ID_SPOTLIGHT)
 		return p.x >= item->box.left - eraser_radius && p.x <= item->box.right + eraser_radius &&
 			p.y >= item->box.top - eraser_radius && p.y <= item->box.bottom + eraser_radius;
-	if (item->tool == ID_DIMENSION) {
+	if (is_dimension_tool(item->tool)) {
 		POINT wings[4];
 		if (PtInRect(&item->box, p) ||
 			segment_distance_squared(p, item->start, item->end) <= tolerance * tolerance) return TRUE;
-		dimension_wings(item->start, item->end, item->stroke, wings);
+		dimension_wings(item->tool, item->start, item->end, text_font_size(item, item->stroke), wings);
 		for (i = 0; i < 4; i++)
 			if (segment_distance_squared(p, i < 2 ? item->end : item->start, wings[i]) <= tolerance * tolerance)
 				return TRUE;
@@ -1446,15 +1505,15 @@ static RECT artifact_bounds(const PIN_ARTIFACT *item)
 	if (item->tool == ID_TEXT || item->tool == ID_REDACT || item->tool == ID_INVERT ||
 		item->tool == ID_HIGHLIGHT || item->tool == ID_HIGHLIGHT_BLOCK || item->tool == ID_ROUGH_HIGHLIGHT || item->tool == ID_MAGNIFY || item->tool == ID_SPOTLIGHT)
 		return item->box;
-	if (item->tool == ID_CALLOUT || item->tool == ID_DIMENSION) {
+	if (item->tool == ID_CALLOUT || is_dimension_tool(item->tool)) {
 		box.left = min(box.left, item->box.left);
 		box.top = min(box.top, item->box.top);
 		box.right = max(box.right, item->box.right);
 		box.bottom = max(box.bottom, item->box.bottom);
 	}
-	if (item->tool == ID_DIMENSION) {
+	if (is_dimension_tool(item->tool)) {
 		POINT wings[4];
-		dimension_wings(item->start, item->end, item->stroke, wings);
+		dimension_wings(item->tool, item->start, item->end, text_font_size(item, item->stroke), wings);
 		for (i = 0; i < 4; i++) {
 			box.left = min(box.left, wings[i].x); box.top = min(box.top, wings[i].y);
 			box.right = max(box.right, wings[i].x); box.bottom = max(box.bottom, wings[i].y);
@@ -1517,6 +1576,15 @@ static void clear_selection(PINNED_IMAGE *pin)
 	pin->selected_artifact = NULL;
 }
 
+static void select_added_artifact(PINNED_IMAGE *pin, PIN_ARTIFACT *item)
+{
+	if (item == NULL || item->deleted) return;
+	clear_selection(pin);
+	item->selected = TRUE;
+	pin->selected_artifact = item;
+	update_properties(pin);
+}
+
 static void update_text_edit(PINNED_IMAGE *pin);
 
 static LRESULT CALLBACK annotation_edit_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
@@ -1539,7 +1607,8 @@ static LRESULT CALLBACK annotation_edit_proc(HWND hwnd, UINT msg, WPARAM wparam,
 	return DefSubclassProc(hwnd, msg, wparam, lparam);
 }
 
-static RECT text_box_for_content(PINNED_IMAGE *pin, RECT box, const TCHAR *text, int stroke, BOOL callout)
+static RECT styled_text_box(PINNED_IMAGE *pin, RECT box, const TCHAR *text, int stroke, BOOL callout,
+	const PIN_ARTIFACT *style)
 {
 	HDC dc = CreateCompatibleDC(NULL);
 	HFONT font, old_font;
@@ -1551,9 +1620,7 @@ static RECT text_box_for_content(PINNED_IMAGE *pin, RECT box, const TCHAR *text,
 	int available = max(1, pin->width - 2 * padding_x);
 	int width = 0;
 	if (dc == NULL) return box;
-	font = CreateFont(-max(16, stroke * 5), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-		DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-		DEFAULT_PITCH, TEXT("Segoe UI"));
+	font = create_text_font(style, stroke, 0);
 	if (font == NULL) { DeleteDC(dc); return box; }
 	old_font = SelectObject(dc, font);
 	GetTextMetrics(dc, &metrics);
@@ -1582,6 +1649,11 @@ static RECT text_box_for_content(PINNED_IMAGE *pin, RECT box, const TCHAR *text,
 	return box;
 }
 
+static RECT text_box_for_content(PINNED_IMAGE *pin, RECT box, const TCHAR *text, int stroke, BOOL callout)
+{
+	return styled_text_box(pin, box, text, stroke, callout, NULL);
+}
+
 static RECT dimension_text_box(PINNED_IMAGE *pin, RECT box, POINT start, POINT end)
 {
 	int width = box.right - box.left, height = box.bottom - box.top;
@@ -1600,9 +1672,10 @@ static void update_text_edit(PINNED_IMAGE *pin)
 	int stroke = pin->editing_artifact != NULL ? pin->editing_artifact->stroke : image_stroke_width(pin, 1);
 	if (text == NULL) return;
 	GetWindowText(pin->text_edit, text, length + 1);
-	box = text_box_for_content(pin, pin->selection, text, stroke,
-		pin->text_edit_tool == ID_CALLOUT || pin->text_edit_tool == ID_DIMENSION);
-	if (pin->text_edit_tool == ID_DIMENSION) {
+	box = pin->editing_artifact != NULL ?
+		styled_text_box(pin, pin->selection, text, stroke, pin->text_edit_tool != ID_TEXT, pin->editing_artifact) :
+		text_box_for_content(pin, pin->selection, text, stroke, pin->text_edit_tool != ID_TEXT);
+	if (is_dimension_tool(pin->text_edit_tool)) {
 		PIN_ARTIFACT *item = pin->editing_artifact;
 		box = dimension_text_box(pin, box, item != NULL ? item->start : pin->text_anchor,
 			item != NULL ? item->end : pin->text_end);
@@ -1614,7 +1687,7 @@ static void update_text_edit(PINNED_IMAGE *pin)
 	bottom_right = image_to_client(pin, (POINT){box.right, box.bottom});
 	SetWindowPos(pin->text_edit, NULL, top_left.x, top_left.y,
 		bottom_right.x - top_left.x, bottom_right.y - top_left.y, SWP_NOZORDER | SWP_NOACTIVATE);
-	if (pin->text_edit_tool == ID_DIMENSION) InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+	if (is_dimension_tool(pin->text_edit_tool)) InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
 }
 
 static void begin_text_edit(PINNED_IMAGE *pin, PIN_ARTIFACT *item, RECT box)
@@ -1628,17 +1701,15 @@ static void begin_text_edit(PINNED_IMAGE *pin, PIN_ARTIFACT *item, RECT box)
 	pin->editing_artifact = item;
 	pin->text_edit_tool = item != NULL ? item->tool : pin->tool;
 	pin->selection = box;
-	pin->text_edit_font = CreateFont(-max(1, MulDiv(max(16, stroke * 5),
-		pin->image_rect.right - pin->image_rect.left, pin->width)), 0, 0, 0,
-		FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-		CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, TEXT("Segoe UI"));
-	pin->text_edit_brush = CreateSolidBrush((pin->text_edit_tool == ID_CALLOUT || pin->text_edit_tool == ID_DIMENSION) ?
+	pin->text_edit_font = create_text_font(item, stroke, max(1, MulDiv(text_font_size(item, stroke),
+		pin->image_rect.right - pin->image_rect.left, pin->width)));
+	pin->text_edit_brush = CreateSolidBrush((pin->text_edit_tool == ID_CALLOUT || is_dimension_tool(pin->text_edit_tool)) ?
 		RGB(255, 255, 245) : GetSysColor(COLOR_WINDOW));
-	pin->text_edit = CreateWindowEx((pin->text_edit_tool == ID_CALLOUT || pin->text_edit_tool == ID_DIMENSION) ? WS_EX_CLIENTEDGE : 0,
+	pin->text_edit = CreateWindowEx((pin->text_edit_tool == ID_CALLOUT || is_dimension_tool(pin->text_edit_tool)) ? WS_EX_CLIENTEDGE : 0,
 		TEXT("EDIT"),
 		item != NULL && item->text != NULL ? item->text : TEXT(""),
 		WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
-		(pin->text_edit_tool == ID_DIMENSION ? ES_CENTER : 0),
+		(is_dimension_tool(pin->text_edit_tool) ? ES_CENTER : 0),
 		top_left.x, top_left.y, width, height, pin->hwnd,
 		(HMENU)ID_TEXT_EDIT, pin_instance, NULL);
 	if (pin->text_edit == NULL) {
@@ -1649,7 +1720,7 @@ static void begin_text_edit(PINNED_IMAGE *pin, PIN_ARTIFACT *item, RECT box)
 	SendMessage(pin->text_edit, WM_SETFONT,
 		(WPARAM)(pin->text_edit_font != NULL ? pin->text_edit_font : GetStockObject(DEFAULT_GUI_FONT)), TRUE);
 	{
-		int margin = (pin->text_edit_tool == ID_CALLOUT || pin->text_edit_tool == ID_DIMENSION) ?
+		int margin = (pin->text_edit_tool == ID_CALLOUT || is_dimension_tool(pin->text_edit_tool)) ?
 			max(0, MulDiv(max(6, stroke * 2), width, max(1, box.right - box.left)) - 2) : 0;
 		SendMessage(pin->text_edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
 			MAKELPARAM(margin, margin));
@@ -1657,6 +1728,7 @@ static void begin_text_edit(PINNED_IMAGE *pin, PIN_ARTIFACT *item, RECT box)
 	}
 	SetWindowSubclass(pin->text_edit, annotation_edit_proc, 1, (DWORD_PTR)pin->hwnd);
 	SetFocus(pin->text_edit);
+	update_properties(pin);
 }
 
 static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept)
@@ -1676,7 +1748,7 @@ static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept)
 	DestroyWindow(edit);
 	if (pin->text_edit_font != NULL) { DeleteObject(pin->text_edit_font); pin->text_edit_font = NULL; }
 	if (pin->text_edit_brush != NULL) { DeleteObject(pin->text_edit_brush); pin->text_edit_brush = NULL; }
-	if (pin->text_edit_tool == ID_DIMENSION) InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+	if (is_dimension_tool(pin->text_edit_tool)) InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
 	if (value == NULL) return;
 	if (item != NULL) {
 		PIN_ARTIFACT *live;
@@ -1693,7 +1765,7 @@ static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept)
 		item = add_artifact(pin, pin->text_edit_tool, pin->text_anchor, image_stroke_width(pin, 1));
 		if (item != NULL) {
 			item->box = pin->selection;
-			item->end = item->tool == ID_DIMENSION ? pin->text_end : (POINT){item->box.left, item->box.top};
+			item->end = is_dimension_tool(item->tool) ? pin->text_end : (POINT){item->box.left, item->box.top};
 		}
 	}
 	if (item != NULL) {
@@ -1703,6 +1775,7 @@ static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept)
 		item->box = pin->selection;
 		if (rebuild_artifacts(pin)) {
 			if (old != NULL) mem_free((void **)&old);
+			select_added_artifact(pin, item);
 		} else {
 			item->text = old;
 			item->box = old_box;
@@ -1814,6 +1887,7 @@ static void cancel_annotation_drag(PINNED_IMAGE *pin)
 	pin->drag_changed = FALSE;
 	if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
 	if (GetCapture() == pin->hwnd) ReleaseCapture();
+	update_properties(pin);
 	InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
 }
 
@@ -1849,6 +1923,7 @@ static void change_selected_style(PINNED_IMAGE *pin, BOOL color)
 		else item->stroke = image_stroke_width(pin, 1);
 	}
 	if (rebuild_artifacts(pin)) InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+	update_properties(pin);
 }
 
 static RECT text_box_for_drag(PINNED_IMAGE *pin, POINT start, POINT end, BOOL callout)
@@ -1996,11 +2071,12 @@ static BOOL rotate_image_clockwise(PINNED_IMAGE *pin)
 	}
 	pin->pan_offset.x = pin->pan_offset.y = 0;
 	refit_image(pin);
+	update_properties(pin);
 	InvalidateRect(pin->hwnd, NULL, FALSE);
 	return TRUE;
 }
 
-static BOOL copy_bitmap_to_clipboard(HWND owner, HBITMAP bitmap)
+static BOOL copy_bitmap_to_clipboard(HWND owner, HBITMAP bitmap, int edit_id)
 {
 	DWORD size = 0;
 	BYTE *bytes = bitmap_to_dib(bitmap, &size);
@@ -2032,9 +2108,77 @@ static BOOL copy_bitmap_to_clipboard(HWND owner, HBITMAP bitmap)
 	}
 	// DIB owns complete pixel data; BITMAP is an optional compatibility format.
 	if (copy != NULL && SetClipboardData(CF_BITMAP, copy) == NULL) DeleteObject(copy);
-	last_copy_sequence = GetClipboardSequenceNumber();
+	last_copy_edit_id = edit_id;
 	CloseClipboard();
+	last_copy_sequence = GetClipboardSequenceNumber();
 	return TRUE;
+}
+
+#include "PinnedImageJson.h"
+
+static BOOL load_editor_layer(PINNED_IMAGE *pin, DATA_INFO *source)
+{
+	DATA_INFO *item = source, *parent;
+	HBITMAP initial = NULL, base = NULL;
+	PIN_ARTIFACT *artifacts = NULL;
+	char *json = NULL;
+	BITMAP bitmap;
+	BOOL ok;
+	if (source->type == TYPE_DATA) {
+		parent = data_check(&history_data, source);
+		if (parent == NULL) parent = data_check(&regist_data, source);
+		if (parent != NULL && parent->type == TYPE_ITEM) item = parent;
+	}
+	if (item->image_edit_id == 0) {
+		pin->initial = clone_bitmap(pin->bitmap, NULL, NULL);
+		return pin->initial != NULL;
+	}
+	ok = db_history_load_image_edit(item->image_edit_id, &initial, &base, &json) &&
+		deserialize_annotations(json, &artifacts) && GetObject(base, sizeof(bitmap), &bitmap) &&
+		bitmap.bmWidth == pin->width && bitmap.bmHeight == pin->height;
+	mem_free((void **)&json);
+	if (!ok) {
+		if (initial != NULL) DeleteObject(initial);
+		if (base != NULL) DeleteObject(base);
+		free_artifacts(artifacts);
+		return FALSE;
+	}
+	DeleteObject(pin->original);
+	pin->original = base; pin->initial = initial; pin->artifacts = artifacts;
+	return TRUE;
+}
+
+static BOOL save_editor_layer(PINNED_IMAGE *pin, DATA_INFO *item, BOOL history)
+{
+	char *json;
+	BOOL ok;
+	/* Unedited captures keep using the existing bitmap-only storage. */
+	if (pin->artifacts == NULL && item->image_edit_id == 0 && (!pin->dirty || !db_history_is_open()))
+		return !history || !db_history_is_open() ||
+			(item->param1 > 0 ? db_history_update_item(item) : db_history_save_item(item));
+	json = serialize_annotations(pin->artifacts);
+	if (json == NULL) return FALSE;
+	ok = db_history_save_image_edit(item, pin->initial, pin->original, pin->bitmap, json, history);
+	mem_free((void **)&json);
+	return ok;
+}
+
+static BOOL copy_editor_to_clipboard(PINNED_IMAGE *pin)
+{
+	DATA_INFO snapshot = {0};
+	char *json;
+	BOOL ok;
+	if (!db_history_is_open()) return copy_bitmap_to_clipboard(pin->owner, pin->bitmap, 0);
+	if (pin->artifacts == NULL && (pin->source_item == NULL ||
+		(data_check(&history_data, pin->source_item) == NULL && data_check(&regist_data, pin->source_item) == NULL) ||
+		pin->source_item->image_edit_id == 0))
+		return copy_bitmap_to_clipboard(pin->owner, pin->bitmap, 0);
+	json = serialize_annotations(pin->artifacts);
+	if (json == NULL) return FALSE;
+	snapshot.type = TYPE_ITEM;
+	ok = db_history_save_image_edit(&snapshot, pin->initial, pin->original, pin->bitmap, json, FALSE);
+	mem_free((void **)&json);
+	return ok && copy_bitmap_to_clipboard(pin->owner, pin->bitmap, snapshot.image_edit_id);
 }
 
 static BOOL save_bitmap_as_png(PINNED_IMAGE *pin)
@@ -2075,7 +2219,7 @@ static BOOL save_editor_copy_to_history(PINNED_IMAGE *pin)
 		return FALSE;
 	}
 	// Persist before switching canvases; a failed save must keep the edits open.
-	if (db_history_is_open() && !db_history_save_item(item)) {
+	if (!save_editor_layer(pin, item, TRUE)) {
 		data_free(item);
 		return FALSE;
 	}
@@ -2096,6 +2240,8 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	HANDLE replacement = NULL;
 	HANDLE old_data;
 	DWORD old_size;
+	UINT64 old_hash;
+	int old_edit;
 	DWORD size = 0;
 	BYTE *dib;
 	if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
@@ -2127,19 +2273,22 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	}
 	old_data = pin->source_data->data;
 	old_size = pin->source_data->size;
+	old_hash = owner->content_hash;
+	old_edit = owner->image_edit_id;
 	pin->source_data->data = replacement;
 	pin->source_data->size = size;
 	data_menu_free_item(pin->source_data);
 	if (owner != pin->source_data) {
 		owner->content_hash = 0;
-		if (data_check(&history_data, owner) != NULL && db_history_is_open()) {
-			if (!(owner->param1 > 0 ? db_history_update_item(owner) : db_history_save_item(owner))) {
-				pin->source_data->data = old_data;
-				pin->source_data->size = old_size;
-				if (!format_free_data(pin->source_data->format_name, replacement))
-					clipboard_free_data(pin->source_data->format_name, replacement);
-				return FALSE;
-			}
+		if (!save_editor_layer(pin, owner, data_check(&history_data, owner) != NULL) ||
+			(data_check(&regist_data, owner) != NULL && !SendMessage(pin->owner, WM_REGIST_SAVE, 0, 0))) {
+			pin->source_data->data = old_data;
+			pin->source_data->size = old_size;
+			owner->content_hash = old_hash;
+			owner->image_edit_id = old_edit;
+			if (!format_free_data(pin->source_data->format_name, replacement))
+				clipboard_free_data(pin->source_data->format_name, replacement);
+			return FALSE;
 		}
 		parent = data_check(&history_data, owner);
 		if (parent != NULL) SendMessage(pin->owner, WM_HISTORY_CHANGED, 0, 0);
@@ -2147,14 +2296,13 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	}
 	if (old_data != NULL && !format_free_data(pin->source_data->format_name, old_data))
 		clipboard_free_data(pin->source_data->format_name, old_data);
-	DeleteObject(pin->original);
-	pin->original = clone_bitmap(pin->bitmap, NULL, NULL);
-	free_artifacts(pin->artifacts);
-	pin->artifacts = pin->active_artifact = pin->selected_artifact = NULL;
+	clear_selection(pin);
+	pin->active_artifact = NULL;
 	if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
 	pin->dirty = FALSE;
 	clear_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts, &pin->undo_count);
 	clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
+	update_properties(pin);
 	return TRUE;
 }
 
@@ -2209,6 +2357,7 @@ static const TCHAR *editor_tool_help(UINT id)
 	case ID_TEXT: return pin_text(IDS_PIN_TOOL_TEXT);
 	case ID_CALLOUT: return pin_text(IDS_PIN_TOOL_CALLOUT);
 	case ID_DIMENSION: return pin_text(IDS_PIN_TOOL_DIMENSION);
+	case ID_DIMENSION_SLASH: return pin_text(IDS_PIN_TOOL_DIMENSION_SLASH);
 	case ID_STEP: return pin_text(IDS_PIN_TOOL_STEP);
 	case ID_REDACT: return pin_text(IDS_PIN_TOOL_REDACT);
 	case ID_INVERT: return pin_text(IDS_PIN_TOOL_INVERT);
@@ -2220,6 +2369,406 @@ static const TCHAR *editor_tool_help(UINT id)
 	case ID_CROP: return pin_text(IDS_PIN_TOOL_CROP);
 	}
 	return NULL;
+}
+
+enum { PROP_COLOR = 1, PROP_SIZE = 2, PROP_TEXT = 4, PROP_NUMBER = 8, PROP_FILLED = 16,
+	PROP_TEXT_SIZE = 32, PROP_FONT = 64 };
+
+static const int property_controls[] = {IDC_PIN_PROP_COLOR, IDC_PIN_PROP_SIZE, IDC_PIN_PROP_TEXT,
+	IDC_PIN_PROP_NUMBER, IDC_PIN_PROP_FILLED, IDC_PIN_PROP_TEXT_SIZE, IDC_PIN_PROP_FONT};
+static const int property_toolbar_controls[] = {IDC_PIN_PROP_COLOR, IDC_PIN_PROP_SIZE, IDC_PIN_PROP_TEXT_SIZE, IDC_PIN_PROP_FONT};
+static const UINT property_toolbar_masks[] = {PROP_COLOR, PROP_SIZE, PROP_TEXT_SIZE, PROP_FONT};
+
+static UINT artifact_properties(const PIN_ARTIFACT *item)
+{
+	UINT properties = PROP_COLOR | PROP_SIZE;
+	if (item->tool == ID_INVERT || item->tool == ID_SPOTLIGHT) return 0;
+	if (item->tool == ID_HIGHLIGHT || item->tool == ID_HIGHLIGHT_BLOCK || item->tool == ID_ROUGH_HIGHLIGHT)
+		properties &= ~PROP_SIZE;
+	if (item->tool == ID_TEXT || item->tool == ID_CALLOUT || is_dimension_tool(item->tool))
+		properties |= PROP_TEXT | PROP_TEXT_SIZE | PROP_FONT;
+	if (item->tool == ID_STEP) properties |= PROP_NUMBER;
+	if (item->tool == ID_RECT || item->tool == ID_FILLED_RECT ||
+		item->tool == ID_ELLIPSE || item->tool == ID_FILLED_ELLIPSE) properties |= PROP_FILLED;
+	return properties;
+}
+
+static BOOL property_target(PINNED_IMAGE *pin, PIN_ARTIFACT *item)
+{
+	if (item->deleted) return FALSE;
+	if (pin->drawing && pin->drag_mode == 6) {
+		RECT hit, box = artifact_bounds(item);
+		RECT frame = { min(pin->start.x, pin->last.x), min(pin->start.y, pin->last.y),
+			max(pin->start.x, pin->last.x), max(pin->start.y, pin->last.y) };
+		if (pin->frame_additive && item->selected) return TRUE;
+		if (IsRectEmpty(&frame)) return item == top_artifact_at(pin, pin->last);
+		return IntersectRect(&hit, &frame, &box);
+	}
+	return item->selected;
+}
+
+static UINT common_properties(PINNED_IMAGE *pin, PIN_ARTIFACT **first, int *count)
+{
+	UINT common = PROP_COLOR | PROP_SIZE | PROP_TEXT | PROP_NUMBER | PROP_FILLED | PROP_TEXT_SIZE | PROP_FONT;
+	PIN_ARTIFACT *item;
+	*first = NULL; *count = 0;
+	for (item = pin->artifacts; item != NULL; item = item->next) if (property_target(pin, item)) {
+		if (*first == NULL) *first = item;
+		(*count)++;
+		common &= artifact_properties(item);
+	}
+	return *count ? common : 0;
+}
+
+static BOOL artifact_filled(const PIN_ARTIFACT *item)
+{
+	return item->tool == ID_FILLED_RECT || item->tool == ID_FILLED_ELLIPSE;
+}
+
+static const TCHAR *artifact_text(const PIN_ARTIFACT *item)
+{
+	return item->text != NULL ? item->text : TEXT("");
+}
+
+static BOOL property_number(HWND dialog, int id, int maximum, int *value)
+{
+	TCHAR text[16];
+	int i, length = GetWindowTextLength(GetDlgItem(dialog, id));
+	*value = 0;
+	if (!length || length >= ARRAYSIZE(text)) return FALSE;
+	GetDlgItemText(dialog, id, text, ARRAYSIZE(text));
+	for (i = 0; i < length; i++) {
+		int digit = text[i] - TEXT('0');
+		if (digit < 0 || digit > 9 || *value > (maximum - digit) / 10) return FALSE;
+		*value = *value * 10 + digit;
+	}
+	return *value > 0 && *value <= maximum;
+}
+
+static BOOL apply_properties(PINNED_IMAGE *pin)
+{
+	PIN_ARTIFACT *first, *item, *items;
+	PINNED_IMAGE preview;
+	int count, stroke = 0, number = 0;
+	UINT changes = pin->property_changes & common_properties(pin, &first, &count);
+	COLORREF color = pin->property_color;
+	TCHAR *text = NULL;
+	int filled = (int)SendDlgItemMessage(pin->properties, IDC_PIN_PROP_FILLED, BM_GETCHECK, 0, 0);
+	if (pin->drawing || pin->text_edit != NULL || changes == 0) return FALSE;
+	stroke = pin->property_stroke;
+	if ((changes & PROP_SIZE) && (stroke < 1 || stroke > PIN_MAX_STROKE_WIDTH)) return FALSE;
+	if ((changes & PROP_TEXT_SIZE) && (pin->property_text_size < 1 || pin->property_text_size > PIN_MAX_TEXT_SIZE)) return FALSE;
+	if ((changes & PROP_FONT) && !pin->property_font[0]) return FALSE;
+	if ((changes & PROP_NUMBER) && !property_number(pin->properties, IDC_PIN_PROP_NUMBER, INT_MAX, &number)) return FALSE;
+	if (changes & PROP_TEXT) {
+		int length = GetWindowTextLength(GetDlgItem(pin->properties, IDC_PIN_PROP_TEXT));
+		text = mem_alloc((length + 1) * sizeof(TCHAR));
+		if (text == NULL) return FALSE;
+		GetDlgItemText(pin->properties, IDC_PIN_PROP_TEXT, text, length + 1);
+	}
+	items = clone_artifacts(pin->artifacts);
+	if (items == NULL) { mem_free((void **)&text); return FALSE; }
+	for (item = items; item != NULL; item = item->next) if (item->selected && !item->deleted) {
+		if (changes & PROP_COLOR) item->color = color;
+		if (changes & PROP_SIZE) item->stroke = stroke;
+		if (changes & PROP_TEXT_SIZE) item->text_size = pin->property_text_size;
+		if (changes & PROP_FONT) lstrcpyn(item->font_face, pin->property_font, LF_FACESIZE);
+		if (changes & PROP_NUMBER) item->number = number;
+		if (changes & PROP_FILLED) {
+			BOOL rectangle = item->tool == ID_RECT || item->tool == ID_FILLED_RECT;
+			item->tool = rectangle ? (filled == BST_CHECKED ? ID_FILLED_RECT : ID_RECT) :
+				(filled == BST_CHECKED ? ID_FILLED_ELLIPSE : ID_ELLIPSE);
+		}
+		if (changes & PROP_TEXT) {
+			TCHAR *replacement = mem_alloc((lstrlen(text) + 1) * sizeof(TCHAR));
+			if (replacement == NULL) { free_artifacts(items); mem_free((void **)&text); return FALSE; }
+			lstrcpy(replacement, text);
+			mem_free((void **)&item->text);
+			item->text = replacement;
+		}
+		if ((changes & (PROP_TEXT | PROP_SIZE | PROP_TEXT_SIZE | PROP_FONT)) && (artifact_properties(item) & PROP_TEXT)) {
+			item->box = styled_text_box(pin, item->box, artifact_text(item), item->stroke, item->tool != ID_TEXT, item);
+			if (is_dimension_tool(item->tool)) item->box = dimension_text_box(pin, item->box, item->start, item->end);
+		}
+	}
+	mem_free((void **)&text);
+	/* Render a candidate before recording history, so failures leave the document intact. */
+	preview = *pin;
+	preview.artifacts = items;
+	preview.bitmap = clone_bitmap(pin->bitmap, NULL, NULL);
+	if (preview.bitmap == NULL || !rebuild_artifacts(&preview)) {
+		if (preview.bitmap != NULL) DeleteObject(preview.bitmap);
+		free_artifacts(items);
+		return FALSE;
+	}
+	/* Keep one undo snapshot for the current selection's live property edits. */
+	if (!pin->property_live) {
+		BOOL dirty = pin->dirty;
+		if (!begin_change(pin)) { DeleteObject(preview.bitmap); free_artifacts(items); return FALSE; }
+		pin->property_dirty = dirty;
+		pin->property_live = TRUE;
+	}
+	DeleteObject(pin->bitmap);
+	free_artifacts(pin->artifacts);
+	pin->bitmap = preview.bitmap;
+	pin->artifacts = items;
+	pin->active_artifact = pin->selected_artifact = NULL;
+	for (item = items; item != NULL; item = item->next)
+		if (item->selected && !item->deleted) pin->selected_artifact = item;
+	pin->property_changes = 0;
+	pin->property_mixed &= ~changes;
+	update_property_buttons(pin);
+	EnableWindow(GetDlgItem(pin->properties, IDOK), TRUE);
+	InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+	return TRUE;
+}
+
+static void revert_properties(PINNED_IMAGE *pin)
+{
+	int index;
+	PIN_ARTIFACT *item;
+	if (!pin->property_live || pin->drawing || pin->text_edit != NULL || !pin->undo_count) return;
+	index = --pin->undo_count;
+	DeleteObject(pin->bitmap);
+	free_artifacts(pin->artifacts);
+	pin->bitmap = pin->undo[index];
+	if (pin->undo_base[index] != NULL) {
+		DeleteObject(pin->original);
+		pin->original = pin->undo_base[index];
+	}
+	pin->artifacts = pin->undo_artifacts[index];
+	pin->active_artifact = pin->selected_artifact = NULL;
+	for (item = pin->artifacts; item != NULL; item = item->next)
+		if (item->selected && !item->deleted) pin->selected_artifact = item;
+	pin->dirty = pin->property_dirty;
+	refresh_history_buttons(pin);
+	update_properties(pin);
+	InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+}
+
+static INT_PTR CALLBACK properties_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+	PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+	if (msg == WM_INITDIALOG) {
+		pin = (PINNED_IMAGE *)lparam;
+		SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pin);
+		SetWindowText(hwnd, pin_text(IDS_PIN_PROPERTIES));
+		SetDlgItemText(hwnd, IDOK, pin_text(IDS_PIN_PROP_REVERT));
+		SetDlgItemText(hwnd, IDCANCEL, pin_text(IDS_PIN_PROP_CLOSE));
+		SendMessage(hwnd, DM_SETDEFID, IDCANCEL, 0);
+		dark_mode_set_inverse_window(hwnd);
+		if (!create_property_toolbars(pin, hwnd)) { DestroyWindow(hwnd); return FALSE; }
+		dark_mode_set_children(hwnd);
+		return FALSE;
+	}
+	if (pin == NULL) return FALSE;
+	if (msg == WM_DRAWITEM) {
+		DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lparam;
+		RECT bounds = item->rcItem;
+		BOOL dark = dark_mode_window_is_dark(hwnd);
+		TCHAR text[64];
+		HFONT font = (HFONT)SendMessage(item->hwndItem, WM_GETFONT, 0, 0);
+		HFONT previous = SelectObject(item->hDC, font != NULL ? font : GetStockObject(DEFAULT_GUI_FONT));
+		SetDCBrushColor(item->hDC, dark ? RGB(48, 54, 64) : RGB(235, 242, 252));
+		FillRect(item->hDC, &bounds, GetStockObject(DC_BRUSH));
+		SetDCBrushColor(item->hDC, (item->itemState & ODS_SELECTED) ? RGB(0, 120, 215) :
+			dark ? RGB(68, 73, 82) : RGB(204, 209, 216));
+		FrameRect(item->hDC, &bounds, GetStockObject(DC_BRUSH));
+		SetTextColor(item->hDC, (item->itemState & ODS_DISABLED) ? RGB(140, 140, 140) :
+			dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
+		SetBkMode(item->hDC, TRANSPARENT);
+		GetWindowText(item->hwndItem, text, ARRAYSIZE(text));
+		DrawText(item->hDC, text, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		if (item->itemState & ODS_FOCUS) { InflateRect(&bounds, -2, -2); DrawFocusRect(item->hDC, &bounds); }
+		SelectObject(item->hDC, previous);
+		SetWindowLongPtr(hwnd, DWLP_MSGRESULT, TRUE);
+		return TRUE;
+	}
+	if (msg == WM_NOTIFY) {
+		NMHDR *header = (NMHDR *)lparam;
+		if (header->code == NM_CUSTOMDRAW) {
+			LRESULT result;
+			if (header->idFrom == IDC_PIN_PROP_FILLED) {
+				NMCUSTOMDRAW *draw = (NMCUSTOMDRAW *)lparam;
+				RECT text = draw->rc, glyph = draw->rc;
+				int size = Scale(13), check = (int)SendMessage(header->hwndFrom, BM_GETCHECK, 0, 0);
+				BOOL dark = dark_mode_window_is_dark(hwnd);
+				UINT state = check == BST_INDETERMINATE ? DFCS_BUTTON3STATE | DFCS_CHECKED :
+					DFCS_BUTTONCHECK | (check == BST_CHECKED ? DFCS_CHECKED : 0);
+				if (!IsWindowEnabled(header->hwndFrom)) state |= DFCS_INACTIVE;
+				SetDCBrushColor(draw->hdc, dark ? RGB(43, 43, 43) : GetSysColor(COLOR_BTNFACE));
+				FillRect(draw->hdc, &draw->rc, GetStockObject(DC_BRUSH));
+				glyph.top += max(0, (glyph.bottom - glyph.top - size) / 2);
+				glyph.right = glyph.left + size; glyph.bottom = glyph.top + size;
+				DrawFrameControl(draw->hdc, &glyph, DFC_BUTTON, state);
+				text.left = glyph.right + Scale(5);
+				SetBkMode(draw->hdc, TRANSPARENT);
+				SetTextColor(draw->hdc, state & DFCS_INACTIVE ? RGB(140, 140, 140) :
+					dark ? RGB(240, 240, 240) : GetSysColor(COLOR_BTNTEXT));
+				DrawText(draw->hdc, pin_text(IDS_PIN_PROP_FILLED), -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+				if (draw->uItemState & CDIS_FOCUS) DrawFocusRect(draw->hdc, &text);
+				SetWindowLongPtr(hwnd, DWLP_MSGRESULT, CDRF_SKIPDEFAULT);
+				return TRUE;
+			}
+			if (dark_mode_toolbar_customdraw(lparam, &result)) {
+				SetWindowLongPtr(hwnd, DWLP_MSGRESULT, result);
+				return TRUE;
+			}
+		} else if (header->code == TTN_NEEDTEXT) {
+			((NMTTDISPINFO *)lparam)->lpszText = (TCHAR *)pin_text(
+				header->idFrom == IDC_PIN_PROP_COLOR ? IDS_PIN_TIP_COLOR : header->idFrom == IDC_PIN_PROP_SIZE ?
+				IDS_PIN_TIP_SIZE : header->idFrom == IDC_PIN_PROP_TEXT_SIZE ? IDS_PIN_PROP_TEXT_SIZE : IDS_PIN_PROP_FONT);
+			return TRUE;
+		} else if (header->code == TBN_DROPDOWN) {
+			NMTOOLBAR *button = (NMTOOLBAR *)lparam;
+			if (button->iItem == IDC_PIN_PROP_COLOR) show_color_popup_at(pin, header->hwndFrom, button->iItem);
+			else if (button->iItem == IDC_PIN_PROP_SIZE) show_size_popup_at(pin, header->hwndFrom, button->iItem);
+			else if (button->iItem == IDC_PIN_PROP_TEXT_SIZE) show_size_popup_at(pin, header->hwndFrom, button->iItem);
+			else if (button->iItem == IDC_PIN_PROP_FONT) show_font_popup(pin, header->hwndFrom);
+			return TRUE;
+		}
+	}
+	if (msg == WM_COMMAND) {
+		int id = LOWORD(wparam);
+		if (id == IDOK) { revert_properties(pin); return TRUE; }
+		if (id == IDCANCEL) { DestroyWindow(hwnd); return TRUE; }
+		if (!pin->updating_properties && id >= IDC_PIN_PROP_COLOR && id <= IDC_PIN_PROP_FILLED &&
+			(HIWORD(wparam) == EN_CHANGE || (id == IDC_PIN_PROP_FILLED && HIWORD(wparam) == BN_CLICKED))) {
+			if (id == IDC_PIN_PROP_FILLED) SendDlgItemMessage(hwnd, id, BM_SETCHECK,
+				SendDlgItemMessage(hwnd, id, BM_GETCHECK, 0, 0) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
+			pin->property_changes = 1u << (id - IDC_PIN_PROP_COLOR);
+			apply_properties(pin);
+			InvalidateRect(GetDlgItem(hwnd, id), NULL, TRUE);
+			return TRUE;
+		}
+	}
+	if (msg == WM_CLOSE) { DestroyWindow(hwnd); return TRUE; }
+	if (msg == WM_DESTROY) {
+		pin->properties = NULL;
+		clear_selection(pin);
+		pin->property_changes = 0;
+		pin->property_live = FALSE;
+		InvalidateRect(pin->hwnd, &pin->image_rect, FALSE);
+		if (pin->property_icons != NULL) { ImageList_Destroy(pin->property_icons); pin->property_icons = NULL; }
+		return TRUE;
+	}
+	if (msg >= WM_CTLCOLORMSGBOX && msg <= WM_CTLCOLORSTATIC) {
+		BOOL dark = dark_mode_window_is_dark(hwnd);
+		BOOL edit = msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORLISTBOX;
+		COLORREF background = dark ? (edit ? RGB(32, 32, 32) : RGB(43, 43, 43)) :
+			GetSysColor(edit ? COLOR_WINDOW : COLOR_BTNFACE);
+		SetTextColor((HDC)wparam, dark ? RGB(240, 240, 240) : GetSysColor(COLOR_BTNTEXT));
+		SetBkColor((HDC)wparam, background);
+		SetDCBrushColor((HDC)wparam, background);
+		return (INT_PTR)GetStockObject(DC_BRUSH);
+	}
+	return FALSE;
+}
+
+static void update_properties(PINNED_IMAGE *pin)
+{
+	PIN_ARTIFACT *first, *item;
+	int count, i, j, y = 32;
+	UINT common = common_properties(pin, &first, &count), mixed = 0;
+	TCHAR value[128];
+	const UINT labels[] = {IDS_PIN_PROP_COLOR, IDS_PIN_PROP_SIZE, IDS_PIN_PROP_TEXT, IDS_PIN_PROP_NUMBER,
+		IDS_PIN_PROP_FILLED, IDS_PIN_PROP_TEXT_SIZE, IDS_PIN_PROP_FONT};
+	const int order[] = {0, 1, 5, 6, 2, 3, 4};
+	pin->property_live = FALSE;
+	if (!count) {
+		if (pin->properties != NULL) ShowWindow(pin->properties, SW_HIDE);
+		pin->property_changes = 0;
+		return;
+	}
+	if (pin->hwnd == NULL) return;
+	if (pin->properties == NULL) {
+		RECT owner, bounds = {0, 0, 250, 185};
+		MONITORINFO monitor = {sizeof(monitor)};
+		pin->properties = CreateDialogParam(pin_instance, MAKEINTRESOURCE(IDD_PIN_PROPERTIES), pin->hwnd,
+			properties_proc, (LPARAM)pin);
+		if (pin->properties == NULL) return;
+		GetWindowRect(pin->hwnd, &owner);
+		GetWindowRect(pin->properties, &bounds);
+		GetMonitorInfo(MonitorFromWindow(pin->hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
+		SetWindowPos(pin->properties, NULL,
+			max(monitor.rcWork.left, min(owner.right, monitor.rcWork.right - (bounds.right - bounds.left))),
+			max(monitor.rcWork.top, min(owner.top, monitor.rcWork.bottom - (bounds.bottom - bounds.top))),
+			0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+	for (item = pin->artifacts; item != NULL; item = item->next) if (property_target(pin, item)) {
+		if (item->color != first->color) mixed |= PROP_COLOR;
+		if (item->stroke != first->stroke) mixed |= PROP_SIZE;
+		if (lstrcmp(artifact_text(item), artifact_text(first))) mixed |= PROP_TEXT;
+		if (item->number != first->number) mixed |= PROP_NUMBER;
+		if (artifact_filled(item) != artifact_filled(first)) mixed |= PROP_FILLED;
+		if (text_font_size(item, item->stroke) != text_font_size(first, first->stroke)) mixed |= PROP_TEXT_SIZE;
+		if (lstrcmpi(text_font_face(item), text_font_face(first))) mixed |= PROP_FONT;
+	}
+	pin->updating_properties = TRUE;
+	pin->property_color = first->color;
+	pin->property_stroke = first->stroke;
+	pin->property_text_size = text_font_size(first, first->stroke);
+	lstrcpyn(pin->property_font, text_font_face(first), LF_FACESIZE);
+	pin->property_mixed = mixed;
+	wsprintf(value, pin_text(IDS_PIN_PROP_COMMON), count);
+	SetDlgItemText(pin->properties, IDC_PIN_PROP_STATUS, common ? value : pin_text(IDS_PIN_PROP_NONE));
+	for (j = 0; j < ARRAYSIZE(order); j++) {
+		int id, height;
+		i = order[j];
+		id = property_controls[i]; height = i == 2 ? 40 : i < 2 || i > 4 ? 22 : 14;
+		HWND edit = GetDlgItem(pin->properties, id), label = GetDlgItem(pin->properties, id + 20);
+		BOOL visible = (common & (1u << i)) != 0;
+		RECT field = {112, y, 242, y + height}, caption = {8, y + 2, 108, y + 14};
+		ShowWindow(edit, visible ? SW_SHOWNA : SW_HIDE);
+		if (label != NULL) ShowWindow(label, visible ? SW_SHOWNA : SW_HIDE);
+		EnableWindow(edit, visible && !pin->drawing && pin->text_edit == NULL);
+		if (!visible) continue;
+		MapDialogRect(pin->properties, &field); MapDialogRect(pin->properties, &caption);
+		MoveWindow(edit, field.left, field.top, field.right - field.left, field.bottom - field.top, TRUE);
+		if (label != NULL) {
+			SetWindowText(label, pin_text(labels[i]));
+			MoveWindow(label, caption.left, caption.top, caption.right - caption.left, caption.bottom - caption.top, TRUE);
+		}
+		if (i < 2 || i > 4) {
+			SendMessage(edit, TB_ENABLEBUTTON, id, MAKELONG(!pin->drawing && pin->text_edit == NULL, 0));
+		} else if (i == 4) {
+			SetWindowText(edit, pin_text(labels[i]));
+			SendMessage(edit, BM_SETCHECK, mixed & PROP_FILLED ? BST_INDETERMINATE :
+				artifact_filled(first) ? BST_CHECKED : BST_UNCHECKED, 0);
+		} else {
+			if (i == 3) wsprintf(value, TEXT("%d"), first->number);
+			SetWindowText(edit, mixed & (1u << i) ? TEXT("") : i == 2 ? artifact_text(first) : value);
+			SendMessage(edit, EM_SETCUEBANNER, TRUE, (LPARAM)pin_text(IDS_PIN_PROP_MIXED));
+		}
+		y += height + 6;
+	}
+	update_property_buttons(pin);
+	for (i = 0; i < 2; i++) {
+		RECT button = {112 + i * 68, y + 4, 174 + i * 68, y + 20};
+		MapDialogRect(pin->properties, &button);
+		MoveWindow(GetDlgItem(pin->properties, i ? IDCANCEL : IDOK), button.left, button.top,
+			button.right - button.left, button.bottom - button.top, TRUE);
+	}
+	{
+		RECT size = {0, 0, 250, y + 28};
+		MapDialogRect(pin->properties, &size);
+		AdjustWindowRectEx(&size, (DWORD)GetWindowLong(pin->properties, GWL_STYLE), FALSE,
+			(DWORD)GetWindowLong(pin->properties, GWL_EXSTYLE));
+		SetWindowPos(pin->properties, NULL, 0, 0, size.right - size.left, size.bottom - size.top,
+			SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+	pin->property_changes = 0;
+	pin->updating_properties = FALSE;
+	EnableWindow(GetDlgItem(pin->properties, IDOK), FALSE);
+	ShowWindow(pin->properties, SW_SHOWNOACTIVATE);
+}
+
+BOOL pinned_image_dialog_message(MSG *message)
+{
+	PINNED_IMAGE *pin;
+	for (pin = pin_windows; pin != NULL; pin = pin->next)
+		if (pin->properties != NULL && IsDialogMessage(pin->properties, message)) return TRUE;
+	return FALSE;
 }
 
 static const TCHAR *short_tool_tip(PINNED_IMAGE *pin, UINT id)
@@ -2323,6 +2872,7 @@ static HMENU create_editor_menu(BOOL can_update)
 		!AppendMenu(tools, MF_STRING, ID_TEXT, pin_text(IDS_PIN_TOOL_TEXT)) ||
 		!AppendMenu(tools, MF_STRING, ID_CALLOUT, pin_text(IDS_PIN_TOOL_CALLOUT)) ||
 		!AppendMenu(tools, MF_STRING, ID_DIMENSION, pin_text(IDS_PIN_TOOL_DIMENSION)) ||
+		!AppendMenu(tools, MF_STRING, ID_DIMENSION_SLASH, pin_text(IDS_PIN_TOOL_DIMENSION_SLASH)) ||
 		!AppendMenu(tools, MF_STRING, ID_STEP, pin_text(IDS_PIN_TOOL_STEP)) ||
 		!AppendMenu(tools, MF_STRING, ID_REDACT, pin_text(IDS_PIN_TOOL_REDACT)) ||
 		!AppendMenu(tools, MF_STRING, ID_INVERT, pin_text(IDS_PIN_TOOL_INVERT)) ||
@@ -2368,13 +2918,13 @@ static const UINT toolbar_icons[] = {
 	IDR_PIN_SELECT, IDR_PIN_FRAME_SELECT, IDR_PIN_APPLY_COLOR, IDR_PIN_ZOOM, IDR_PIN_PAN, IDR_PIN_PEN, IDR_PIN_MARKER, IDR_PIN_ERASER,
 	IDR_PIN_LINE, IDR_PIN_ARROW, IDR_PIN_FRAME_ARROW,
 	IDR_PIN_RECT, IDR_PIN_FILLED_RECT, IDR_PIN_ELLIPSE,
-	IDR_PIN_FILLED_ELLIPSE, IDR_PIN_TEXT, IDR_PIN_CALLOUT, IDR_PIN_DIMENSION, IDR_PIN_STEP,
+	IDR_PIN_FILLED_ELLIPSE, IDR_PIN_TEXT, IDR_PIN_CALLOUT, IDR_PIN_DIMENSION, IDR_PIN_DIMENSION_SLASH, IDR_PIN_STEP,
 	IDR_PIN_REDACT, IDR_PIN_INVERT, IDR_PIN_HIGHLIGHT, IDR_PIN_HIGHLIGHT_BLOCK, IDR_PIN_ROUGH_HIGHLIGHT, IDR_PIN_SPOTLIGHT, IDR_PIN_MAGNIFY, IDR_PIN_CROP, IDR_PIN_ROTATE, IDR_PIN_COPY
 };
 static const UINT toolbar_commands[] = {
 	ID_UNDO, ID_REDO, ID_SELECT, ID_FRAME_SELECT, ID_APPLY_COLOR, ID_ZOOM, ID_PAN, ID_PEN, ID_MARKER, ID_ERASER,
 	ID_LINE, ID_ARROW, ID_FRAME_ARROW,
-	ID_RECT, ID_FILLED_RECT, ID_ELLIPSE, ID_FILLED_ELLIPSE, ID_TEXT, ID_CALLOUT, ID_DIMENSION,
+	ID_RECT, ID_FILLED_RECT, ID_ELLIPSE, ID_FILLED_ELLIPSE, ID_TEXT, ID_CALLOUT, ID_DIMENSION, ID_DIMENSION_SLASH,
 	ID_STEP, ID_REDACT, ID_INVERT, ID_HIGHLIGHT, ID_HIGHLIGHT_BLOCK, ID_ROUGH_HIGHLIGHT, ID_SPOTLIGHT, ID_MAGNIFY, ID_CROP, ID_ROTATE, ID_COPY
 };
 static HICON create_color_swatch_icon(COLORREF color, int size)
@@ -2488,6 +3038,112 @@ static void update_size_button_icon(PINNED_IMAGE *pin)
 	}
 }
 
+static BOOL create_property_toolbars(PINNED_IMAGE *pin, HWND dialog)
+{
+	int i, size = Scale(TOOL_ICON_SIZE);
+	pin->property_icons = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, ARRAYSIZE(property_toolbar_controls), 0);
+	if (pin->property_icons == NULL) return FALSE;
+	for (i = 0; i < ARRAYSIZE(property_toolbar_controls); i++) {
+		HWND toolbar = GetDlgItem(dialog, property_toolbar_controls[i]);
+		TBBUTTON button = {0};
+		HICON icon = i ? (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(i == 1 ? IDR_PIN_SIZE : IDR_PIN_TEXT), IMAGE_ICON, size, size, LR_DEFAULTCOLOR) :
+			create_color_swatch_icon(pin->current_color, size);
+		if (icon == NULL) return FALSE;
+		if (ImageList_AddIcon(pin->property_icons, icon) == -1) { DestroyIcon(icon); return FALSE; }
+		DestroyIcon(icon);
+		SetWindowLong(toolbar, GWL_STYLE, GetWindowLong(toolbar, GWL_STYLE) |
+			TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_TOOLTIPS | CCS_NOPARENTALIGN | CCS_NORESIZE | CCS_NODIVIDER);
+		SendMessage(toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+		SendMessage(toolbar, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DOUBLEBUFFER | TBSTYLE_EX_DRAWDDARROWS);
+		SendMessage(toolbar, TB_SETIMAGELIST, 0, (LPARAM)pin->property_icons);
+		SendMessage(toolbar, TB_SETBITMAPSIZE, 0, MAKELPARAM(size, size));
+		SendMessage(toolbar, TB_SETBUTTONSIZE, 0, MAKELPARAM(Scale(32), Scale(32)));
+		button.iBitmap = i;
+		button.idCommand = property_toolbar_controls[i];
+		button.fsState = TBSTATE_ENABLED;
+		button.fsStyle = BTNS_WHOLEDROPDOWN | BTNS_AUTOSIZE;
+		SendMessage(toolbar, TB_ADDBUTTONS, 1, (LPARAM)&button);
+	}
+	return TRUE;
+}
+
+static void update_property_buttons(PINNED_IMAGE *pin)
+{
+	int i, size = Scale(TOOL_ICON_SIZE);
+	if (pin->properties == NULL || pin->property_icons == NULL) return;
+	for (i = 0; i < ARRAYSIZE(property_toolbar_controls); i++) {
+		HWND toolbar = GetDlgItem(pin->properties, property_toolbar_controls[i]);
+		BOOL mixed = (pin->property_mixed & property_toolbar_masks[i]) != 0;
+		TCHAR text[64];
+		TBBUTTONINFO button = {sizeof(button)};
+		UINT resource = pin->property_stroke >= 10 ? IDR_PIN_SIZE_12 :
+			pin->property_stroke >= 5 ? IDR_PIN_SIZE_6 : IDR_PIN_SIZE;
+		if (i > 1) resource = IDR_PIN_TEXT;
+		HICON icon = i ? (HICON)LoadImage(pin_instance, MAKEINTRESOURCE(resource), IMAGE_ICON, size, size, LR_DEFAULTCOLOR) :
+			create_color_swatch_icon(mixed ? RGB(140, 140, 140) : pin->property_color, size);
+		if (icon != NULL) { ImageList_ReplaceIcon(pin->property_icons, i, icon); DestroyIcon(icon); }
+		button.dwMask = TBIF_TEXT | TBIF_STYLE;
+		if (i == 2) wsprintf(text, TEXT("%d px"), pin->property_text_size);
+		else lstrcpyn(text, i == 3 ? pin->property_font : TEXT(""), ARRAYSIZE(text));
+		button.fsStyle = BTNS_WHOLEDROPDOWN | BTNS_AUTOSIZE | (mixed || i > 1 ? BTNS_SHOWTEXT : 0);
+		button.pszText = (TCHAR *)(mixed ? pin_text(IDS_PIN_PROP_MIXED) : text);
+		if (i == 3) {
+			RECT bounds;
+			GetClientRect(toolbar, &bounds);
+			button.dwMask |= TBIF_SIZE;
+			button.cx = (WORD)(bounds.right - bounds.left);
+			button.fsStyle &= ~BTNS_AUTOSIZE;
+		}
+		SendMessage(toolbar, TB_SETBUTTONINFO, property_toolbar_controls[i], (LPARAM)&button);
+		InvalidateRect(toolbar, NULL, TRUE);
+	}
+}
+
+static void set_property_style(PINNED_IMAGE *pin, BOOL color, UINT value)
+{
+	PIN_ARTIFACT *first;
+	int count;
+	UINT property = color ? PROP_COLOR : PROP_SIZE;
+	if (pin->drawing || !(common_properties(pin, &first, &count) & property)) return;
+	if (!color && (value < 1 || value > PIN_MAX_STROKE_WIDTH)) return;
+	if (color) pin->property_color = (COLORREF)value;
+	else pin->property_stroke = (int)value;
+	pin->property_changes = property;
+	pin->property_mixed &= ~property;
+	update_property_buttons(pin);
+	if (!apply_properties(pin)) MessageBeep(MB_ICONWARNING);
+}
+
+static void choose_popup_color(PINNED_IMAGE *pin, BOOL properties, COLORREF color)
+{
+	if (properties) { set_property_style(pin, TRUE, color); return; }
+	pin->current_color = color;
+	change_selected_style(pin, TRUE);
+	sync_color_menu(pin);
+	update_color_button_icon(pin);
+	save_pinned_preferences(pin);
+	InvalidateRect(pin->hwnd, NULL, FALSE);
+}
+
+static void set_text_property(PINNED_IMAGE *pin, int size, const TCHAR *face)
+{
+	PIN_ARTIFACT *first;
+	int count;
+	UINT property = face != NULL ? PROP_FONT : PROP_TEXT_SIZE;
+	if (pin->drawing || pin->text_edit != NULL || !(common_properties(pin, &first, &count) & property)) return;
+	if (face != NULL) {
+		if (!face[0] || lstrlen(face) >= LF_FACESIZE) return;
+		lstrcpyn(pin->property_font, face, LF_FACESIZE);
+	} else {
+		if (size < 1 || size > PIN_MAX_TEXT_SIZE) return;
+		pin->property_text_size = size;
+	}
+	pin->property_changes = property;
+	pin->property_mixed &= ~property;
+	update_property_buttons(pin);
+	if (!apply_properties(pin)) MessageBeep(MB_ICONWARNING);
+}
+
 static HWND current_color_popup_hwnd = NULL;
 static DWORD last_color_popup_toggle = 0;
 static COLORREF custom_colors[16] = {0};
@@ -2577,35 +3233,23 @@ static LRESULT CALLBACK color_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 		POINT pt = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
 		int hit = hit_test_popup(hwnd, pt);
 		PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+		BOOL properties = pin != NULL && GetWindow(hwnd, GW_OWNER) == pin->properties;
 		/* The toolbar's opening click releases outside the captured popup. */
 		if (hit < 0) return 0;
 		ReleaseCapture();
 		DestroyWindow(hwnd);
 		if (pin != NULL && hit >= 0 && hit < STANDARD_COLOR_COUNT) {
-			pin->current_color = pin->tool == ID_MARKER ? marker_colors[hit] : standard_colors[hit];
-			change_selected_style(pin, TRUE);
-			sync_color_menu(pin);
-			update_color_button_icon(pin);
-			save_pinned_preferences(pin);
-			sync_color_menu(pin);
-			update_color_button_icon(pin);
-			save_pinned_preferences(pin);
-			InvalidateRect(pin->hwnd, NULL, FALSE);
+			choose_popup_color(pin, properties, pin->tool == ID_MARKER ? marker_colors[hit] : standard_colors[hit]);
 		} else if (pin != NULL && hit == 16) {
 			CHOOSECOLOR cc;
 			ZeroMemory(&cc, sizeof(cc));
 			cc.lStructSize = sizeof(cc);
-			cc.hwndOwner = pin->hwnd;
-			cc.rgbResult = get_pin_color(pin);
+			cc.hwndOwner = properties ? pin->properties : pin->hwnd;
+			cc.rgbResult = properties ? pin->property_color : get_pin_color(pin);
 			cc.lpCustColors = custom_colors;
 			cc.Flags = CC_FULLOPEN | CC_RGBINIT;
 			if (ChooseColor(&cc)) {
-				pin->current_color = cc.rgbResult;
-				change_selected_style(pin, TRUE);
-				sync_color_menu(pin);
-				update_color_button_icon(pin);
-				save_pinned_preferences(pin);
-				InvalidateRect(pin->hwnd, NULL, FALSE);
+				choose_popup_color(pin, properties, cc.rgbResult);
 			}
 		}
 		return 0;
@@ -2643,7 +3287,8 @@ static LRESULT CALLBACK color_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 		HBRUSH bg_brush, border_brush;
 		BOOL dark = !dark_mode_is_dark();
 		PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-		COLORREF active_color = get_pin_color(pin);
+		BOOL properties = pin != NULL && GetWindow(hwnd, GW_OWNER) == pin->properties;
+		COLORREF active_color = properties ? pin->property_color : get_pin_color(pin);
 		const COLORREF *palette = pin != NULL && pin->tool == ID_MARKER ? marker_colors : standard_colors;
 		UINT palette_base = pin != NULL && pin->tool == ID_MARKER ? IDS_PIN_PALETTE_MARKER : IDS_PIN_PALETTE_STANDARD;
 		int i;
@@ -2675,7 +3320,7 @@ static LRESULT CALLBACK color_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
 			FrameRect(mem_dc, &sr, inner_b);
 			DeleteObject(inner_b);
 
-			if (active_color == col) {
+			if (active_color == col && !(properties && (pin->property_mixed & PROP_COLOR))) {
 				RECT ring = sr;
 				HBRUSH ab = CreateSolidBrush(dark ? RGB(80, 160, 255) : RGB(0, 120, 215));
 				InflateRect(&ring, Scale(2), Scale(2));
@@ -2780,7 +3425,7 @@ static BOOL color_popup_regist(HINSTANCE instance)
 	return RegisterClassEx(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
 
-static void show_color_popup(PINNED_IMAGE *pin)
+static void show_color_popup_at(PINNED_IMAGE *pin, HWND toolbar, UINT command)
 {
 	RECT btn_rect = {0};
 	int swatch_size, swatch_gap, pad, grid_w, grid_h, more_h, sep_h, popup_w, popup_h;
@@ -2789,7 +3434,7 @@ static void show_color_popup(PINNED_IMAGE *pin)
 	MONITORINFO mi;
 	DWORD now = GetTickCount();
 
-	if (pin == NULL || pin->toolbar == NULL) return;
+	if (pin == NULL || toolbar == NULL || !SendMessage(toolbar, TB_GETRECT, command, (LPARAM)&btn_rect)) return;
 	if (now - last_color_popup_toggle < 150) return;
 	last_color_popup_toggle = now;
 
@@ -2799,8 +3444,7 @@ static void show_color_popup(PINNED_IMAGE *pin)
 		return;
 	}
 
-	SendMessage(pin->toolbar, TB_GETRECT, ID_COLOR_DROPDOWN, (LPARAM)&btn_rect);
-	MapWindowPoints(pin->toolbar, NULL, (LPPOINT)&btn_rect, 2);
+	MapWindowPoints(toolbar, NULL, (LPPOINT)&btn_rect, 2);
 
 	swatch_size = Scale(20);
 	swatch_gap = Scale(4);
@@ -2831,7 +3475,7 @@ static void show_color_popup(PINNED_IMAGE *pin)
 		TEXT(""),
 		WS_POPUP,
 		x, y, popup_w, popup_h,
-		pin->hwnd,
+		GetParent(toolbar),
 		NULL,
 		pin_instance,
 		pin);
@@ -2845,6 +3489,38 @@ static void show_color_popup(PINNED_IMAGE *pin)
 
 static HWND current_size_popup_hwnd = NULL;
 static DWORD last_size_popup_toggle = 0;
+
+typedef struct { PINNED_IMAGE *pin; UINT command; } PIN_WIDTH_POPUP;
+static const int text_size_presets[] = {12, 16, 20, 24, 28, 32, 40, 48, 64, 72, 96, 128};
+
+static BOOL text_size_popup(HWND popup)
+{
+	return GetWindowLongPtr(popup, 0) == IDC_PIN_PROP_TEXT_SIZE;
+}
+
+static int width_preset(HWND popup, int index)
+{
+	return text_size_popup(popup) ? text_size_presets[index] : index + 1;
+}
+
+static void show_color_popup(PINNED_IMAGE *pin)
+{
+	show_color_popup_at(pin, pin->toolbar, ID_COLOR_DROPDOWN);
+}
+
+static int popup_stroke_width(HWND popup, PINNED_IMAGE *pin)
+{
+	if (text_size_popup(popup)) return pin->property_mixed & PROP_TEXT_SIZE ? 0 : pin->property_text_size;
+	return GetWindow(popup, GW_OWNER) == pin->properties ?
+		(pin->property_mixed & PROP_SIZE ? 0 : pin->property_stroke) : pin->stroke_width;
+}
+
+static void choose_popup_width(HWND popup, PINNED_IMAGE *pin, int width)
+{
+	if (text_size_popup(popup)) set_text_property(pin, width, NULL);
+	else if (GetWindow(popup, GW_OWNER) == pin->properties) set_property_style(pin, FALSE, (UINT)width);
+	else set_stroke_width(pin, width);
+}
 
 static void set_stroke_width(PINNED_IMAGE *pin, int width)
 {
@@ -2861,20 +3537,21 @@ static void set_stroke_width(PINNED_IMAGE *pin, int width)
 static void apply_custom_width(HWND popup)
 {
 	TCHAR text[16];
+	int maximum = text_size_popup(popup) ? PIN_MAX_TEXT_SIZE : PIN_MAX_STROKE_WIDTH;
 	int i, width = 0, length = GetWindowTextLength(GetDlgItem(popup, ID_WIDTH_EDIT));
 	GetDlgItemText(popup, ID_WIDTH_EDIT, text, ARRAYSIZE(text));
 	for (i = 0; i < length && i < ARRAYSIZE(text) - 1; i++) {
 		if (text[i] < TEXT('0') || text[i] > TEXT('9')) break;
 		width = width * 10 + text[i] - TEXT('0');
-		if (width > PIN_MAX_STROKE_WIDTH) break;
+		if (width > maximum) break;
 	}
-	if (length == 0 || i != length || width < 1 || width > PIN_MAX_STROKE_WIDTH) {
+	if (length == 0 || i != length || width < 1 || width > maximum) {
 		MessageBeep(MB_ICONWARNING);
 		SetFocus(GetDlgItem(popup, ID_WIDTH_EDIT));
 		SendDlgItemMessage(popup, ID_WIDTH_EDIT, EM_SETSEL, 0, -1);
 		return;
 	}
-	set_stroke_width((PINNED_IMAGE *)GetWindowLongPtr(popup, GWLP_USERDATA), width);
+	choose_popup_width(popup, (PINNED_IMAGE *)GetWindowLongPtr(popup, GWLP_USERDATA), width);
 	DestroyWindow(popup);
 }
 
@@ -2919,11 +3596,13 @@ static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
 		int i;
 		TCHAR text[16];
 		HWND control;
-		pin = (PINNED_IMAGE *)((CREATESTRUCT *)lparam)->lpCreateParams;
+		PIN_WIDTH_POPUP *context = (PIN_WIDTH_POPUP *)((CREATESTRUCT *)lparam)->lpCreateParams;
+		pin = context->pin;
 		SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pin);
+		SetWindowLongPtr(hwnd, 0, context->command);
 		dark_mode_set_inverse_window(hwnd);
 		for (i = 0; i < 12; i++) {
-			wsprintf(text, TEXT("%d px"), i + 1);
+			wsprintf(text, TEXT("%d px"), width_preset(hwnd, i));
 			control = CreateWindowEx(0, TEXT("BUTTON"), text,
 				WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
 				Scale(8 + (i % 6) * 36), Scale(8 + (i / 6) * 44), Scale(32), Scale(40),
@@ -2931,12 +3610,12 @@ static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
 			if (control == NULL) return -1;
 			SetWindowSubclass(control, size_control_proc, 1, 0);
 		}
-		control = CreateWindowEx(0, TEXT("STATIC"), pin_text(IDS_PIN_CUSTOM_WIDTH),
+		control = CreateWindowEx(0, TEXT("STATIC"), pin_text(text_size_popup(hwnd) ? IDS_PIN_CUSTOM_TEXT_SIZE : IDS_PIN_CUSTOM_WIDTH),
 			WS_CHILD | WS_VISIBLE, Scale(8), Scale(99), Scale(212), Scale(18),
 			hwnd, NULL, pin_instance, NULL);
 		if (control == NULL) return -1;
 		SendMessage(control, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
-		wsprintf(text, TEXT("%d"), pin->stroke_width);
+		wsprintf(text, TEXT("%d"), popup_stroke_width(hwnd, pin));
 		control = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), text,
 			WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
 			Scale(8), Scale(120), Scale(128), Scale(24),
@@ -2958,7 +3637,7 @@ static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
 		if (HIWORD(wparam) == BN_CLICKED) {
 			int command = LOWORD(wparam);
 			if (command >= ID_WIDTH_1 && command <= ID_WIDTH_12) {
-				set_stroke_width(pin, command - ID_WIDTH_1 + 1);
+				choose_popup_width(hwnd, pin, width_preset(hwnd, command - ID_WIDTH_1));
 				DestroyWindow(hwnd);
 			} else if (command == ID_WIDTH_APPLY) apply_custom_width(hwnd);
 		}
@@ -2984,10 +3663,11 @@ static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
 		DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lparam;
 		RECT r = item->rcItem, line = r, label = r;
 		BOOL preset = item->CtlID >= ID_WIDTH_1 && item->CtlID <= ID_WIDTH_12;
-		int width = preset ? item->CtlID - ID_WIDTH_1 + 1 : 0;
-		BOOL selected = preset && pin->stroke_width == width;
+		int width = preset ? width_preset(hwnd, item->CtlID - ID_WIDTH_1) : 0;
+		BOOL selected = preset && popup_stroke_width(hwnd, pin) == width;
 		HBRUSH brush = (HBRUSH)GetStockObject(DC_BRUSH);
 		HFONT old_font = SelectObject(item->hDC, GetStockObject(DEFAULT_GUI_FONT));
+		HFONT sample_font = NULL, label_font = NULL;
 		TCHAR text[32];
 		SetDCBrushColor(item->hDC, dark ? RGB(48, 54, 64) : RGB(235, 242, 252));
 		FillRect(item->hDC, &r, brush);
@@ -3000,10 +3680,23 @@ static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
 		}
 		if (preset) {
 			line.left += Scale(6); line.right -= Scale(6);
-			line.top = Scale(13) - Scale(width) / 2; line.bottom = line.top + max(1, Scale(width));
-			SetDCBrushColor(item->hDC, dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
-			FillRect(item->hDC, &line, brush);
+			SetTextColor(item->hDC, dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
+			if (text_size_popup(hwnd)) {
+				sample_font = create_text_font(NULL, 1, Scale(14));
+				if (sample_font != NULL) SelectObject(item->hDC, sample_font);
+				line.top = Scale(3); line.bottom = Scale(23);
+				SetBkMode(item->hDC, TRANSPARENT);
+				DrawText(item->hDC, TEXT("Aa"), -1, &line, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			} else {
+				line.top = Scale(13) - Scale(width) / 2; line.bottom = line.top + max(1, Scale(width));
+				SetDCBrushColor(item->hDC, dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
+				FillRect(item->hDC, &line, brush);
+			}
 			label.top = Scale(23);
+			if (text_size_popup(hwnd)) {
+				label_font = create_text_font(NULL, 1, Scale(11));
+				if (label_font != NULL) SelectObject(item->hDC, label_font);
+			}
 			wsprintf(text, TEXT("%d"), width);
 		} else GetWindowText(item->hwndItem, text, ARRAYSIZE(text));
 		SetBkMode(item->hDC, TRANSPARENT);
@@ -3011,6 +3704,8 @@ static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
 		DrawText(item->hDC, text, -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 		if (item->itemState & ODS_FOCUS) { InflateRect(&r, -2, -2); DrawFocusRect(item->hDC, &r); }
 		SelectObject(item->hDC, old_font);
+		if (sample_font != NULL) DeleteObject(sample_font);
+		if (label_font != NULL) DeleteObject(label_font);
 		return TRUE;
 	}
 	case WM_PAINT:
@@ -3033,26 +3728,28 @@ static LRESULT CALLBACK size_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPAR
 	return DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
-static void show_size_popup(PINNED_IMAGE *pin)
+static void show_size_popup_at(PINNED_IMAGE *pin, HWND toolbar, UINT command)
 {
 	RECT button;
 	MONITORINFO monitor = { sizeof(monitor) };
 	WNDCLASSEX wc = { sizeof(wc) };
 	HWND popup;
+	PIN_WIDTH_POPUP context = {pin, command};
 	int width = Scale(228), height = Scale(152), x, y;
 	DWORD now = GetTickCount();
-	if (pin == NULL || pin->toolbar == NULL || now - last_size_popup_toggle < 150 ||
-		!SendMessage(pin->toolbar, TB_GETRECT, ID_SIZE_DROPDOWN, (LPARAM)&button)) return;
+	if (pin == NULL || toolbar == NULL || now - last_size_popup_toggle < 150 ||
+		!SendMessage(toolbar, TB_GETRECT, command, (LPARAM)&button)) return;
 	last_size_popup_toggle = now;
 	if (current_size_popup_hwnd != NULL) { DestroyWindow(current_size_popup_hwnd); return; }
 	if (current_color_popup_hwnd != NULL) DestroyWindow(current_color_popup_hwnd);
 	wc.style = CS_DROPSHADOW;
+	wc.cbWndExtra = sizeof(LONG_PTR);
 	wc.lpfnWndProc = size_popup_proc;
 	wc.hInstance = pin_instance;
 	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
 	wc.lpszClassName = TEXT("CLCL_SizePopup");
 	if (!RegisterClassEx(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
-	MapWindowPoints(pin->toolbar, NULL, (LPPOINT)&button, 2);
+	MapWindowPoints(toolbar, NULL, (LPPOINT)&button, 2);
 	x = button.left; y = button.bottom + Scale(2);
 	if (GetMonitorInfo(MonitorFromRect(&button, MONITOR_DEFAULTTONEAREST), &monitor)) {
 		if (x + width > monitor.rcWork.right) x = monitor.rcWork.right - width;
@@ -3062,16 +3759,197 @@ static void show_size_popup(PINNED_IMAGE *pin)
 	}
 	popup = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT,
 		wc.lpszClassName, pin_text(IDS_PIN_TIP_SIZE), WS_POPUP | WS_CLIPCHILDREN,
-		x, y, width, height, pin->hwnd, NULL, pin_instance, pin);
+		x, y, width, height, GetParent(toolbar), NULL, pin_instance, &context);
 	current_size_popup_hwnd = popup;
 	if (popup != NULL) {
 		ShowWindow(popup, SW_SHOW);
-		SetFocus(GetDlgItem(popup, pin->stroke_width <= 12 ?
-			ID_WIDTH_1 + pin->stroke_width - 1 : ID_WIDTH_EDIT));
+		int stroke = popup_stroke_width(popup, pin);
+		int i, focus = ID_WIDTH_EDIT;
+		for (i = 0; i < 12; i++) if (width_preset(popup, i) == stroke) focus = ID_WIDTH_1 + i;
+		SetFocus(GetDlgItem(popup, focus));
 		UpdateWindow(popup);
 	}
 }
 
+static void show_size_popup(PINNED_IMAGE *pin)
+{
+	show_size_popup_at(pin, pin->toolbar, ID_SIZE_DROPDOWN);
+}
+
+static HWND current_font_popup_hwnd;
+
+static int CALLBACK add_font_family(const LOGFONT *font, const TEXTMETRIC *metrics, DWORD type, LPARAM data)
+{
+	HWND list = (HWND)data;
+	UNREFERENCED_PARAMETER(metrics);
+	UNREFERENCED_PARAMETER(type);
+	if (font->lfFaceName[0] == TEXT('@')) return 1;
+	if (SendMessage(list, LB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)font->lfFaceName) == LB_ERR)
+		return SendMessage(list, LB_ADDSTRING, 0, (LPARAM)font->lfFaceName) >= 0;
+	return 1;
+}
+
+static void choose_font(HWND popup)
+{
+	HWND list = GetDlgItem(popup, ID_FONT_LIST);
+	int index = (int)SendMessage(list, LB_GETCURSEL, 0, 0);
+	TCHAR face[LF_FACESIZE];
+	if (index == LB_ERR) return;
+	SendMessage(list, LB_GETTEXT, index, (LPARAM)face);
+	set_text_property((PINNED_IMAGE *)GetWindowLongPtr(popup, GWLP_USERDATA), 0, face);
+	DestroyWindow(popup);
+}
+
+static LRESULT CALLBACK font_list_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
+	UINT_PTR id, DWORD_PTR data)
+{
+	UNREFERENCED_PARAMETER(data);
+	if (msg == WM_KEYDOWN && (wparam == VK_RETURN || wparam == VK_ESCAPE)) {
+		if (wparam == VK_RETURN) choose_font(GetParent(hwnd));
+		else DestroyWindow(GetParent(hwnd));
+		return 0;
+	}
+	if (msg == WM_CHAR && (wparam == VK_RETURN || wparam == VK_ESCAPE)) return 0;
+	if (msg == WM_LBUTTONUP) {
+		LRESULT result = DefSubclassProc(hwnd, msg, wparam, lparam);
+		if (HIWORD(SendMessage(hwnd, LB_ITEMFROMPOINT, 0, lparam)) == 0) choose_font(GetParent(hwnd));
+		return result;
+	}
+	if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, font_list_proc, id);
+	return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+static LRESULT CALLBACK font_popup_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+	PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+	BOOL dark = !dark_mode_is_dark();
+	switch (msg) {
+	case WM_CREATE:
+	{
+		RECT client;
+		LOGFONT query = {0};
+		HDC dc;
+		HWND list;
+		int selected;
+		pin = (PINNED_IMAGE *)((CREATESTRUCT *)lparam)->lpCreateParams;
+		SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pin);
+		dark_mode_set_inverse_window(hwnd);
+		GetClientRect(hwnd, &client);
+		list = CreateWindowEx(0, TEXT("LISTBOX"), NULL, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+			LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_SORT | LBS_NOINTEGRALHEIGHT,
+			Scale(8), Scale(30), client.right - Scale(16), client.bottom - Scale(38),
+			hwnd, (HMENU)ID_FONT_LIST, pin_instance, NULL);
+		if (list == NULL) return -1;
+		query.lfCharSet = DEFAULT_CHARSET;
+		dc = GetDC(hwnd);
+		if (dc == NULL) return -1;
+		EnumFontFamiliesEx(dc, &query, add_font_family, (LPARAM)list, 0);
+		ReleaseDC(hwnd, dc);
+		if (SendMessage(list, LB_GETCOUNT, 0, 0) <= 0) return -1;
+		selected = pin->property_mixed & PROP_FONT ? LB_ERR :
+			(int)SendMessage(list, LB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)pin->property_font);
+		SendMessage(list, LB_SETCURSEL, selected, 0);
+		if (selected != LB_ERR) SendMessage(list, LB_SETTOPINDEX, max(0, selected - 3), 0);
+		SetWindowSubclass(list, font_list_proc, 1, 0);
+		dark_mode_set_control(list);
+		return 0;
+	}
+	case WM_MEASUREITEM:
+		((MEASUREITEMSTRUCT *)lparam)->itemHeight = Scale(28);
+		return TRUE;
+	case WM_DRAWITEM:
+	{
+		DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lparam;
+		RECT label = item->rcItem, sample = label;
+		TCHAR face[LF_FACESIZE];
+		HFONT font, previous;
+		if (item->itemID == (UINT)-1) return TRUE;
+		SendMessage(item->hwndItem, LB_GETTEXT, item->itemID, (LPARAM)face);
+		SetDCBrushColor(item->hDC, item->itemState & ODS_SELECTED ? RGB(0, 120, 215) :
+			dark ? RGB(34, 38, 44) : RGB(255, 255, 255));
+		FillRect(item->hDC, &label, GetStockObject(DC_BRUSH));
+		SetTextColor(item->hDC, dark || (item->itemState & ODS_SELECTED) ? RGB(230, 235, 242) : RGB(30, 35, 42));
+		SetBkMode(item->hDC, TRANSPARENT);
+		label.left += Scale(8); label.right -= Scale(60);
+		previous = SelectObject(item->hDC, GetStockObject(DEFAULT_GUI_FONT));
+		DrawText(item->hDC, face, -1, &label, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+		font = CreateFont(-Scale(18), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+			OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, face);
+		if (font != NULL) {
+			SelectObject(item->hDC, font);
+			sample.left = sample.right - Scale(60);
+			DrawText(item->hDC, TEXT("Aa"), -1, &sample, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+		}
+		SelectObject(item->hDC, previous);
+		if (font != NULL) DeleteObject(font);
+		if (item->itemState & ODS_FOCUS) DrawFocusRect(item->hDC, &item->rcItem);
+		return TRUE;
+	}
+	case WM_CTLCOLORLISTBOX:
+		SetDCBrushColor((HDC)wparam, dark ? RGB(34, 38, 44) : RGB(255, 255, 255));
+		return (LRESULT)GetStockObject(DC_BRUSH);
+	case WM_ACTIVATE:
+		if (LOWORD(wparam) == WA_INACTIVE) DestroyWindow(hwnd);
+		return 0;
+	case WM_DESTROY:
+		if (current_font_popup_hwnd == hwnd) current_font_popup_hwnd = NULL;
+		return 0;
+	case WM_PAINT:
+	{
+		PAINTSTRUCT ps;
+		HDC dc = BeginPaint(hwnd, &ps);
+		RECT bounds;
+		HFONT previous = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+		GetClientRect(hwnd, &bounds);
+		SetDCBrushColor(dc, dark ? RGB(34, 38, 44) : RGB(255, 255, 255));
+		FillRect(dc, &bounds, GetStockObject(DC_BRUSH));
+		SetDCBrushColor(dc, dark ? RGB(68, 73, 82) : RGB(204, 209, 216));
+		FrameRect(dc, &bounds, GetStockObject(DC_BRUSH));
+		bounds.left = Scale(16); bounds.top = Scale(4); bounds.bottom = Scale(28);
+		SetTextColor(dc, dark ? RGB(230, 235, 242) : RGB(30, 35, 42));
+		SetBkMode(dc, TRANSPARENT);
+		DrawText(dc, pin_text(IDS_PIN_PROP_FONT), -1, &bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+		SelectObject(dc, previous);
+		EndPaint(hwnd, &ps);
+		return 0;
+	}
+	}
+	return DefWindowProc(hwnd, msg, wparam, lparam);
+}
+
+static void show_font_popup(PINNED_IMAGE *pin, HWND toolbar)
+{
+	RECT button;
+	MONITORINFO monitor = {sizeof(monitor)};
+	WNDCLASSEX wc = {sizeof(wc)};
+	int x, y, width = Scale(320), height = Scale(280);
+	if (!SendMessage(toolbar, TB_GETRECT, IDC_PIN_PROP_FONT, (LPARAM)&button)) return;
+	if (current_font_popup_hwnd != NULL) { DestroyWindow(current_font_popup_hwnd); return; }
+	if (current_color_popup_hwnd != NULL) DestroyWindow(current_color_popup_hwnd);
+	if (current_size_popup_hwnd != NULL) DestroyWindow(current_size_popup_hwnd);
+	wc.style = CS_DROPSHADOW;
+	wc.lpfnWndProc = font_popup_proc;
+	wc.hInstance = pin_instance;
+	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+	wc.lpszClassName = TEXT("CLCL_FontPopup");
+	if (!RegisterClassEx(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+	MapWindowPoints(toolbar, NULL, (LPPOINT)&button, 2);
+	x = button.left; y = button.bottom + Scale(2);
+	if (GetMonitorInfo(MonitorFromRect(&button, MONITOR_DEFAULTTONEAREST), &monitor)) {
+		width = min(width, monitor.rcWork.right - monitor.rcWork.left);
+		height = min(height, monitor.rcWork.bottom - monitor.rcWork.top);
+		x = max(monitor.rcWork.left, min(x, monitor.rcWork.right - width));
+		if (y + height > monitor.rcWork.bottom) y = button.top - height - Scale(2);
+		y = max(monitor.rcWork.top, y);
+	}
+	current_font_popup_hwnd = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, wc.lpszClassName,
+		pin_text(IDS_PIN_PROP_FONT), WS_POPUP | WS_CLIPCHILDREN, x, y, width, height,
+		pin->properties, NULL, pin_instance, pin);
+	if (current_font_popup_hwnd != NULL) {
+		ShowWindow(current_font_popup_hwnd, SW_SHOW);
+		SetFocus(GetDlgItem(current_font_popup_hwnd, ID_FONT_LIST));
+	}
+}
 
 static BOOL create_editor_toolbar(PINNED_IMAGE *pin)
 {
@@ -3257,12 +4135,24 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 		if (bitmap == NULL) return NULL;
 		original = clone_bitmap(bitmap, NULL, NULL);
 		if (original == NULL) { DeleteObject(bitmap); return NULL; }
-		if (pin->dirty && !replace_source(pin)) {
-			DeleteObject(original);
-			DeleteObject(bitmap);
-			MessageBeep(MB_ICONWARNING);
-			SetForegroundWindow(pin->hwnd);
-			return NULL;
+		{
+			PINNED_IMAGE candidate = {0};
+			candidate.bitmap = bitmap; candidate.original = original;
+			candidate.width = width; candidate.height = height;
+			if (!load_editor_layer(&candidate, source)) {
+				DeleteObject(candidate.original); DeleteObject(bitmap);
+				MessageBeep(MB_ICONWARNING); return NULL;
+			}
+			original = candidate.original;
+			if (pin->dirty && !replace_source(pin)) {
+				DeleteObject(candidate.initial); free_artifacts(candidate.artifacts);
+				DeleteObject(original); DeleteObject(bitmap);
+				MessageBeep(MB_ICONWARNING); SetForegroundWindow(pin->hwnd); return NULL;
+			}
+			DeleteObject(pin->initial);
+			pin->initial = candidate.initial;
+			free_artifacts(pin->artifacts);
+			pin->artifacts = candidate.artifacts;
 		}
 		hide_editor_menu_tip(pin);
 		if (current_color_popup_hwnd != NULL && IsWindow(current_color_popup_hwnd))
@@ -3271,8 +4161,8 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 		if (GetCapture() == pin->hwnd) ReleaseCapture();
 		clear_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts, &pin->undo_count);
 		clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
-		free_artifacts(pin->artifacts);
-		pin->artifacts = pin->active_artifact = pin->selected_artifact = NULL;
+		pin->active_artifact = pin->selected_artifact = NULL;
+		update_properties(pin);
 		if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
 		DeleteObject(pin->bitmap);
 		DeleteObject(pin->original);
@@ -3326,14 +4216,19 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 	if (pin->original == NULL) { DeleteObject(bitmap); mem_free(&pin); return NULL; }
 	pin->width = width;
 	pin->height = height;
+	if (!load_editor_layer(pin, source)) {
+		DeleteObject(pin->original); DeleteObject(bitmap); mem_free(&pin);
+		MessageBeep(MB_ICONWARNING); return NULL;
+	}
 	pin->zoom_percent = 100;
 	pin->tool = initial_tool;
 	pin->stroke_width = (option.pinned_stroke_width >= 1 && option.pinned_stroke_width <= PIN_MAX_STROKE_WIDTH) ? option.pinned_stroke_width : 3;
 	pin->current_color = (option.pinned_color != 0 || option.pinned_tool != 0) ? option.pinned_color : PIN_DEFAULT_COLOR;
 	if (pin->current_color == 0 && option.pinned_tool == 0) pin->current_color = PIN_DEFAULT_COLOR;
-	if (pin->tool == ID_DIMENSION) pin->current_color = RGB(0, 0, 0);
+	if (is_dimension_tool(pin->tool)) pin->current_color = RGB(0, 0, 0);
 	pin->menu = create_editor_menu(pin->source_data != NULL);
 	if (pin->menu == NULL) {
+		DeleteObject(pin->initial); free_artifacts(pin->artifacts);
 		DeleteObject(pin->original);
 		DeleteObject(pin->bitmap);
 		mem_free(&pin);
@@ -3354,6 +4249,7 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 		WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, window_w, window_h,
 		NULL, pin->menu, pin_instance, pin);
 	if (pin->hwnd == NULL) {
+		DeleteObject(pin->initial); free_artifacts(pin->artifacts);
 		DestroyMenu(pin->menu);
 		DeleteObject(pin->original);
 		DeleteObject(pin->bitmap);
@@ -3427,6 +4323,13 @@ BOOL pinned_image_clipboard_is_screenshot(HWND owner)
 	return match;
 }
 
+BOOL pinned_image_restore_clipboard_layer(DATA_INFO *item, DWORD sequence)
+{
+	if (sequence == 0 || sequence != last_copy_sequence) return FALSE;
+	if (item != NULL) item->image_edit_id = last_copy_edit_id;
+	return TRUE;
+}
+
 void pinned_image_auto_open(HWND owner, DATA_INFO *source, DWORD sequence)
 {
 	DATA_INFO *data;
@@ -3438,7 +4341,8 @@ void pinned_image_auto_open(HWND owner, DATA_INFO *source, DWORD sequence)
 	DATA_INFO image = {0};
 	DATA_INFO *history_image = NULL;
 	TCHAR error[BUF_SIZE];
-	if (sequence == 0 || sequence == last_auto_sequence || sequence == last_copy_sequence) return;
+	if (pinned_image_restore_clipboard_layer(source, sequence)) return;
+	if (sequence == 0 || sequence == last_auto_sequence) return;
 	last_auto_sequence = sequence;
 	data = find_bitmap_data(source);
 	if (data == NULL) return;
@@ -3468,7 +4372,7 @@ void pinned_image_auto_open(HWND owner, DATA_INFO *source, DWORD sequence)
 	}
 	// Publish first. The sequence guard prevents our clipboard notification
 	// from reopening another editor (including on single-monitor desktops).
-	if (copy_bitmap_to_clipboard(owner, cropped)) {
+	if (copy_bitmap_to_clipboard(owner, cropped, 0)) {
 		if (history_image != NULL) {
 			data_free(source->child);
 			source->child = history_image;
@@ -3718,7 +4622,7 @@ static LRESULT CALLBACK snip_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 				cropped = capture_scrolling_region(selection);
 			}
 			if (cropped != NULL) {
-				if (copy_bitmap_to_clipboard(owner, cropped)) {
+				if (copy_bitmap_to_clipboard(owner, cropped, 0)) {
 					HWND editor;
 					image.type = TYPE_DATA;
 					image.format = CF_BITMAP;
@@ -4214,13 +5118,13 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		break;
 	case WM_FINISH_TEXT:
-		if (pin != NULL) finish_text_edit(pin, wparam != 0);
+		if (pin != NULL) { finish_text_edit(pin, wparam != 0); update_properties(pin); }
 		return 0;
 	case WM_CTLCOLOREDIT:
 		if (pin != NULL && (HWND)lparam == pin->text_edit && pin->text_edit_brush != NULL) {
-			SetTextColor((HDC)wparam, (pin->text_edit_tool == ID_CALLOUT || pin->text_edit_tool == ID_DIMENSION) ? RGB(25, 25, 25) :
+			SetTextColor((HDC)wparam, (pin->text_edit_tool == ID_CALLOUT || is_dimension_tool(pin->text_edit_tool)) ? RGB(25, 25, 25) :
 				pin->editing_artifact != NULL ? pin->editing_artifact->color : pin->current_color);
-			SetBkColor((HDC)wparam, (pin->text_edit_tool == ID_CALLOUT || pin->text_edit_tool == ID_DIMENSION) ?
+			SetBkColor((HDC)wparam, (pin->text_edit_tool == ID_CALLOUT || is_dimension_tool(pin->text_edit_tool)) ?
 				RGB(255, 255, 245) : GetSysColor(COLOR_WINDOW));
 			return (LRESULT)pin->text_edit_brush;
 		}
@@ -4234,20 +5138,21 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		if (LOWORD(wparam) == ID_TEXT_EDIT && HIWORD(wparam) == EN_KILLFOCUS) {
 			finish_text_edit(pin, TRUE);
+			update_properties(pin);
 			return 0;
 		}
 		if (LOWORD(wparam) == ID_TEXT_EDIT) return 0;
 		if (pin->drawing) cancel_annotation_drag(pin);
 		if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
 		switch (LOWORD(wparam)) {
-		case ID_PEN: case ID_MARKER: case ID_ERASER: case ID_LINE: case ID_ARROW: case ID_FRAME_ARROW: case ID_DIMENSION:
+		case ID_PEN: case ID_MARKER: case ID_ERASER: case ID_LINE: case ID_ARROW: case ID_FRAME_ARROW: case ID_DIMENSION: case ID_DIMENSION_SLASH:
 		case ID_RECT: case ID_ELLIPSE: case ID_CROP: case ID_FILLED_RECT: case ID_FILLED_ELLIPSE:
 		case ID_SELECT: case ID_FRAME_SELECT: case ID_APPLY_COLOR: case ID_ZOOM: case ID_PAN:
 		case ID_TEXT: case ID_CALLOUT: case ID_STEP: case ID_REDACT: case ID_INVERT: case ID_SPOTLIGHT:
 		case ID_HIGHLIGHT: case ID_HIGHLIGHT_BLOCK: case ID_ROUGH_HIGHLIGHT: case ID_MAGNIFY:
 			pin->tool = LOWORD(wparam);
 			if (pin->tool != ID_SELECT && pin->tool != ID_FRAME_SELECT) clear_selection(pin);
-			if (pin->tool == ID_REDACT || pin->tool == ID_DIMENSION) pin->current_color = RGB(0, 0, 0);
+			if (pin->tool == ID_REDACT || is_dimension_tool(pin->tool)) pin->current_color = RGB(0, 0, 0);
 			if (pin->tool == ID_HIGHLIGHT || pin->tool == ID_HIGHLIGHT_BLOCK || pin->tool == ID_ROUGH_HIGHLIGHT) pin->current_color = RGB(255, 190, 0);
 			{
 				int i;
@@ -4269,11 +5174,11 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			if (!rotate_image_clockwise(pin)) MessageBeep(MB_ICONWARNING);
 			break;
 		case ID_COPY:
-			if (copy_bitmap_to_clipboard(pin->owner, pin->bitmap)) DestroyWindow(hwnd);
+			if (copy_editor_to_clipboard(pin)) DestroyWindow(hwnd);
 			else MessageBeep(MB_ICONWARNING);
 			break;
 		case ID_COPY_KEEP:
-			if (!copy_bitmap_to_clipboard(pin->owner, pin->bitmap)) MessageBeep(MB_ICONWARNING);
+			if (!copy_editor_to_clipboard(pin)) MessageBeep(MB_ICONWARNING);
 			break;
 		case ID_SAVE_PNG:
 			save_bitmap_as_png(pin);
@@ -4338,8 +5243,9 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		case ID_WIDTH_9: case ID_WIDTH_10: case ID_WIDTH_11: case ID_WIDTH_12:
 			set_stroke_width(pin, LOWORD(wparam) - ID_WIDTH_1 + 1);
 			break;
-		case ID_CLOSE: SendMessage(hwnd, WM_CLOSE, 0, 0); break;
+		case ID_CLOSE: SendMessage(hwnd, WM_CLOSE, 0, 0); return 0;
 		}
+		if (IsWindow(hwnd)) update_properties(pin);
 		return 0;
 	case WM_KEYDOWN:
 		if (wparam == VK_ESCAPE) { SendMessage(hwnd, WM_CLOSE, 0, 0); return 0; }
@@ -4360,7 +5266,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 	case WM_LBUTTONDBLCLK:
 		if (pin != NULL && pin->tool == ID_SELECT && pin->selected_artifact != NULL &&
 			(pin->selected_artifact->tool == ID_TEXT || pin->selected_artifact->tool == ID_CALLOUT ||
-			 pin->selected_artifact->tool == ID_DIMENSION)) {
+			 is_dimension_tool(pin->selected_artifact->tool))) {
 			begin_text_edit(pin, pin->selected_artifact, pin->selected_artifact->box);
 			return 0;
 		}
@@ -4445,6 +5351,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 					pin->start = pin->last = image;
 					pin->drawing = pin->drag_mode != 0;
 					if (pin->drawing) SetCapture(hwnd);
+					update_properties(pin);
 					InvalidateRect(hwnd, &pin->image_rect, FALSE);
 					return 0;
 				}
@@ -4453,10 +5360,12 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				pin->erasing_changed = FALSE;
 				pin->active_artifact = NULL;
 				pin->text_anchor = image;
-				if (pin->tool != ID_ERASER && pin->tool != ID_TEXT && pin->tool != ID_CALLOUT && pin->tool != ID_DIMENSION &&
+				if (pin->tool != ID_ERASER && pin->tool != ID_TEXT && pin->tool != ID_CALLOUT && !is_dimension_tool(pin->tool) &&
 					!begin_change(pin)) {
 					pin->drawing = FALSE; MessageBeep(MB_ICONWARNING); return 0;
 				}
+				clear_selection(pin);
+				update_properties(pin);
 				if (pin->tool == ID_PEN || pin->tool == ID_MARKER) {
 					pin->active_artifact = add_artifact(pin, pin->tool, image, image_stroke_width(pin, 1));
 					if (pin->active_artifact != NULL && append_artifact_point(pin->active_artifact, image))
@@ -4493,6 +5402,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 					draw_segment(pin, pin->last, image, FALSE);
 				else if (pin->tool == ID_ERASER) erase_artifacts(pin, pin->last, image);
 				pin->last = image;
+				if (pin->tool == ID_FRAME_SELECT && pin->drag_mode == 6) update_properties(pin);
 				InvalidateRect(hwnd, &pin->image_rect, FALSE);
 			}
 		}
@@ -4505,6 +5415,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		if (pin != NULL && pin->drawing) {
 			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, end = pin->last;
+			PIN_ARTIFACT *added = pin->active_artifact != NULL && pin->active_artifact->count > 0 ? pin->active_artifact : NULL;
 			client_to_image(pin, point, &end);
 			if (pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) {
 				if (pin->drag_mode == 6) select_in_frame(pin, end);
@@ -4522,6 +5433,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				pin->drag_mode = 0;
 				if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
 				ReleaseCapture();
+				update_properties(pin);
 				InvalidateRect(hwnd, &pin->image_rect, FALSE);
 				return 0;
 			}
@@ -4532,8 +5444,8 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			pin->drawing = FALSE;
 			pin->active_artifact = NULL;
 			ReleaseCapture();
-			if (pin->tool == ID_TEXT || pin->tool == ID_CALLOUT || pin->tool == ID_DIMENSION) {
-				if (pin->tool == ID_DIMENSION && end.x == pin->start.x && end.y == pin->start.y) {
+			if (pin->tool == ID_TEXT || pin->tool == ID_CALLOUT || is_dimension_tool(pin->tool)) {
+				if (is_dimension_tool(pin->tool) && end.x == pin->start.x && end.y == pin->start.y) {
 					InvalidateRect(hwnd, &pin->image_rect, FALSE);
 					return 0;
 				}
@@ -4562,11 +5474,12 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 							MessageBeep(MB_ICONWARNING);
 						}
 					} else render_extra_artifact(pin, item);
+					added = item;
 				}
 			} else if (pin->tool == ID_LINE || pin->tool == ID_ARROW || pin->tool == ID_FRAME_ARROW || pin->tool == ID_RECT ||
 				pin->tool == ID_ELLIPSE || pin->tool == ID_FILLED_RECT || pin->tool == ID_FILLED_ELLIPSE) {
 				PIN_ARTIFACT *item = add_artifact(pin, pin->tool, pin->start, image_stroke_width(pin, 1));
-				if (item != NULL) { item->end = end; finish_shape(pin, end); }
+				if (item != NULL) { item->end = end; finish_shape(pin, end); added = item; }
 			} else if (pin->tool == ID_CROP) {
 				RECT crop = { min(pin->start.x, end.x), min(pin->start.y, end.y), max(pin->start.x, end.x), max(pin->start.y, end.y) };
 				if (crop.right > crop.left + 1 && crop.bottom > crop.top + 1) {
@@ -4588,6 +5501,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 					}
 				}
 			}
+			select_added_artifact(pin, added);
 			InvalidateRect(hwnd, &pin->image_rect, FALSE);
 		}
 		return 0;
@@ -4653,8 +5567,9 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				HBRUSH fill = (pin->tool == ID_FILLED_RECT || pin->tool == ID_FILLED_ELLIPSE) ?
 					CreateSolidBrush(preview_color) : NULL;
 				HBRUSH old_brush = SelectObject(canvas, fill != NULL ? fill : GetStockObject(HOLLOW_BRUSH));
-				if (pin->tool == ID_DIMENSION) {
-					draw_dimension_line(canvas, start, end, preview_width);
+				if (is_dimension_tool(pin->tool)) {
+					draw_dimension_line(canvas, pin->tool, start, end, max(1, MulDiv(
+						text_font_size(NULL, image_stroke_width(pin, 1)), shown_w, pin->width)));
 				} else if (pin->tool == ID_LINE || pin->tool == ID_ARROW || pin->tool == ID_CALLOUT) {
 					MoveToEx(canvas, start.x, start.y, NULL); LineTo(canvas, end.x, end.y);
 					if (pin->tool == ID_ARROW && (start.x != end.x || start.y != end.y)) {
@@ -4679,13 +5594,15 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 				SelectObject(canvas, old_pen);
 				DeleteObject(preview);
 			}
-			if (pin->text_edit != NULL && pin->text_edit_tool == ID_DIMENSION && pin->editing_artifact == NULL) {
+			if (pin->text_edit != NULL && is_dimension_tool(pin->text_edit_tool) && pin->editing_artifact == NULL) {
 				int width = max(1, MulDiv(image_stroke_width(pin, 1),
 					pin->image_rect.right - pin->image_rect.left, pin->width));
 				HPEN pen = CreatePen(PS_SOLID, width, get_pin_color(pin));
 				HPEN old_pen = SelectObject(canvas, pen);
-				draw_dimension_line(canvas, image_to_client(pin, pin->text_anchor),
-					image_to_client(pin, pin->text_end), width);
+				draw_dimension_line(canvas, pin->text_edit_tool, image_to_client(pin, pin->text_anchor),
+					image_to_client(pin, pin->text_end), max(1, MulDiv(
+						text_font_size(NULL, image_stroke_width(pin, 1)),
+						pin->image_rect.right - pin->image_rect.left, pin->width)));
 				SelectObject(canvas, old_pen); DeleteObject(pen);
 			}
 			if (pin->tool == ID_FRAME_SELECT && pin->drawing && pin->drag_mode == 6) {
@@ -4700,8 +5617,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			}
 			{
 				RECT box;
-				if ((pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) &&
-					selected_bounds(pin->artifacts, &box)) {
+				if (selected_bounds(pin->artifacts, &box)) {
 				POINT a = image_to_client(pin, (POINT){box.left, box.top});
 				POINT b = image_to_client(pin, (POINT){box.right, box.bottom});
 				HPEN outline = CreatePen(PS_DASH, max(1, Scale(1)), RGB(0, 120, 215));
@@ -4749,6 +5665,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			PINNED_IMAGE **link = &pin_windows;
 			hide_editor_menu_tip(pin);
 			if (pin->menu_tip != NULL) DestroyWindow(pin->menu_tip);
+			if (pin->properties != NULL) DestroyWindow(pin->properties);
 			if (current_color_popup_hwnd != NULL && IsWindow(current_color_popup_hwnd)) {
 				DestroyWindow(current_color_popup_hwnd);
 				current_color_popup_hwnd = NULL;
@@ -4767,6 +5684,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			free_artifacts(pin->artifacts);
 			if (pin->drag_original != NULL) free_artifacts(pin->drag_original);
 			DeleteObject(pin->original);
+			DeleteObject(pin->initial);
 			DeleteObject(pin->bitmap);
 			SetMenu(hwnd, NULL);
 			DestroyMenu(pin->menu);

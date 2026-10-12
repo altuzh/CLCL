@@ -1,4 +1,29 @@
 // English
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+IDD_PIN_PROPERTIES DIALOGEX 0, 0, 250, 185
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_TOOLWINDOW | WS_EX_CONTROLPARENT
+CAPTION "Properties"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "", IDC_PIN_PROP_STATUS, 8, 8, 234, 22
+    LTEXT "", 6220, 8, 32, 100, 12
+    CONTROL "", IDC_PIN_PROP_COLOR, "ToolbarWindow32", WS_TABSTOP, 112, 30, 130, 22
+    LTEXT "", 6221, 8, 52, 100, 12
+    CONTROL "", IDC_PIN_PROP_SIZE, "ToolbarWindow32", WS_TABSTOP, 112, 58, 130, 22
+    LTEXT "", 6222, 8, 72, 100, 12
+    EDITTEXT IDC_PIN_PROP_TEXT, 112, 70, 130, 40, ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
+    LTEXT "", 6223, 8, 118, 100, 12
+    EDITTEXT IDC_PIN_PROP_NUMBER, 112, 116, 130, 14, ES_NUMBER | ES_AUTOHSCROLL
+    CONTROL "", IDC_PIN_PROP_FILLED, "Button", BS_3STATE | WS_TABSTOP, 112, 136, 130, 14
+    LTEXT "", 6226, 8, 152, 100, 12
+    CONTROL "", IDC_PIN_PROP_TEXT_SIZE, "ToolbarWindow32", WS_TABSTOP, 112, 150, 130, 22
+    LTEXT "", 6227, 8, 180, 100, 12
+    CONTROL "", IDC_PIN_PROP_FONT, "ToolbarWindow32", WS_TABSTOP, 112, 178, 130, 22
+    CONTROL "", IDOK, "Button", BS_OWNERDRAW | WS_TABSTOP, 112, 161, 62, 16
+    CONTROL "", IDCANCEL, "Button", BS_OWNERDRAW | WS_TABSTOP, 180, 161, 62, 16
+END
+
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 
 STRINGTABLE
@@ -43,6 +68,7 @@ BEGIN
     IDS_PIN_TOOL_TEXT "&Text"
     IDS_PIN_TOOL_CALLOUT "Text &callout"
     IDS_PIN_TOOL_DIMENSION "&Dimension"
+    IDS_PIN_TOOL_DIMENSION_SLASH "Dimension (slashes)"
     IDS_PIN_TOOL_STEP "&Numbered step"
     IDS_PIN_TOOL_REDACT "Solid &redaction"
     IDS_PIN_TOOL_INVERT "Invert colors frame"
@@ -63,6 +89,20 @@ BEGIN
     IDS_PIN_CUSTOM_SIZE "Custom..."
     IDS_PIN_CUSTOM_WIDTH "Custom (1-100 px)"
     IDS_PIN_APPLY_WIDTH "Apply"
+    IDS_PIN_PROPERTIES "Properties"
+    IDS_PIN_PROP_COLOR "Color"
+    IDS_PIN_PROP_SIZE "Size"
+    IDS_PIN_PROP_TEXT "Text"
+    IDS_PIN_PROP_NUMBER "Step number"
+    IDS_PIN_PROP_FILLED "Filled"
+    IDS_PIN_PROP_COMMON "%d selected: common properties"
+    IDS_PIN_PROP_NONE "No editable properties in common."
+    IDS_PIN_PROP_MIXED "Mixed"
+    IDS_PIN_PROP_CLOSE "Close"
+    IDS_PIN_PROP_REVERT "Revert"
+    IDS_PIN_PROP_TEXT_SIZE "Text size"
+    IDS_PIN_PROP_FONT "Font"
+    IDS_PIN_CUSTOM_TEXT_SIZE "Custom (1-512 px)"
     1300 "Black"
     1301 "Dark Gray"
     1302 "Gray"
@@ -142,6 +182,7 @@ BEGIN
     IDS_PIN_TOOL_TEXT "&Текст"
     IDS_PIN_TOOL_CALLOUT "Текстовая &выноска"
     IDS_PIN_TOOL_DIMENSION "&Размерная линия"
+    IDS_PIN_TOOL_DIMENSION_SLASH "Размерная линия (засечки)"
     IDS_PIN_TOOL_STEP "&Нумерация"
     IDS_PIN_TOOL_REDACT "&Скрыть область"
     IDS_PIN_TOOL_INVERT "Инверсия цветов в рамке"
@@ -162,6 +203,20 @@ BEGIN
     IDS_PIN_CUSTOM_SIZE "Другая..."
     IDS_PIN_CUSTOM_WIDTH "Толщина (1-100 px)"
     IDS_PIN_APPLY_WIDTH "Применить"
+    IDS_PIN_PROPERTIES "Свойства"
+    IDS_PIN_PROP_COLOR "Цвет"
+    IDS_PIN_PROP_SIZE "Размер"
+    IDS_PIN_PROP_TEXT "Текст"
+    IDS_PIN_PROP_NUMBER "Номер шага"
+    IDS_PIN_PROP_FILLED "Заливка"
+    IDS_PIN_PROP_COMMON "Выбрано: %d. Общие свойства"
+    IDS_PIN_PROP_NONE "Нет общих редактируемых свойств."
+    IDS_PIN_PROP_MIXED "Разные значения"
+    IDS_PIN_PROP_CLOSE "Закрыть"
+    IDS_PIN_PROP_REVERT "Вернуть"
+    IDS_PIN_PROP_TEXT_SIZE "Размер текста"
+    IDS_PIN_PROP_FONT "Шрифт"
+    IDS_PIN_CUSTOM_TEXT_SIZE "Размер (1-512 пикс.)"
     1300 "Чёрный"
     1301 "Тёмно-серый"
     1302 "Серый"

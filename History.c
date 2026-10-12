@@ -52,6 +52,7 @@ static BOOL history_compare(DATA_INFO *d1, DATA_INFO *d2)
 	if (d1 == NULL || d2 == NULL) {
 		return FALSE;
 	}
+	if (d1->image_edit_id != d2->image_edit_id) return FALSE;
 
 	h1 = (d1->content_hash != 0) ? d1->content_hash : data_calc_hash(d1);
 	h2 = (d2->content_hash != 0) ? d2->content_hash : data_calc_hash(d2);

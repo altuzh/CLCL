@@ -62,6 +62,7 @@ typedef struct _DATA_INFO {
 	UINT op_virtkey;
 	int op_paste;
 	UINT64 content_hash;				// Content hash value (for duplicate check)
+	int image_edit_id;					// Saved editable image snapshot in history.db
 } DATA_INFO;
 
 /* Function Prototypes */

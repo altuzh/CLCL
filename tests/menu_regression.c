@@ -12,7 +12,22 @@ static BOOL test_set_cursor(int x, int y) { test_cursor.x = x; test_cursor.y = y
 #define menu_show_align test_menu_show_align
 #define save_regist unused_save_regist
 #define pinned_image_clipboard_is_screenshot test_screenshot_pending
+static BOOL history_clipboard_mock;
+static HWND history_clipboard_owner;
+static DWORD history_clipboard_sequence;
+static BOOL history_open_clipboard(HWND owner) { return history_clipboard_mock ? TRUE : OpenClipboard(owner); }
+static BOOL history_close_clipboard(void) { return history_clipboard_mock ? TRUE : CloseClipboard(); }
+static HWND history_get_clipboard_owner(void) { return history_clipboard_mock ? history_clipboard_owner : GetClipboardOwner(); }
+static DWORD history_get_clipboard_sequence(void) { return history_clipboard_mock ? history_clipboard_sequence : GetClipboardSequenceNumber(); }
+#define OpenClipboard history_open_clipboard
+#define CloseClipboard history_close_clipboard
+#define GetClipboardOwner history_get_clipboard_owner
+#define GetClipboardSequenceNumber history_get_clipboard_sequence
 #include "../main.c"
+#undef GetClipboardSequenceNumber
+#undef GetClipboardOwner
+#undef CloseClipboard
+#undef OpenClipboard
 extern void ini_set_language(const TCHAR *locale_name);
 #undef pinned_image_clipboard_is_screenshot
 static BOOL screenshot_pending;
@@ -35,11 +50,16 @@ static HANDLE test_set_clipboard(UINT format, HANDLE bitmap)
     } else copied_bitmap = bitmap;
     return bitmap;
 }
-static BOOL test_close_clipboard(void) { return TRUE; }
+static BOOL test_close_clipboard(void)
+{
+    if (history_clipboard_mock) history_clipboard_sequence++;
+    return TRUE;
+}
 #define OpenClipboard test_open_clipboard
 #define EmptyClipboard test_empty_clipboard
 #define SetClipboardData test_set_clipboard
 #define CloseClipboard test_close_clipboard
+#define GetClipboardSequenceNumber history_get_clipboard_sequence
 static int editor_window_walks;
 static HWND test_editor_get_window(HWND window, UINT command)
 {
@@ -56,6 +76,7 @@ static BOOL test_editor_set_window_pos(HWND window, HWND after, int x, int y, in
 }
 #define SetWindowPos test_editor_set_window_pos
 #include "../PinnedImage.c"
+#undef GetClipboardSequenceNumber
 #undef SetWindowPos
 #undef GetWindow
 
@@ -77,8 +98,30 @@ static COLORREF bitmap_pixel(HBITMAP bitmap, int x, int y)
 #undef menu_show_align
 #undef save_regist
 BOOL save_regist(HWND owner) { (void)owner; return TRUE; }
+/* Exercise capture without reading or changing the user's clipboard. */
+static UINT capture_formats[5];
+static int capture_format_count;
+static HGLOBAL capture_text, capture_marker;
+static UINT test_enum_clipboard_formats(UINT previous)
+{
+    int i;
+    if (previous == 0) return capture_format_count ? capture_formats[0] : 0;
+    for (i = 0; i + 1 < capture_format_count; i++)
+        if (capture_formats[i] == previous) return capture_formats[i + 1];
+    return 0;
+}
+static HANDLE test_get_clipboard_data(UINT format)
+{
+    return format == CF_UNICODETEXT ? capture_text : capture_marker;
+}
+#define EnumClipboardFormats test_enum_clipboard_formats
+#define GetClipboardData test_get_clipboard_data
+#include "../ClipBoard.c"
+#undef GetClipboardData
+#undef EnumClipboardFormats
 static int phase, ticks, failures, scenario, open_steps;
 static BOOL finished;
+static BOOL fail_favourite_save;
 static DATA_INFO *folder, *landing;
 static HWND idle_menu;
 static POINT before_delete;
@@ -106,6 +149,47 @@ int test_menu_show_align(HWND owner, HMENU menu, const POINT *pos, UINT align)
 
 #define CHECK(condition, message) do { if (!(condition)) { \
     printf("FAIL: %s (phase %d)\n", message, phase); failures++; } } while (0)
+
+static void test_private_clipboard_capture(void)
+{
+    const TCHAR *markers[] = {
+        TEXT("CanIncludeInClipboardHistory"), TEXT("CanUploadToCloudClipboard"),
+        TEXT("ExcludeClipboardContentFromMonitorProcessing"), TEXT("Clipboard Viewer Ignore")
+    };
+    const WCHAR text[] = L"Firefox private clipboard regression";
+    TCHAR error[BUF_SIZE] = {0};
+    int i, count;
+    capture_text = GlobalAlloc(GHND, sizeof(text));
+    capture_marker = GlobalAlloc(GHND, sizeof(DWORD));
+    CHECK(capture_text && capture_marker, "private clipboard fixture allocates");
+    if (!capture_text || !capture_marker) goto cleanup;
+    CopyMemory(GlobalLock(capture_text), text, sizeof(text));
+    GlobalUnlock(capture_text);
+    capture_formats[0] = CF_UNICODETEXT;
+    for (i = 0; i < 4; i++) capture_formats[i + 1] = RegisterClipboardFormat(markers[i]);
+    for (count = 1; count <= 6; count++) {
+        DATA_INFO *item, *view;
+        if (count >= 2 && count <= 5) capture_formats[1] = RegisterClipboardFormat(markers[count - 2]);
+        if (count == 6)
+            for (i = 0; i < 4; i++) capture_formats[i + 1] = RegisterClipboardFormat(markers[i]);
+        capture_format_count = count == 1 ? 1 : count == 6 ? 5 : 2;
+        item = clipboard_to_item(error);
+        CHECK(item && item->child && item->child->data &&
+            lstrcmpW(GlobalLock(item->child->data), text) == 0,
+            "ordinary and privacy-marked clipboard text is captured for history");
+        if (item && item->child && item->child->data) GlobalUnlock(item->child->data);
+        data_free(item);
+        view = clipboard_get_datainfo(FALSE, FALSE, error);
+        CHECK(view && view->format == CF_UNICODETEXT,
+            "privacy markers do not hide clipboard contents in the viewer");
+        data_free(view);
+    }
+cleanup:
+    capture_format_count = 0;
+    if (capture_text) GlobalFree(capture_text);
+    if (capture_marker) GlobalFree(capture_marker);
+    capture_text = capture_marker = NULL;
+}
 
 static DWORD toolbar_icon_checksum(HIMAGELIST icons, int index)
 {
@@ -360,7 +444,7 @@ cleanup:
     DeleteObject(pin.original); DeleteObject(pin.bitmap);
 }
 
-static void test_dimension_annotations(HWND owner)
+static void test_dimension_annotations(HWND owner, int tool)
 {
     HDC screen = GetDC(NULL), dc = CreateCompatibleDC(screen);
     HBITMAP source = CreateCompatibleBitmap(screen, 320, 240), old;
@@ -377,12 +461,12 @@ static void test_dimension_annotations(HWND owner)
     SelectObject(dc, old); DeleteDC(dc); ReleaseDC(NULL, screen);
     data.type = TYPE_DATA; data.format = CF_BITMAP;
     data.format_name = TEXT("BITMAP"); data.data = source;
-    editor = open_image_editor(owner, &data, ID_DIMENSION);
+    editor = open_image_editor(owner, &data, tool);
     pin = editor != NULL ? (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA) : NULL;
     CHECK(pin != NULL, "dimension editor opens");
     if (pin == NULL) { DeleteObject(source); return; }
-    CHECK(GetMenuState(GetSubMenu(pin->menu, 2), ID_DIMENSION, MF_BYCOMMAND) != (UINT)-1 &&
-        SendMessage(pin->toolbar, TB_COMMANDTOINDEX, ID_DIMENSION, 0) >= 0 &&
+    CHECK(GetMenuState(GetSubMenu(pin->menu, 2), tool, MF_BYCOMMAND) != (UINT)-1 &&
+        SendMessage(pin->toolbar, TB_COMMANDTOINDEX, tool, 0) >= 0 &&
         editor_tool_cursor(pin) == LoadCursor(NULL, IDC_CROSS),
         "Dimension is available in menu and toolbar with a crosshair");
     CHECK(pin->current_color == RGB(0, 0, 0), "Dimension starts with black");
@@ -402,7 +486,7 @@ static void test_dimension_annotations(HWND owner)
         POINT wings[4];
         int before = pin->undo_count, j;
         SendMessage(editor, WM_COMMAND, ID_COLOR_BLUE, 0);
-        SendMessage(editor, WM_COMMAND, ID_DIMENSION, 0);
+        SendMessage(editor, WM_COMMAND, tool, 0);
         CHECK(pin->current_color == RGB(0, 0, 0), "selecting Dimension defaults to black");
         SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(from.x, from.y));
         SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(to.x, to.y));
@@ -427,18 +511,35 @@ static void test_dimension_annotations(HWND owner)
             "dimension note stays centered for horizontal, reversed, vertical and diagonal drags");
         SendMessage(pin->text_edit, WM_KEYDOWN, VK_RETURN, 0);
         for (item = pin->artifacts; item != NULL && item->next != NULL; item = item->next) {}
-        CHECK(item != NULL && item->tool == ID_DIMENSION && EqualRect(&item->box, &box) &&
+        CHECK(item != NULL && item->tool == tool && EqualRect(&item->box, &box) &&
             abs(item->start.x - starts[i].x) <= 1 && abs(item->start.y - starts[i].y) <= 1 &&
             abs(item->end.x - ends[i].x) <= 1 && abs(item->end.y - ends[i].y) <= 1 &&
             pin->undo_count == before + 1 && pin->text_edit == NULL &&
             pin->text_edit_font == NULL && pin->text_edit_brush == NULL,
             "Enter saves both dimension endpoints and note in one undo step");
         if (item == NULL) continue;
-        dimension_wings(item->start, item->end, item->stroke, wings);
+        dimension_wings(item->tool, item->start, item->end, text_font_size(item, item->stroke), wings);
+        if (tool == ID_DIMENSION_SLASH) {
+            CHECK(wings[0].x + wings[1].x == item->end.x * 2 &&
+                wings[0].y + wings[1].y == item->end.y * 2 &&
+                wings[2].x + wings[3].x == item->start.x * 2 &&
+                wings[2].y + wings[3].y == item->start.y * 2 &&
+                segment_distance_squared(wings[0], item->start, item->end) > 1,
+                "slash marks cross both endpoints instead of forming arrowheads");
+        }
+        {
+            PIN_ARTIFACT *decoded = NULL;
+            char *json = serialize_annotations(item);
+            CHECK(json != NULL && deserialize_annotations(json, &decoded) && decoded != NULL &&
+                decoded->tool == tool && decoded->start.x == item->start.x &&
+                decoded->end.y == item->end.y && lstrcmp(decoded->text, item->text) == 0,
+                "dimension style, endpoints and note survive saved annotation roundtrip");
+            free_artifacts(decoded); mem_free((void **)&json);
+        }
         bounds = artifact_bounds(item);
         for (j = 0; j < 4; j++) {
             CHECK(artifact_hit(item, wings[j], 0) && PtInRect(&bounds, wings[j]),
-                "both dimension arrowheads are selectable and within selection bounds");
+                "both dimension end marks are selectable and within selection bounds");
         }
         CHECK(artifact_hit(item, (POINT){(box.left + box.right) / 2, (box.top + box.bottom) / 2}, 0),
             "dimension note is selectable");
@@ -451,7 +552,31 @@ static void test_dimension_annotations(HWND owner)
                 bitmap_pixel(pin->bitmap, box.left + max(2, item->stroke), (box.top + box.bottom) / 2) == RGB(255, 255, 245) &&
                 bitmap_pixel(pin->bitmap, (box.left + box.right) / 2, box.top) == item->color &&
                 bitmap_pixel(pin->bitmap, box.left, box.top) == RGB(255, 255, 255),
-                "dimension renders two arrowheads and a filled note with a colored rounded frame");
+                "dimension renders two end marks and a filled note with a colored rounded frame");
+        }
+        {
+            double head_length = segment_distance_squared(wings[0], item->end, item->end);
+            int stroke = item->stroke;
+            item->selected = TRUE; pin->selected_artifact = item;
+            update_properties(pin);
+            set_text_property(pin, text_font_size(item, stroke) * 2, NULL);
+            CHECK(pin->property_live, "dimension text size property applies immediately");
+            item = pin->selected_artifact;
+            dimension_wings(item->tool, item->start, item->end, text_font_size(item, item->stroke), wings);
+            CHECK(item->stroke == stroke &&
+                segment_distance_squared(wings[0], item->end, item->end) > head_length * 3,
+                "doubling dimension text size doubles end marks without changing stroke");
+            bounds = artifact_bounds(item);
+            for (j = 0; j < 4; j++) {
+                CHECK(artifact_hit(item, wings[j], 0) && PtInRect(&bounds, wings[j]),
+                    "resized dimension end marks remain selectable and within bounds");
+            }
+            if (i == 0) {
+                POINT mid = {(item->end.x + wings[0].x) / 2, (item->end.y + wings[0].y) / 2};
+                CHECK(bitmap_pixel(pin->bitmap, mid.x, mid.y) == item->color,
+                    "text size property redraws dimension end marks");
+            }
+            swap_history(pin, TRUE);
         }
         swap_history(pin, TRUE);
         CHECK(pin->undo_count == before && bitmap_pixel(pin->bitmap, 30, 120) == RGB(255, 255, 255),
@@ -481,7 +606,7 @@ static void test_dimension_annotations(HWND owner)
         POINT from = image_to_client(pin, (POINT){20, 120});
         POINT to = image_to_client(pin, (POINT){300, 120});
         int before = pin->undo_count;
-        SendMessage(editor, WM_COMMAND, ID_DIMENSION, 0);
+        SendMessage(editor, WM_COMMAND, tool, 0);
         SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(from.x, from.y));
         SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(to.x, to.y));
         UpdateWindow(editor);
@@ -499,6 +624,299 @@ static void test_dimension_annotations(HWND owner)
             "Escape cancels a dimension without changing history");
     }
     DestroyWindow(editor); DeleteObject(source);
+}
+
+static HWND test_property_picker(PINNED_IMAGE *pin, int id)
+{
+    NMTOOLBAR notification = {0};
+    notification.hdr.hwndFrom = GetDlgItem(pin->properties, id);
+    notification.hdr.idFrom = id;
+    notification.hdr.code = TBN_DROPDOWN;
+    notification.iItem = id;
+    last_color_popup_toggle = last_size_popup_toggle = 0;
+    SendMessage(pin->properties, WM_NOTIFY, id, (LPARAM)&notification);
+    return id == IDC_PIN_PROP_COLOR ? current_color_popup_hwnd :
+        id == IDC_PIN_PROP_FONT ? current_font_popup_hwnd : current_size_popup_hwnd;
+}
+
+static void save_properties_preview(HWND window, const WCHAR *path)
+{
+    RECT bounds;
+    HDC dc = CreateCompatibleDC(NULL), screen = GetDC(NULL);
+    HBITMAP snapshot, old;
+    GetWindowRect(window, &bounds);
+    snapshot = CreateCompatibleBitmap(screen, bounds.right - bounds.left, bounds.bottom - bounds.top);
+    ReleaseDC(NULL, screen);
+    old = SelectObject(dc, snapshot);
+    PrintWindow(window, dc, 0);
+    SelectObject(dc, old);
+    init_gdip();
+    CHECK(save_png(snapshot, path), "properties UI renders to a preview image");
+    shutdown_gdip();
+    DeleteObject(snapshot); DeleteDC(dc);
+}
+
+static void test_annotation_properties(HWND owner, HBITMAP source)
+{
+    DATA_INFO data = {0};
+    PINNED_IMAGE *pin;
+    PIN_ARTIFACT *a, *b, *first;
+    HWND editor, dialog, picker;
+    int count, before;
+    data.type = TYPE_DATA; data.format = CF_BITMAP; data.format_name = TEXT("BITMAP"); data.data = source;
+    editor = pinned_image_open(owner, &data);
+    CHECK(editor != NULL, "properties test opens editor");
+    if (editor == NULL) return;
+    pin = pin_windows;
+    pin->tool = ID_SELECT;
+    a = add_artifact(pin, ID_RECT, (POINT){5, 5}, 2);
+    b = add_artifact(pin, ID_TEXT, (POINT){40, 5}, 4);
+    CHECK(a != NULL && b != NULL, "properties test creates annotations");
+    if (a == NULL || b == NULL) { DestroyWindow(editor); return; }
+    a->end = (POINT){25, 25}; a->box = (RECT){5, 5, 25, 25};
+    b->box = (RECT){40, 5, 75, 35};
+    {
+        POINT click = image_to_client(pin, (POINT){5, 12});
+        SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(click.x, click.y));
+        SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(click.x, click.y));
+    }
+    dialog = pin->properties;
+    CHECK(dialog != NULL && IsWindowVisible(dialog) && IsWindowEnabled(editor),
+        "selecting an annotation opens a nonblocking properties dialog");
+    if (dialog == NULL) { DestroyWindow(editor); return; }
+    CHECK(LOWORD(SendMessage(dialog, DM_GETDEFID, 0, 0)) == IDCANCEL,
+        "Enter defaults to Close rather than reverting live edits");
+    {
+        TBBUTTON button;
+        CHECK(SendDlgItemMessage(dialog, IDC_PIN_PROP_COLOR, TB_GETBUTTON, 0, (LPARAM)&button) &&
+            (button.fsStyle & BTNS_WHOLEDROPDOWN) && pin->property_icons != NULL,
+            "properties uses the same icon dropdown toolbar control as the editor");
+    }
+    CHECK(IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_FILLED)) &&
+        !IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_TEXT)), "single rectangle exposes only its supported properties");
+    before = pin->undo_count;
+    SendMessage(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIN_PROP_FILLED, BN_CLICKED), 0);
+    CHECK(pin->artifacts->tool == ID_FILLED_RECT && pin->undo_count == before + 1,
+        "filled property applies immediately as one undoable change");
+    set_property_style(pin, TRUE, RGB(0, 150, 70));
+    set_property_style(pin, FALSE, 7);
+    CHECK(pin->artifacts->color == RGB(0, 150, 70) && pin->artifacts->stroke == 7 &&
+        pin->undo_count == before + 1, "live edits share one undo snapshot");
+    CHECK(IsWindowEnabled(GetDlgItem(dialog, IDOK)) &&
+        lstrcmp(pin_text(IDS_PIN_PROP_REVERT), TEXT("Revert")) == 0, "Revert replaces Apply and enables after an edit");
+    save_properties_preview(dialog, L"Release\\properties-filled.png");
+    SendMessage(dialog, WM_COMMAND, IDOK, 0);
+    CHECK(pin->artifacts->tool == ID_RECT && pin->artifacts->stroke == 2 &&
+        pin->artifacts->color == PIN_DEFAULT_COLOR && pin->undo_count == before &&
+        pin->artifacts->selected && IsWindowVisible(dialog) && !IsWindowEnabled(GetDlgItem(dialog, IDOK)),
+        "Revert restores all live properties and keeps the selection editable");
+    SendMessage(dialog, WM_COMMAND, MAKEWPARAM(IDC_PIN_PROP_FILLED, BN_CLICKED), 0);
+    swap_history(pin, TRUE);
+    CHECK(pin->artifacts->tool == ID_RECT && !IsWindowVisible(dialog),
+        "undo restores properties and hides the panel after clearing selection");
+    swap_history(pin, FALSE);
+    a = pin->artifacts; b = a->next;
+    a->selected = b->selected = TRUE; pin->selected_artifact = b;
+    b->color = RGB(0, 0, 255);
+    update_properties(pin);
+    CHECK(common_properties(pin, &first, &count) == (PROP_COLOR | PROP_SIZE) && count == 2 &&
+        !IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_TEXT)) &&
+        !IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_FILLED)) &&
+        (pin->property_mixed & (PROP_COLOR | PROP_SIZE)) == (PROP_COLOR | PROP_SIZE),
+        "mixed selection exposes the property intersection and marks mixed values");
+    picker = test_property_picker(pin, IDC_PIN_PROP_COLOR);
+    CHECK(picker != NULL && GetWindow(picker, GW_OWNER) == dialog && IsWindowEnabled(editor),
+        "properties opens the existing toolbar color palette without blocking the editor");
+    if (picker != NULL) {
+        RECT swatch = get_swatch_rect(10);
+        COLORREF default_color = pin->current_color;
+        SendMessage(picker, WM_LBUTTONUP, 0, MAKELPARAM(swatch.left + 2, swatch.top + 2));
+        CHECK(pin->property_color == standard_colors[10] && pin->current_color == default_color,
+            "properties palette applies selected color without changing drawing defaults");
+    }
+    a = pin->artifacts; b = a->next;
+    CHECK(a->color == standard_colors[10] && b->color == a->color && a->stroke == 2 && b->stroke == 4,
+        "editing one common property preserves differing untouched values");
+    before = pin->undo_count;
+    picker = test_property_picker(pin, IDC_PIN_PROP_SIZE);
+    CHECK(picker != NULL && GetWindow(picker, GW_OWNER) == dialog && popup_stroke_width(picker, pin) == 0,
+        "properties opens the existing stroke picker and leaves mixed sizes unselected");
+    if (picker != NULL) {
+        int default_stroke = pin->stroke_width;
+        SetDlgItemText(picker, ID_WIDTH_EDIT, TEXT("101"));
+        apply_custom_width(picker);
+        CHECK(IsWindow(picker) && pin->property_changes == 0 && pin->undo_count == before && a->stroke == 2 && b->stroke == 4,
+            "invalid property input cannot alter annotations or history");
+        SendMessage(picker, WM_COMMAND, MAKEWPARAM(ID_WIDTH_3, BN_CLICKED), 0);
+        CHECK(pin->property_stroke == 3 && pin->stroke_width == default_stroke,
+            "properties stroke presets apply image pixels without changing drawing defaults");
+    }
+    CHECK(pin->artifacts->stroke == 3 && pin->artifacts->next->stroke == 3,
+        "common size updates every selected item in image pixels");
+    SendMessage(dialog, WM_COMMAND, IDOK, 0);
+    CHECK(pin->artifacts->color == PIN_DEFAULT_COLOR && pin->artifacts->next->color == RGB(0, 0, 255) &&
+        pin->artifacts->stroke == 2 && pin->artifacts->next->stroke == 4,
+        "Revert restores each selected item's original mixed values");
+    set_property_style(pin, TRUE, standard_colors[10]);
+    set_property_style(pin, FALSE, 3);
+    a = pin->artifacts; b = a->next;
+    a->selected = FALSE; pin->selected_artifact = b;
+    update_properties(pin);
+    CHECK(IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_TEXT)), "single text exposes editable content");
+    CHECK(IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_TEXT_SIZE)) &&
+        IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_FONT)), "text selection exposes independent size and font dropdowns");
+    save_properties_preview(dialog, L"Release\\properties-panel.png");
+    SendDlgItemMessage(dialog, IDC_PIN_PROP_TEXT, EM_SETSEL, 0, -1);
+    SendDlgItemMessage(dialog, IDC_PIN_PROP_TEXT, EM_REPLACESEL, TRUE, (LPARAM)TEXT("Updated\r\ntext"));
+    CHECK(lstrcmp(pin->artifacts->next->text, TEXT("Updated\r\ntext")) == 0,
+        "text property applies multiline content");
+    {
+        DWORD start, end;
+        SendDlgItemMessage(dialog, IDC_PIN_PROP_TEXT, EM_SETSEL, 3, 3);
+        SendDlgItemMessage(dialog, IDC_PIN_PROP_TEXT, EM_REPLACESEL, TRUE, (LPARAM)TEXT("!"));
+        SendDlgItemMessage(dialog, IDC_PIN_PROP_TEXT, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
+        CHECK(start == 4 && end == 4 && lstrcmp(pin->artifacts->next->text, TEXT("Upd!ated\r\ntext")) == 0,
+            "live text updates preserve the typing caret");
+    }
+    picker = test_property_picker(pin, IDC_PIN_PROP_TEXT_SIZE);
+    CHECK(picker != NULL && text_size_popup(picker), "text size opens themed type-size presets");
+    if (picker != NULL) {
+        save_properties_preview(picker, L"Release\\properties-text-size.png");
+        SetDlgItemText(picker, ID_WIDTH_EDIT, TEXT("513"));
+        before = pin->undo_count;
+        apply_custom_width(picker);
+        CHECK(IsWindow(picker) && pin->property_changes == 0 && pin->undo_count == before,
+            "text size outside its supported range is rejected without document changes");
+        SendMessage(picker, WM_COMMAND, MAKEWPARAM(ID_WIDTH_4, BN_CLICKED), 0);
+    }
+    CHECK(pin->artifacts->next->text_size == 24 && pin->artifacts->next->stroke == 3,
+        "text size changes independently of stroke width");
+    update_properties(pin);
+    picker = test_property_picker(pin, IDC_PIN_PROP_FONT);
+    CHECK(picker != NULL && GetWindow(picker, GW_OWNER) == dialog && IsWindowEnabled(editor),
+        "font dropdown previews installed fonts without blocking the editor");
+    if (picker != NULL) {
+        TCHAR face[LF_FACESIZE];
+        HWND list = GetDlgItem(picker, ID_FONT_LIST);
+        int index = (int)SendMessage(list, LB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)TEXT("Consolas"));
+        if (index == LB_ERR) index = 0;
+        SendMessage(list, LB_SETCURSEL, index, 0);
+        SendMessage(list, LB_GETTEXT, index, (LPARAM)face);
+        save_properties_preview(picker, L"Release\\properties-fonts.png");
+        SendMessage(list, WM_KEYDOWN, VK_RETURN, 0);
+        CHECK(!IsWindow(picker) && lstrcmp(pin->property_font, face) == 0 &&
+            lstrcmp(pin->artifacts->next->font_face, face) == 0, "font choice applies to the selected annotation");
+        swap_history(pin, TRUE);
+        CHECK(pin->artifacts->next->font_face[0] == 0 && pin->artifacts->next->text_size == 24,
+            "undo restores font choice without losing independent text size");
+        swap_history(pin, FALSE);
+        b = pin->artifacts->next;
+        CHECK(lstrcmp(b->font_face, face) == 0 && b->text_size == 24,
+            "redo restores text size and font together with the annotation");
+        b->selected = TRUE; pin->selected_artifact = b; update_properties(pin);
+        begin_text_edit(pin, b, b->box);
+        if (pin->text_edit_font != NULL) {
+            LOGFONT font;
+            GetObject(pin->text_edit_font, sizeof(font), &font);
+            CHECK(lstrcmpi(font.lfFaceName, face) == 0 && font.lfHeight ==
+                -max(1, MulDiv(24, pin->image_rect.right - pin->image_rect.left, pin->width)),
+                "inline editing uses the selected typeface and text size at current zoom");
+        }
+        finish_text_edit(pin, FALSE); update_properties(pin);
+        a = pin->artifacts; a->tool = ID_TEXT; a->selected = TRUE;
+        update_properties(pin);
+        CHECK((pin->property_mixed & PROP_TEXT_SIZE) &&
+            (common_properties(pin, &first, &count) & (PROP_TEXT_SIZE | PROP_FONT)) == (PROP_TEXT_SIZE | PROP_FONT),
+            "text groups expose common typography and mark mixed values");
+        set_text_property(pin, 32, NULL); set_text_property(pin, 0, face);
+        CHECK(pin->artifacts->text_size == 32 && pin->artifacts->next->text_size == 32 &&
+            lstrcmp(pin->artifacts->font_face, face) == 0 && lstrcmp(pin->artifacts->next->font_face, face) == 0,
+            "common typography edits update all selected text annotations");
+        a = pin->artifacts; b = a->next; a->tool = ID_FILLED_RECT; a->selected = FALSE;
+        pin->selected_artifact = b; update_properties(pin);
+        save_properties_preview(dialog, L"Release\\properties-text-style.png");
+    }
+    a = pin->artifacts; b = a->next;
+    b->box = (RECT){40, 5, 75, 35};
+    pin->tool = ID_FRAME_SELECT; pin->drawing = TRUE; pin->drag_mode = 6;
+    pin->frame_additive = FALSE; pin->start = (POINT){0, 0}; pin->last = (POINT){30, 30};
+    update_properties(pin);
+    CHECK(common_properties(pin, &first, &count) == (PROP_COLOR | PROP_SIZE | PROP_FILLED) && first == a && count == 1 &&
+        !IsWindowEnabled(GetDlgItem(dialog, IDC_PIN_PROP_COLOR)),
+        "frame preview uses current frame targets and preserves mouse capture until release");
+    pin->last = (POINT){79, 39}; update_properties(pin);
+    CHECK(common_properties(pin, &first, &count) == (PROP_COLOR | PROP_SIZE) && count == 2 &&
+        !IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_FILLED)), "expanding frame removes noncommon properties live");
+    pin->frame_additive = TRUE; pin->last = (POINT){30, 30};
+    CHECK(common_properties(pin, &first, &count) == (PROP_COLOR | PROP_SIZE) && count == 2,
+        "additive frame preview includes existing selection");
+    cancel_annotation_drag(pin);
+    CHECK(b->selected && !a->selected && IsWindowEnabled(GetDlgItem(dialog, IDC_PIN_PROP_TEXT)),
+        "cancelled frame preserves selection and reenables the panel");
+    a->selected = TRUE; a->tool = ID_INVERT;
+    update_properties(pin);
+    CHECK(common_properties(pin, &first, &count) == 0 && !IsWindowVisible(GetDlgItem(dialog, IDC_PIN_PROP_COLOR)),
+        "effects without style properties cannot receive unsupported common edits");
+    a->deleted = TRUE;
+    CHECK(common_properties(pin, &first, &count) == (PROP_COLOR | PROP_SIZE | PROP_TEXT | PROP_TEXT_SIZE | PROP_FONT) && count == 1,
+        "deleted annotations are excluded from property intersection");
+    b->tool = ID_STEP; b->number = 1; update_properties(pin);
+    before = pin->undo_count;
+    SetDlgItemText(dialog, IDC_PIN_PROP_NUMBER, TEXT("2147483648"));
+    CHECK(!apply_properties(pin) && pin->undo_count == before, "step number overflow is rejected");
+    SetDlgItemText(dialog, IDC_PIN_PROP_NUMBER, TEXT("12"));
+    CHECK(pin->artifacts->next->number == 12, "step number property applies immediately");
+    {
+        TCHAR value[16];
+        int i;
+        for (i = 13; i < 40; i++) {
+            wsprintf(value, TEXT("%d"), i);
+            SetDlgItemText(dialog, IDC_PIN_PROP_NUMBER, value);
+        }
+        CHECK(pin->undo_count == min(before + 1, HISTORY_MAX),
+            "typing many live values retains one undo snapshot beyond the history limit");
+        SetDlgItemText(dialog, IDC_PIN_PROP_NUMBER, TEXT("0"));
+        CHECK(pin->artifacts->next->number == 39, "invalid live number retains the last valid value");
+        SendMessage(dialog, WM_COMMAND, IDOK, 0);
+        CHECK(pin->artifacts->next->number == 1 && pin->artifacts->next->selected,
+            "Revert restores the initial number after many live edits");
+        SetDlgItemText(dialog, IDC_PIN_PROP_NUMBER, TEXT("12"));
+        SendMessage(dialog, WM_COMMAND, IDCANCEL, 0);
+        CHECK(!IsWindow(dialog) && pin->artifacts->next->number == 12 && !pin->property_live,
+            "Close keeps live edits and ends the Revert session");
+        pin->artifacts->next->selected = TRUE;
+        pin->selected_artifact = pin->artifacts->next;
+        update_properties(pin); dialog = pin->properties;
+        CHECK(!IsWindowEnabled(GetDlgItem(dialog, IDOK)), "reopened Properties starts a fresh Revert session");
+    }
+    SendMessage(editor, WM_COMMAND, ID_DELETE_MARK, 0);
+    CHECK(!IsWindowVisible(dialog), "deleting selection hides properties");
+    {
+        const int tools[] = {ID_RECT, ID_PEN, ID_TEXT};
+        PIN_ARTIFACT *previous = NULL;
+        int i;
+        for (i = 0; i < ARRAYSIZE(tools); i++) {
+            POINT start, end;
+            RECT bounds;
+            SendMessage(editor, WM_COMMAND, tools[i], 0);
+            start = image_to_client(pin, (POINT){5, 5});
+            end = image_to_client(pin, (POINT){25, 25});
+            SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(start.x, start.y));
+            SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(end.x, end.y));
+            if (tools[i] == ID_TEXT && pin->text_edit != NULL) {
+                SetWindowText(pin->text_edit, TEXT("New text"));
+                SendMessage(editor, WM_FINISH_TEXT, TRUE, 0);
+            }
+            CHECK(pin->selected_artifact != NULL && pin->selected_artifact->selected &&
+                pin->selected_artifact->tool == tools[i] && selected_bounds(pin->artifacts, &bounds) == 1 &&
+                IsWindowVisible(dialog) && pin->tool == tools[i],
+                "new shape, pen stroke and committed text stay selected with properties while retaining the drawing tool");
+            CHECK(previous == NULL || !previous->selected, "adding the next annotation deselects the previous one");
+            previous = pin->selected_artifact;
+        }
+    }
+    DestroyWindow(editor);
+    CHECK(!IsWindow(dialog), "closing editor destroys its properties dialog");
 }
 
 static void test_pinned_image_edit_core(HWND owner)
@@ -521,6 +939,7 @@ static void test_pinned_image_edit_core(HWND owner)
     DeleteDC(dc);
     ReleaseDC(NULL, screen);
     test_frame_annotations(source);
+    test_annotation_properties(owner, source);
     {
         BITMAPINFO info = {0};
         DWORD *pixels = NULL;
@@ -1141,8 +1560,8 @@ static void test_pinned_image_edit_core(HWND owner)
         RECT toolbar_rect;
         CHECK(toolbar != NULL && (GetWindowLong(toolbar, GWL_STYLE) & TBSTYLE_FLAT),
             "editor uses a flat native toolbar");
-        CHECK(toolbar != NULL && SendMessage(toolbar, TB_BUTTONCOUNT, 0, 0) == 37 &&
-            ImageList_GetImageCount((HIMAGELIST)SendMessage(toolbar, TB_GETIMAGELIST, 0, 0)) == 33,
+        CHECK(toolbar != NULL && SendMessage(toolbar, TB_BUTTONCOUNT, 0, 0) == ARRAYSIZE(toolbar_commands) + 6 &&
+            ImageList_GetImageCount((HIMAGELIST)SendMessage(toolbar, TB_GETIMAGELIST, 0, 0)) == ARRAYSIZE(toolbar_icons) + 2,
             "undo, redo, editing tools, color and size dropdowns have icons");
         CHECK(toolbar != NULL &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_INVERT, 0) ==
@@ -1167,6 +1586,9 @@ static void test_pinned_image_edit_core(HWND owner)
                 SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ARROW, 0) + 1 &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_DIMENSION, 0) ==
                 SendMessage(toolbar, TB_COMMANDTOINDEX, ID_CALLOUT, 0) + 1 &&
+            SendMessage(toolbar, TB_COMMANDTOINDEX, ID_DIMENSION_SLASH, 0) ==
+                SendMessage(toolbar, TB_COMMANDTOINDEX, ID_DIMENSION, 0) + 1 &&
+            FindResource(hInst, MAKEINTRESOURCE(IDR_PIN_DIMENSION_SLASH), RT_GROUP_ICON) != NULL &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_ROTATE, 0) ==
                 SendMessage(toolbar, TB_COMMANDTOINDEX, ID_CROP, 0) + 1 &&
             SendMessage(toolbar, TB_COMMANDTOINDEX, ID_COPY, 0) ==
@@ -2075,6 +2497,31 @@ static void test_insert_menu_step(HWND hwnd)
         CHECK(lstrcmp(label, insert_case == 0 ? TEXT("First && existing") : insert_case == 9 ? TEXT("Second existing") : TEXT(" ")) == 0,
             "favourite label is literal and placeholder is blank");
     }
+    if ((insert_phase == 1 && (insert_case == 4 || insert_case == 10)) ||
+        (insert_phase == 3 && insert_case != 3)) {
+        MENUITEMINFO info = {0};
+        RECT row;
+        BOOL previews = option.menu_show_icon == 1 && option.menu_show_bitmap == 1;
+        info.cbSize = sizeof(info);
+        info.fMask = MIIM_BITMAP;
+        CHECK(GetMenuItemInfo(menu, insert_phase == 1 ? index : 3, TRUE, &info) &&
+            (previews ? info.hbmpItem != NULL : info.hbmpItem == NULL),
+            "root and nested favourite bitmap previews respect display settings");
+        if (previews && info.hbmpItem != NULL) {
+            BITMAP bitmap;
+            GetObject(info.hbmpItem, sizeof(bitmap), &bitmap);
+            CHECK(bitmap_pixel(info.hbmpItem, bitmap.bmWidth / 2, bitmap.bmHeight / 2) == RGB(35, 120, 210),
+                "favourite destination preview contains the saved bitmap pixels");
+            CHECK(GetMenuItemRect(NULL, menu, insert_phase == 1 ? index : 3, &row) &&
+                row.bottom - row.top >= bitmap.bmHeight,
+                "native destination row fits the whole thumbnail");
+        }
+        if (insert_phase == 3) {
+            CHECK(GetMenuItemInfo(menu, 2, TRUE, &info) && info.hbmpItem == NULL &&
+                GetMenuItemInfo(menu, 5, TRUE, &info) && info.hbmpItem == NULL,
+                "blank insertion slots and non-bitmap favourites retain text-only rows");
+        }
+    }
     SendMessage(idle_menu, 0x01E5, index, 0);
     key(hwnd, insert_phase == 3 || (insert_phase == 1 && (insert_case == 4 || insert_case == 7 || insert_case == 10)) ?
         VK_RETURN : VK_RIGHT);
@@ -2083,6 +2530,7 @@ static void test_insert_menu_step(HWND hwnd)
 
 static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == WM_REGIST_SAVE) return !fail_favourite_save;
     if (msg == WM_ITEM_TO_CLIPBOARD) {
         clipboard_selection = (DATA_INFO *)lp;
         return 0; /* Verify normal item dispatch without touching the clipboard. */
@@ -2424,6 +2872,297 @@ static DWORD history_db_file_size(const TCHAR *path)
     return info.nFileSizeLow;
 }
 
+static void test_annotation_badge(DATA_INFO *item)
+{
+    MENU_ITEM_INFO info = {0};
+    DRAWITEMSTRUCT draw = {0};
+    HDC dc = CreateCompatibleDC(NULL);
+    HBITMAP bitmap = create_solid_bitmap(320, 64, RGB(255, 255, 255));
+    HBITMAP previous = SelectObject(dc, bitmap), plain;
+    int id = item->image_edit_id, icons = option.menu_show_icon, x, y, differences = 0;
+    int outside_badge = 0, size = Scale(14), badge_left = Scale(option.menu_icon_margin), badge_top;
+    info.set_di = item; info.show_di = item->child;
+    info.text = TEXT("Annotated bitmap");
+    format_get_menu_bitmap(info.show_di);
+    if (info.show_di->menu_bitmap == NULL) {
+        info.show_di->menu_bitmap = scale_bitmap(info.show_di->data, 48, 36);
+        info.show_di->menu_bmp_width = 48; info.show_di->menu_bmp_height = 36;
+        info.show_di->free_bitmap = TRUE;
+    }
+    info.show_bitmap = info.show_di->menu_bitmap != NULL;
+    badge_left = max(badge_left, badge_left + info.show_di->menu_bmp_width - size);
+    badge_top = max(0, 32 - info.show_di->menu_bmp_height / 2 + info.show_di->menu_bmp_height - size);
+    draw.CtlType = ODT_MENU; draw.hDC = dc; draw.itemData = (ULONG_PTR)&info;
+    draw.rcItem = (RECT){0, 0, 320, 64};
+    option.menu_show_icon = 1;
+    item->image_edit_id = 0;
+    CHECK(menu_drawitem(&draw), "plain bitmap menu row renders");
+    SelectObject(dc, previous);
+    plain = clone_bitmap(bitmap, NULL, NULL);
+    SelectObject(dc, bitmap);
+    item->image_edit_id = id;
+    CHECK(menu_drawitem(&draw), "annotated bitmap menu row renders");
+    SelectObject(dc, previous);
+    for (y = 0; y < 64; y++) for (x = 0; x < 320; x++)
+        if (bitmap_pixel(plain, x, y) != bitmap_pixel(bitmap, x, y)) {
+            differences++;
+            if (x < badge_left - 1 || x > badge_left + size ||
+                y < badge_top - 1 || y > badge_top + size) outside_badge++;
+        }
+    CHECK(differences > 0 && LoadIcon(hInst, MAKEINTRESOURCE(IDR_PIN_PEN)) != NULL,
+        "annotated menu thumbnail has a visible pencil badge");
+    CHECK(outside_badge == 0, "annotation badge stays in the thumbnail's bottom-right corner");
+    CHECK(save_png(bitmap, TEXT("Release\\annotation-pencil-badge.png")), "pencil badge visual preview saves");
+    option.menu_show_icon = icons;
+    DeleteObject(plain); DeleteObject(bitmap); DeleteDC(dc);
+}
+
+static void test_saved_image_annotations(HWND owner)
+{
+    TCHAR directory[MAX_PATH], temp_root[MAX_PATH], database[MAX_PATH], favourites[MAX_PATH], error[BUF_SIZE] = {0};
+    DATA_INFO *old_history = history_data.child, *old_favourites = regist_data.child;
+    DATA_INFO *item, *favourite, *loaded = NULL;
+    PINNED_IMAGE *pin;
+    PIN_ARTIFACT *dimension, *pen, *magnifier, *decoded = NULL;
+    HBITMAP source = create_solid_bitmap(320, 240, RGB(255, 255, 255));
+    HWND editor;
+    sqlite3 *inspect = NULL;
+    sqlite3_stmt *stmt = NULL;
+    char *json;
+    int edit_id, history_id, favourite_edit, i;
+    HBITMAP initial = NULL, base = NULL;
+    char *layer = NULL;
+    GetTempPath(MAX_PATH, temp_root);
+    GetTempFileName(temp_root, TEXT("cla"), 0, directory);
+    DeleteFile(directory); CreateDirectory(directory, NULL);
+    wsprintf(database, TEXT("%s\\history.db"), directory);
+    wsprintf(favourites, TEXT("%s\\favourites.dat"), directory);
+    db_history_close();
+    CHECK(sqlite3_open16(database, &inspect) == SQLITE_OK && sqlite3_exec(inspect,
+        "CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, "
+        "window_title TEXT, title TEXT NOT NULL, pinned INTEGER DEFAULT 0, total_size INTEGER NOT NULL, text_content TEXT);",
+        NULL, NULL, NULL) == SQLITE_OK, "legacy image database fixture initializes without layer columns");
+    sqlite3_close(inspect); inspect = NULL;
+    CHECK(db_history_init(directory), "image layer upgrade opens a legacy database");
+    init_gdip();
+    history_data.child = regist_data.child = NULL;
+    item = data_create_item(TEXT("Annotated image"), TRUE, error);
+    CHECK(item != NULL && source != NULL, "saved annotation fixture allocates");
+    if (item == NULL || source == NULL) goto cleanup;
+    item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(source, NULL, NULL), 0, FALSE, error);
+    history_data.child = item;
+    CHECK(item->child != NULL && db_history_save_item(item), "legacy bitmap saves before annotation editing");
+    editor = pinned_image_open(owner, item);
+    CHECK(editor != NULL, "stored History bitmap opens for annotation editing");
+    if (editor == NULL) goto cleanup;
+    pin = (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA);
+    CHECK(begin_change(pin), "saved annotation change records undo");
+    dimension = add_artifact(pin, ID_DIMENSION, (POINT){20, 120}, 3);
+    dimension->end = (POINT){300, 120}; dimension->box = (RECT){100, 95, 220, 145};
+    dimension->text = alloc_copy(TEXT("\x0420\x0430\x0437\x043c\x0435\x0440 \"A\" \\ 10\r\nmm"));
+    dimension->text_size = 24; lstrcpy(dimension->font_face, TEXT("Consolas"));
+    pen = add_artifact(pin, ID_PEN, (POINT){10, 10}, 2);
+    append_artifact_point(pen, (POINT){10, 10}); append_artifact_point(pen, (POINT){25, 15});
+    pen->end = (POINT){25, 15};
+    magnifier = add_artifact(pin, ID_MAGNIFY, (POINT){70, 40}, 2);
+    magnifier->end = (POINT){90, 60}; magnifier->box = (RECT){0, 0, 8, 8};
+    magnifier->magnified_source = clone_bitmap(source, NULL, NULL);
+    json = serialize_annotations(pin->artifacts);
+    CHECK(json != NULL && deserialize_annotations(json, &decoded) && decoded != NULL &&
+        decoded->tool == ID_DIMENSION && decoded->text_size == 24 && decoded->stroke == 3 &&
+        lstrcmp(decoded->text, dimension->text) == 0 && lstrcmp(decoded->font_face, TEXT("Consolas")) == 0 &&
+        decoded->next->count == 2 && decoded->next->points[1].x == 25 &&
+        decoded->next->next->magnified_source != NULL,
+        "annotation JSON round-trips geometry, Unicode, escaped text, font, pen points and magnifier pixels");
+    free_artifacts(decoded); decoded = NULL;
+    if (json != NULL) {
+        PIN_ARTIFACT single = *dimension;
+        char *text_json;
+        single.next = NULL;
+        text_json = serialize_annotations(&single);
+        /* Check every truncated prefix of an ordinary text annotation. */
+        for (i = 0; text_json != NULL && i < (int)strlen(text_json); i++) {
+            char saved = text_json[i]; text_json[i] = 0;
+            CHECK(!deserialize_annotations(text_json, &decoded), "truncated annotation JSON is rejected");
+            text_json[i] = saved;
+        }
+        mem_free((void **)&text_json);
+    }
+    CHECK(!deserialize_annotations("{\"version\":2,\"artifacts\":[]}", &decoded) &&
+        !deserialize_annotations("{\"version\":1,\"artifacts\":[{}]}", &decoded),
+        "unsupported versions and incomplete annotations cannot become editable objects");
+    mem_free((void **)&json);
+    CHECK(rebuild_artifacts(pin), "saved annotation fixture renders");
+    dimension->selected = TRUE; pin->selected_artifact = dimension; update_properties(pin);
+    SendMessage(pin->properties, WM_COMMAND, IDCANCEL, 0);
+    CHECK(pin->properties == NULL && pin->selected_artifact == NULL && !dimension->selected,
+        "Properties Close clears the annotation selection");
+    dimension->selected = TRUE; pin->selected_artifact = dimension; update_properties(pin);
+    SendMessage(pin->properties, WM_CLOSE, 0, 0);
+    CHECK(pin->properties == NULL && pin->selected_artifact == NULL && !dimension->selected,
+        "Properties window X clears the annotation selection");
+    CHECK(replace_source(pin) && item->image_edit_id > 0 && pin->artifacts != NULL && !pin->dirty,
+        "saving History retains editable objects and stores the merged bitmap");
+    edit_id = item->image_edit_id;
+    history_id = (int)item->param1;
+    test_annotation_badge(item);
+    CHECK(sqlite3_open16(database, &inspect) == SQLITE_OK && sqlite3_prepare_v2(inspect,
+        "SELECT initial, merged, annotations FROM image_edits WHERE id = ?;", -1, &stmt, NULL) == SQLITE_OK,
+        "three saved image representations are available in the database");
+    sqlite3_bind_int(stmt, 1, edit_id);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        HBITMAP saved_initial = png_to_bitmap(sqlite3_column_blob(stmt, 0), sqlite3_column_bytes(stmt, 0));
+        HBITMAP saved_merged = png_to_bitmap(sqlite3_column_blob(stmt, 1), sqlite3_column_bytes(stmt, 1));
+        CHECK(saved_initial != NULL && saved_merged != NULL &&
+            bitmap_pixel(saved_initial, 30, 120) == RGB(255, 255, 255) &&
+            bitmap_pixel(saved_merged, 30, 120) == dimension->color &&
+            deserialize_annotations((const char *)sqlite3_column_text(stmt, 2), &decoded),
+            "database stores the initial image, merged image and editable JSON as distinct representations");
+        if (saved_initial != NULL) DeleteObject(saved_initial);
+        if (saved_merged != NULL) DeleteObject(saved_merged);
+        free_artifacts(decoded); decoded = NULL;
+    } else CHECK(FALSE, "three-version image snapshot exists");
+    sqlite3_finalize(stmt); stmt = NULL;
+    sqlite3_close(inspect); inspect = NULL;
+    favourite = data_item_copy(item, FALSE, FALSE, error);
+    CHECK(favourite != NULL && favourite->image_edit_id == edit_id, "Favourites copies retain the saved layer reference");
+    regist_data.child = favourite;
+    CHECK(file_write_data(favourites, favourite, FALSE, error) && file_read_data(favourites, &loaded, error) &&
+        loaded != NULL && loaded->image_edit_id == edit_id,
+        "Favourites file round-trip preserves the layer reference with legacy options intact");
+    data_free(regist_data.child); regist_data.child = loaded; loaded = NULL;
+    DestroyWindow(editor);
+    db_history_close();
+    data_free(history_data.child); history_data.child = NULL;
+    CHECK(db_history_init(directory) && db_history_load_recent(10, &history_data.child) == 1 &&
+        history_data.child->image_edit_id == edit_id,
+        "annotation metadata and pencil marker survive database restart and lazy loading");
+    item = history_data.child;
+    editor = pinned_image_open(owner, item);
+    CHECK(editor != NULL, "closed saved History image reopens");
+    if (editor == NULL) goto cleanup;
+    pin = (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA);
+    dimension = pin->artifacts;
+    CHECK(dimension != NULL && dimension->tool == ID_DIMENSION && dimension->text_size == 24 &&
+        lstrcmp(dimension->font_face, TEXT("Consolas")) == 0 && pin->selected_artifact == NULL &&
+        bitmap_pixel(pin->initial, 30, 120) == RGB(255, 255, 255) &&
+        bitmap_pixel(pin->original, 30, 120) == RGB(255, 255, 255) &&
+        bitmap_pixel(pin->bitmap, 30, 120) == dimension->color,
+        "reopening restores original pixels, merged pixels and selectable annotation objects independently");
+    {
+        char *valid_layer = serialize_annotations(pin->artifacts);
+        CHECK(sqlite3_open16(database, &inspect) == SQLITE_OK && sqlite3_prepare_v2(inspect,
+            "UPDATE image_edits SET annotations = ? WHERE id = ?;", -1, &stmt, NULL) == SQLITE_OK,
+            "corrupt layer fixture prepares");
+        sqlite3_bind_text(stmt, 1, "{\"version\":999,\"artifacts\":[]}", -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, edit_id);
+        CHECK(sqlite3_step(stmt) == SQLITE_DONE && pinned_image_open(owner, regist_data.child) == NULL &&
+            IsWindow(editor) && pin->source_item == item && pin->artifacts == dimension,
+            "unsupported saved layer cannot flatten annotations or replace the current editor");
+        sqlite3_reset(stmt);
+        sqlite3_bind_text(stmt, 1, valid_layer, -1, SQLITE_TRANSIENT);
+        CHECK(sqlite3_step(stmt) == SQLITE_DONE, "valid layer restores after corrupt layer check");
+        sqlite3_finalize(stmt); stmt = NULL;
+        sqlite3_close(inspect); inspect = NULL;
+        mem_free((void **)&valid_layer);
+    }
+    dimension->selected = TRUE; pin->selected_artifact = dimension; update_properties(pin);
+    set_text_property(pin, 32, NULL);
+    CHECK(pin->selected_artifact->text_size == 32, "reopened dimension properties remain editable");
+    CHECK(sqlite3_open16(database, &inspect) == SQLITE_OK && sqlite3_exec(inspect,
+        "CREATE TRIGGER reject_image_save BEFORE INSERT ON item_formats BEGIN SELECT RAISE(ABORT, 'test'); END;",
+        NULL, NULL, NULL) == SQLITE_OK, "failed merged image write fixture installs");
+    {
+        HANDLE old_bitmap = item->child->data;
+        CHECK(!replace_source(pin) && pin->dirty && item->image_edit_id == edit_id &&
+            item->param1 == history_id && item->child->data == old_bitmap,
+            "failed save rolls back original, merged bitmap and JSON together while retaining open edits");
+    }
+    CHECK(sqlite3_exec(inspect, "DROP TRIGGER reject_image_save;", NULL, NULL, NULL) == SQLITE_OK,
+        "failed save fixture removes");
+    sqlite3_close(inspect); inspect = NULL;
+    swap_history(pin, TRUE);
+    pin->dirty = FALSE;
+    CHECK(pinned_image_open(owner, regist_data.child) == editor && pin->artifacts != NULL,
+        "saved Favourite opens its editable layer in the existing editor");
+    dimension = pin->artifacts; dimension->selected = TRUE; pin->selected_artifact = dimension; update_properties(pin);
+    set_text_property(pin, 48, NULL);
+    CHECK(pin->selected_artifact->text_size == 48, "closed saved Favourite supports property editing");
+    fail_favourite_save = TRUE;
+    {
+        HANDLE old_bitmap = regist_data.child->child->data;
+        CHECK(!replace_source(pin) && pin->dirty && regist_data.child->image_edit_id == edit_id &&
+            regist_data.child->child->data == old_bitmap,
+            "failed Favourites file save preserves the existing merged image and layer reference");
+    }
+    fail_favourite_save = FALSE;
+    CHECK(replace_source(pin), "closed saved Favourite supports saving after a failed file write");
+    favourite_edit = regist_data.child->image_edit_id;
+    CHECK(favourite_edit != edit_id && item->image_edit_id == edit_id,
+        "editing a Favourite creates its own snapshot without changing the History annotation");
+    CHECK(file_write_data(favourites, regist_data.child, FALSE, error), "edited Favourite saves its new layer reference");
+    DestroyWindow(editor);
+    db_history_close();
+    data_free(regist_data.child); regist_data.child = NULL;
+    CHECK(db_history_init(directory) && file_read_data(favourites, &regist_data.child, error),
+        "edited Favourite restores after database and file restart");
+    editor = pinned_image_open(owner, regist_data.child);
+    CHECK(editor != NULL && pin_windows->artifacts != NULL && pin_windows->artifacts->text_size == 48,
+        "Favourite reopens with its independently edited annotation size");
+    if (editor != NULL) {
+        DATA_INFO *clipboard_item;
+        history_clipboard_mock = TRUE; history_clipboard_owner = owner;
+        history_clipboard_sequence = 19000;
+        SendMessage(editor, WM_COMMAND, ID_COPY_KEEP, 0);
+        CHECK(IsWindow(editor) && last_copy_edit_id > 0,
+            "Copy and keep retains the editor and associates its annotation snapshot with the clipboard");
+        CHECK(last_copy_sequence == history_clipboard_sequence,
+            "Copy and keep records the published sequence after CloseClipboard");
+        if (copied_bitmap != NULL) { DeleteObject(copied_bitmap); copied_bitmap = NULL; }
+        SendMessage(editor, WM_COMMAND, ID_COPY, 0);
+        CHECK(!IsWindow(editor) && last_copy_edit_id > 0, "Copy and close saves an editable snapshot before closing");
+        CHECK(last_copy_sequence == history_clipboard_sequence,
+            "Copy and close records the published sequence after CloseClipboard");
+        /* Capture an editor-owned clipboard through the real history entry point. */
+        capture_formats[0] = CF_BITMAP; capture_format_count = 1;
+        capture_marker = copied_bitmap;
+        CHECK(clipboard_to_history(owner), "editor-owned clipboard passes through history capture");
+        history_clipboard_mock = FALSE;
+        capture_format_count = 0; capture_marker = NULL;
+        clipboard_item = history_data.child;
+        CHECK(clipboard_item != NULL && clipboard_item->image_edit_id == last_copy_edit_id &&
+            clipboard_item->param1 > 0 && pin_windows == NULL,
+            "editor-owned clipboard retains its saved layer without automatically reopening");
+        test_annotation_badge(clipboard_item);
+        editor = pinned_image_open(owner, clipboard_item);
+        CHECK(editor != NULL && pin_windows->artifacts != NULL && pin_windows->artifacts->text_size == 48,
+            "Copy and close result reopens with editable annotations");
+        if (editor != NULL) DestroyWindow(editor);
+        if (copied_bitmap != NULL) { DeleteObject(copied_bitmap); copied_bitmap = NULL; }
+    }
+    CHECK(db_history_delete_item(history_id) && db_history_trim(1) &&
+        db_history_load_image_edit(favourite_edit, &initial, &base, &layer),
+        "history deletion and trimming preserve annotation layers referenced by Favourites");
+    if (initial != NULL) DeleteObject(initial); if (base != NULL) DeleteObject(base);
+    initial = base = NULL; mem_free((void **)&layer);
+    data_free(regist_data.child); regist_data.child = NULL;
+    CHECK(db_history_trim(1) && !db_history_load_image_edit(favourite_edit, &initial, &base, &layer),
+        "removing the last reference reclaims saved image snapshots");
+cleanup:
+    pinned_image_close_all();
+    sqlite3_finalize(stmt); if (inspect != NULL) sqlite3_close(inspect);
+    data_free(history_data.child); data_free(regist_data.child); data_free(loaded);
+    history_data.child = old_history; regist_data.child = old_favourites;
+    if (source != NULL) DeleteObject(source);
+    db_history_close();
+    DeleteFile(favourites); DeleteFile(database);
+    wsprintf(database, TEXT("%s\\history.db-wal"), directory); DeleteFile(database);
+    wsprintf(database, TEXT("%s\\history.db-shm"), directory); DeleteFile(database);
+    RemoveDirectory(directory);
+    shutdown_gdip();
+    printf("PASS: saved image annotation layers in History and Favourites\n");
+}
+
 static void test_sqlite_space_reclamation(void)
 {
     TCHAR temp_dir[MAX_PATH], db_file[MAX_PATH];
@@ -2663,6 +3402,8 @@ static void test_sqlite_multiple_bitmap_persistence(void)
         DATA_INFO *saved_head = history_data.child;
         int saved_max = option.history_max;
         recovery.bitmap = create_solid_bitmap(18, 9, RGB(123, 45, 67));
+        recovery.initial = clone_bitmap(recovery.bitmap, NULL, NULL);
+        recovery.original = clone_bitmap(recovery.bitmap, NULL, NULL);
         recovery.dirty = TRUE;
         option.history_max = 0;
         CHECK(replace_source(&recovery) && !recovery.dirty && recovery.source_item != NULL &&
@@ -2674,6 +3415,8 @@ static void test_sqlite_multiple_bitmap_persistence(void)
             data_free(recovered);
         }
         DeleteObject(recovery.bitmap);
+        DeleteObject(recovery.initial);
+        DeleteObject(recovery.original);
         option.history_max = saved_max;
     }
     DeleteObject((HBITMAP)item1->child->data);
@@ -2835,6 +3578,11 @@ static void test_favourite_insertions(HWND owner)
 {
     TCHAR error[BUF_SIZE] = {0};
     POINT pt = {300, 200};
+    int icons = option.menu_show_icon, previews = option.menu_show_bitmap;
+    int bitmap_format = format_get_index(TEXT("BITMAP"), 0);
+    FARPROC thumbnail = option.format_info[bitmap_format].func_get_menu_bitmap;
+    /* The harness lacks the production .def exports; use the real thumbnail callback. */
+    option.format_info[bitmap_format].func_get_menu_bitmap = (FARPROC)bitmap_get_menu_bitmap;
     for (insert_case = 0; insert_case < 11; insert_case++) {
         if (insert_case == 8) continue; /* Reserved for bitmap edit context. */
         DATA_INFO *outer = data_create_folder(TEXT("Outer"), error);
@@ -2853,6 +3601,12 @@ static void test_favourite_insertions(HWND owner)
         source->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODETEXT"), payload,
             sizeof(TEXT("Clipboard payload")), FALSE, error);
         source->window_name = alloc_copy(TEXT("Clipboard source window"));
+        first->child = data_create_data(CF_BITMAP, TEXT("BITMAP"),
+            create_solid_bitmap(96, 72, RGB(35, 120, 210)), 0, FALSE, error);
+        anchor->child = data_create_data(CF_BITMAP, TEXT("BITMAP"),
+            create_solid_bitmap(96, 72, RGB(35, 120, 210)), 0, FALSE, error);
+        option.menu_show_icon = insert_case == 10 ? 0 : 1;
+        option.menu_show_bitmap = insert_case == 9 ? 0 : 1;
         regist_data.child = outer;
         outer->next = anchor;
         outer->child = nested;
@@ -2908,6 +3662,9 @@ static void test_favourite_insertions(HWND owner)
         regist_data.child = NULL;
         data_free(source);
     }
+    option.menu_show_icon = icons;
+    option.menu_show_bitmap = previews;
+    option.format_info[bitmap_format].func_get_menu_bitmap = thumbnail;
     printf("PASS: Favourite replacement of first/last nested and root items, hotkeys, blank insertion slots, empty folders and cancellation\n");
 }
 
@@ -3140,6 +3897,7 @@ int main(void)
     if (!ini_get_option(error)) { printf("FAIL: option defaults\n"); return 1; }
     test_pinned_preferences_preserve_options();
     format_initialize(error);
+    test_private_clipboard_capture();
     tooltip_regist(hInst);
     hToolTip = tooltip_create(hInst);
 
@@ -3364,7 +4122,9 @@ int main(void)
     test_favourite_insertions(owner);
     test_bitmap_edit_context(owner);
     test_pinned_image_edit_core(owner);
-    test_dimension_annotations(owner);
+    test_dimension_annotations(owner, ID_DIMENSION);
+    test_dimension_annotations(owner, ID_DIMENSION_SLASH);
+    test_saved_image_annotations(owner);
     DestroyWindow(hToolTip);
     hToolTip = NULL;
     DestroyWindow(owner);

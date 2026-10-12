@@ -10,6 +10,7 @@
 #include <tchar.h>
 #include <shlwapi.h>
 #include <winsqlite/winsqlite3.h>
+#include <limits.h>
 
 #pragma comment(lib, "winsqlite3.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -27,6 +28,7 @@
 
 static sqlite3 *db = NULL;
 extern DATA_INFO history_data;
+extern DATA_INFO regist_data;
 
 /* PNG is private to SQLite; clipboard and .dat serialization stay unchanged. */
 static HANDLE db_format_from_bytes(DATA_INFO *item, const BYTE *bytes, DWORD size)
@@ -122,6 +124,13 @@ BOOL db_history_init(const TCHAR *work_path)
 		"  total_size INTEGER NOT NULL,"
 		"  text_content TEXT"
 		");"
+		"CREATE TABLE IF NOT EXISTS image_edits ("
+		"  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"  initial BLOB NOT NULL,"
+		"  merged BLOB NOT NULL,"
+		"  base BLOB,"
+		"  annotations TEXT NOT NULL"
+		");"
 		"CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);"
 		"CREATE TABLE IF NOT EXISTS item_formats ("
 		"  item_id INTEGER NOT NULL,"
@@ -145,17 +154,20 @@ BOOL db_history_init(const TCHAR *work_path)
 
 	// Upgrade existing database if content_hash column is missing
 	sqlite3_exec(db, "ALTER TABLE items ADD COLUMN content_hash INTEGER;", NULL, NULL, NULL);
+	sqlite3_exec(db, "ALTER TABLE items ADD COLUMN image_edit_id INTEGER DEFAULT 0;", NULL, NULL, NULL);
+	/* Verify the additive upgrade before allowing any writes. */
+	if (sqlite3_exec(db, "SELECT image_edit_id FROM items LIMIT 0;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
 	sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_items_hash ON items(content_hash);", NULL, NULL, NULL);
 
 	// Deduplicate items by content_hash
 	sqlite3_exec(db,
-		"DELETE FROM items WHERE content_hash IS NOT NULL AND content_hash != 0 AND id NOT IN ("
-		"  SELECT MAX(id) FROM items WHERE content_hash IS NOT NULL AND content_hash != 0 GROUP BY content_hash"
+		"DELETE FROM items WHERE image_edit_id = 0 AND content_hash IS NOT NULL AND content_hash != 0 AND id NOT IN ("
+		"  SELECT MAX(id) FROM items WHERE image_edit_id = 0 AND content_hash IS NOT NULL AND content_hash != 0 GROUP BY content_hash"
 		");", NULL, NULL, NULL);
 	// Deduplicate legacy duplicate items
 	sqlite3_exec(db,
-		"DELETE FROM items WHERE text_content IS NOT NULL AND text_content != '' AND id NOT IN ("
-		"  SELECT MAX(id) FROM items WHERE text_content IS NOT NULL AND text_content != '' GROUP BY title, text_content"
+		"DELETE FROM items WHERE image_edit_id = 0 AND text_content IS NOT NULL AND text_content != '' AND id NOT IN ("
+		"  SELECT MAX(id) FROM items WHERE image_edit_id = 0 AND text_content IS NOT NULL AND text_content != '' GROUP BY title, text_content"
 		");", NULL, NULL, NULL);
 	// Delete any corrupt/empty bitmap items with 0 data size
 	sqlite3_exec(db,
@@ -259,7 +271,7 @@ BOOL db_history_save_item(DATA_INFO *item)
 	// Check if most recent item in SQLite is identical
 	sqlite3_stmt *stmt_check = NULL;
 	rc = sqlite3_prepare16_v2(db,
-		L"SELECT id, content_hash, title, text_content, total_size FROM items ORDER BY id DESC LIMIT 1;",
+		L"SELECT id, content_hash, title, text_content, total_size, image_edit_id FROM items ORDER BY id DESC LIMIT 1;",
 		-1, &stmt_check, NULL);
 	if (rc == SQLITE_OK) {
 		if (sqlite3_step(stmt_check) == SQLITE_ROW) {
@@ -280,7 +292,7 @@ BOOL db_history_save_item(DATA_INFO *item)
 				}
 			}
 
-			if (is_dup) {
+			if (is_dup && item->image_edit_id == sqlite3_column_int(stmt_check, 5)) {
 				sqlite3_finalize(stmt_check);
 				// Update timestamp and content_hash of existing record instead of inserting duplicate
 				sqlite3_stmt *stmt_upd = NULL;
@@ -309,8 +321,8 @@ BOOL db_history_save_item(DATA_INFO *item)
 
 	// 1. Insert into items
 	rc = sqlite3_prepare16_v2(db,
-		L"INSERT INTO items (created_at, window_title, title, pinned, total_size, text_content, content_hash) "
-		L"VALUES (?, ?, ?, 0, ?, ?, ?);",
+		L"INSERT INTO items (created_at, window_title, title, pinned, total_size, text_content, content_hash, image_edit_id) "
+		L"VALUES (?, ?, ?, 0, ?, ?, ?, ?);",
 		-1, &stmt_item, NULL);
 
 	if (rc != SQLITE_OK) {
@@ -327,6 +339,7 @@ BOOL db_history_save_item(DATA_INFO *item)
 	}
 	sqlite3_bind_text16(stmt_item, 3, item_title, -1, SQLITE_TRANSIENT);
 	sqlite3_bind_int(stmt_item, 4, (int)total_size);
+	sqlite3_bind_int(stmt_item, 7, item->image_edit_id);
 	if (text_content != NULL) {
 		sqlite3_bind_text16(stmt_item, 5, text_content, -1, SQLITE_TRANSIENT);
 	} else {
@@ -436,16 +449,24 @@ BOOL db_history_save_item(DATA_INFO *item)
 			} else {
 				sqlite3_bind_null(stmt_fmt, 5);
 			}
-			sqlite3_step(stmt_fmt);
+			rc = sqlite3_step(stmt_fmt);
 
 			if (unlock_data) GlobalUnlock(cdi->data);
 			if (free_mem) mem_free((void **)&mem);
+			if (rc != SQLITE_DONE) break;
 		}
 		sqlite3_finalize(stmt_fmt);
 	}
+	if (rc != SQLITE_DONE && item->child != NULL) {
+		if (!inside_tx) sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		return FALSE;
+	}
 
 	if (!inside_tx) {
-		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
+		if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+			sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+			return FALSE;
+		}
 	}
 	return TRUE;
 }
@@ -468,7 +489,7 @@ int db_history_load_recent(const int limit, DATA_INFO **out_root)
 	*out_root = NULL;
 
 	rc = sqlite3_prepare16_v2(db,
-		L"SELECT id, created_at, window_title, title, text_content, content_hash FROM items ORDER BY created_at DESC, id DESC LIMIT ?;",
+		L"SELECT id, created_at, window_title, title, text_content, content_hash, image_edit_id FROM items ORDER BY created_at DESC, id DESC LIMIT ?;",
 		-1, &stmt, NULL);
 	if (rc != SQLITE_OK) {
 		return 0;
@@ -498,10 +519,10 @@ int db_history_load_recent(const int limit, DATA_INFO **out_root)
 		// Skip consecutive duplicates
 		if (tail != NULL) {
 			if (chash != 0 && last_loaded_hash != 0) {
-				if (chash == last_loaded_hash) {
+				if (chash == last_loaded_hash && tail->image_edit_id == sqlite3_column_int(stmt, 6)) {
 					continue;
 				}
-			} else if (txt != NULL && last_loaded_text != NULL) {
+			} else if (txt != NULL && last_loaded_text != NULL && tail->image_edit_id == sqlite3_column_int(stmt, 6)) {
 				if (wcscmp(txt, last_loaded_text) == 0) {
 					continue;
 				}
@@ -512,6 +533,7 @@ int db_history_load_recent(const int limit, DATA_INFO **out_root)
 		if (item == NULL) continue;
 
 		item->content_hash = chash;
+		item->image_edit_id = sqlite3_column_int(stmt, 6);
 		last_loaded_hash = chash;
 
 		if (title != NULL) {
@@ -595,7 +617,7 @@ DATA_INFO *db_history_get_item(const int id)
 	}
 
 	rc = sqlite3_prepare16_v2(db,
-		L"SELECT created_at, window_title, title, content_hash FROM items WHERE id = ?;",
+		L"SELECT created_at, window_title, title, content_hash, image_edit_id FROM items WHERE id = ?;",
 		-1, &stmt, NULL);
 	if (rc != SQLITE_OK) {
 		return NULL;
@@ -613,6 +635,7 @@ DATA_INFO *db_history_get_item(const int id)
 			item->param1 = (LPARAM)id;
 			item->param2 = 0; // lazy payload
 			item->content_hash = chash;
+			item->image_edit_id = sqlite3_column_int(stmt, 4);
 			item->modified.dwLowDateTime = (DWORD)(ft_val & 0xFFFFFFFF);
 			item->modified.dwHighDateTime = (DWORD)(ft_val >> 32);
 			if (wnd != NULL && *wnd != L'\0') {
@@ -931,40 +954,30 @@ void db_history_free_search_results(DB_SEARCH_RESULT *results, const int count)
 BOOL db_history_delete_item(const int id)
 {
 	sqlite3_stmt *stmt = NULL;
-	int rc;
+	const char *deletes[] = {"DELETE FROM items WHERE id = ?;",
+		"DELETE FROM item_formats WHERE item_id = ?;", "DELETE FROM history_fts WHERE docid = ?;"};
+	int rc, i;
 
 	if (db == NULL || id <= 0) return FALSE;
 
 	BOOL inside_tx = (sqlite3_get_autocommit(db) == 0);
 	if (!inside_tx) {
-		sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
+		if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
 	}
 
-	rc = sqlite3_prepare_v2(db, "DELETE FROM items WHERE id = ?;", -1, &stmt, NULL);
-	if (rc == SQLITE_OK) {
+	for (i = 0; i < ARRAYSIZE(deletes); i++) {
+		rc = sqlite3_prepare_v2(db, deletes[i], -1, &stmt, NULL);
+		if (rc != SQLITE_OK) break;
 		sqlite3_bind_int(stmt, 1, id);
-		sqlite3_step(stmt);
-		sqlite3_finalize(stmt);
+		rc = sqlite3_step(stmt);
+		sqlite3_finalize(stmt); stmt = NULL;
+		if (rc != SQLITE_DONE) break;
 	}
-
-	rc = sqlite3_prepare_v2(db, "DELETE FROM item_formats WHERE item_id = ?;", -1, &stmt, NULL);
-	if (rc == SQLITE_OK) {
-		sqlite3_bind_int(stmt, 1, id);
-		sqlite3_step(stmt);
-		sqlite3_finalize(stmt);
+	sqlite3_finalize(stmt);
+	if (rc != SQLITE_DONE || (!inside_tx && sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)) {
+		if (!inside_tx) sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		return FALSE;
 	}
-
-	rc = sqlite3_prepare_v2(db, "DELETE FROM history_fts WHERE docid = ?;", -1, &stmt, NULL);
-	if (rc == SQLITE_OK) {
-		sqlite3_bind_int(stmt, 1, id);
-		sqlite3_step(stmt);
-		sqlite3_finalize(stmt);
-	}
-
-	if (!inside_tx) {
-		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
-	}
-
 	return TRUE;
 }
 
@@ -975,24 +988,126 @@ BOOL db_history_update_item(DATA_INFO *item)
 	if (db == NULL || item == NULL || item->type != TYPE_ITEM || (old_id = (int)item->param1) <= 0) {
 		return FALSE;
 	}
-	if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
+	if (sqlite3_exec(db, "SAVEPOINT update_item;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
 	if (!db_history_delete_item(old_id)) {
-		sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		sqlite3_exec(db, "ROLLBACK TO update_item; RELEASE update_item;", NULL, NULL, NULL);
 		return FALSE;
 	}
 	item->param1 = 0;
 	item->content_hash = 0;
 	if (!db_history_save_item(item)) {
 		item->param1 = old_id;
-		sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		sqlite3_exec(db, "ROLLBACK TO update_item; RELEASE update_item;", NULL, NULL, NULL);
 		return FALSE;
 	}
-	if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+	if (sqlite3_exec(db, "RELEASE update_item;", NULL, NULL, NULL) != SQLITE_OK) {
 		item->param1 = old_id;
-		sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+		sqlite3_exec(db, "ROLLBACK TO update_item; RELEASE update_item;", NULL, NULL, NULL);
 		return FALSE;
 	}
 	return TRUE;
+}
+
+/* A new snapshot keeps History/Favourites copies independent when either is edited. */
+BOOL db_history_save_image_edit(DATA_INFO *item, HBITMAP initial, HBITMAP base, HBITMAP merged, const char *json, BOOL history)
+{
+	sqlite3_stmt *stmt = NULL;
+	BYTE *initial_png, *base_png, *merged_png;
+	DWORD initial_size = 0, base_size = 0, merged_size = 0;
+	LPARAM old_id;
+	int old_edit;
+	UINT64 old_hash;
+	BOOL ok = FALSE;
+	if (db == NULL || item == NULL || json == NULL || initial == NULL || base == NULL || merged == NULL) return FALSE;
+	initial_png = bitmap_to_png(initial, &initial_size);
+	base_png = bitmap_to_png(base, &base_size);
+	merged_png = bitmap_to_png(merged, &merged_size);
+	if (initial_png == NULL || base_png == NULL || merged_png == NULL ||
+		initial_size > INT_MAX || base_size > INT_MAX || merged_size > INT_MAX) goto done;
+	old_id = item->param1; old_edit = item->image_edit_id; old_hash = item->content_hash;
+	if (sqlite3_exec(db, "SAVEPOINT save_image;", NULL, NULL, NULL) != SQLITE_OK) goto done;
+	if (sqlite3_prepare_v2(db, "INSERT INTO image_edits(initial, base, annotations, merged) VALUES(?, ?, ?, ?);",
+		-1, &stmt, NULL) != SQLITE_OK) goto rollback;
+	sqlite3_bind_blob(stmt, 1, initial_png, (int)initial_size, SQLITE_TRANSIENT);
+	if (base_size != initial_size || memcmp(base_png, initial_png, base_size) != 0)
+		sqlite3_bind_blob(stmt, 2, base_png, (int)base_size, SQLITE_TRANSIENT);
+	else sqlite3_bind_null(stmt, 2);
+	sqlite3_bind_text(stmt, 3, json, -1, SQLITE_TRANSIENT);
+	sqlite3_bind_blob(stmt, 4, merged_png, (int)merged_size, SQLITE_TRANSIENT);
+	if (sqlite3_step(stmt) != SQLITE_DONE) goto rollback;
+	sqlite3_finalize(stmt); stmt = NULL;
+	item->image_edit_id = (int)sqlite3_last_insert_rowid(db);
+	if (sqlite3_last_insert_rowid(db) > INT_MAX) goto rollback;
+	item->content_hash = 0;
+	if (history && !(item->param1 > 0 ? db_history_update_item(item) : db_history_save_item(item))) goto rollback;
+	if (sqlite3_exec(db, "RELEASE save_image;", NULL, NULL, NULL) != SQLITE_OK) goto rollback;
+	ok = TRUE;
+	goto done;
+rollback:
+	sqlite3_finalize(stmt); stmt = NULL;
+	sqlite3_exec(db, "ROLLBACK TO save_image; RELEASE save_image;", NULL, NULL, NULL);
+	item->param1 = old_id; item->image_edit_id = old_edit; item->content_hash = old_hash;
+done:
+	sqlite3_finalize(stmt);
+	mem_free((void **)&initial_png); mem_free((void **)&base_png);
+	mem_free((void **)&merged_png);
+	return ok;
+}
+
+BOOL db_history_load_image_edit(int id, HBITMAP *initial, HBITMAP *base, char **json)
+{
+	sqlite3_stmt *stmt = NULL;
+	BOOL ok = FALSE;
+	*initial = *base = NULL; *json = NULL;
+	if (db == NULL || id <= 0) return FALSE;
+	if (sqlite3_prepare_v2(db, "SELECT initial, COALESCE(base, initial), annotations FROM image_edits WHERE id = ?;",
+		-1, &stmt, NULL) != SQLITE_OK) return FALSE;
+	sqlite3_bind_int(stmt, 1, id);
+	if (sqlite3_step(stmt) == SQLITE_ROW) {
+		int bytes = sqlite3_column_bytes(stmt, 2);
+		const char *text = (const char *)sqlite3_column_text(stmt, 2);
+		if (text != NULL && bytes > 0 && bytes < INT_MAX && strlen(text) == (size_t)bytes) {
+			*json = mem_alloc((size_t)bytes + 1);
+			if (*json != NULL) CopyMemory(*json, text, (size_t)bytes + 1);
+		}
+		*initial = png_to_bitmap(sqlite3_column_blob(stmt, 0), sqlite3_column_bytes(stmt, 0));
+		*base = png_to_bitmap(sqlite3_column_blob(stmt, 1), sqlite3_column_bytes(stmt, 1));
+		ok = *initial != NULL && *base != NULL && *json != NULL;
+	}
+	sqlite3_finalize(stmt);
+	if (!ok) {
+		if (*initial != NULL) DeleteObject(*initial);
+		if (*base != NULL) DeleteObject(*base);
+		*initial = *base = NULL; mem_free((void **)json);
+	}
+	return ok;
+}
+
+static BOOL db_keep_favourite_edits(const DATA_INFO *item, sqlite3_stmt *stmt)
+{
+	for (; item != NULL; item = item->next) {
+		if (item->image_edit_id > 0) {
+			sqlite3_reset(stmt); sqlite3_bind_int(stmt, 1, item->image_edit_id);
+			if (sqlite3_step(stmt) != SQLITE_DONE) return FALSE;
+		}
+		if (item->child != NULL && !db_keep_favourite_edits(item->child, stmt)) return FALSE;
+	}
+	return TRUE;
+}
+
+/* Collect snapshots only after their History and Favourites references are gone. */
+static BOOL db_prune_image_edits(void)
+{
+	sqlite3_stmt *stmt = NULL;
+	BOOL ok;
+	if (sqlite3_exec(db, "CREATE TEMP TABLE IF NOT EXISTS favourite_edits(id INTEGER PRIMARY KEY);"
+		"DELETE FROM favourite_edits;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
+	if (sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO favourite_edits VALUES(?);", -1, &stmt, NULL) != SQLITE_OK) return FALSE;
+	ok = db_keep_favourite_edits(regist_data.child, stmt);
+	sqlite3_finalize(stmt);
+	return ok && sqlite3_exec(db, "DELETE FROM image_edits WHERE id NOT IN "
+		"(SELECT image_edit_id FROM items WHERE image_edit_id > 0) "
+		"AND id NOT IN (SELECT id FROM favourite_edits);", NULL, NULL, NULL) == SQLITE_OK;
 }
 
 /*
@@ -1044,7 +1159,7 @@ BOOL db_history_trim(const int max_count)
 		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
 	}
 
-	return TRUE;
+	return db_prune_image_edits();
 }
 
 /*

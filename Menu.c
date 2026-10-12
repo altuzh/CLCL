@@ -1675,6 +1675,19 @@ BOOL menu_drawitem(const DRAWITEMSTRUCT *ds)
 		left_margin = MENU_ICON_MARGIN + GetSystemMetrics(SM_CXMENUCHECK);
 	}
 
+	if (mii->set_di != NULL && mii->set_di->image_edit_id > 0) {
+		HICON pencil = LoadIcon(hInst, MAKEINTRESOURCE(IDR_PIN_PEN));
+		int size = Scale(14), x = max(MENU_ICON_MARGIN, left_margin - size);
+		int image_height = option.menu_show_icon == 1 && mii->show_bitmap && mii->show_di->menu_bitmap != NULL ?
+			(mii->show_di->menu_bmp_height > 0 ? mii->show_di->menu_bmp_height : MENU_BITMAP_HEIGHT) : MENU_ICON_SIZE;
+		int y = max(0, height / 2 - image_height / 2 + image_height - size);
+		HBRUSH previous = SelectObject(draw_dc, GetStockObject(WHITE_BRUSH));
+		HPEN previous_pen = SelectObject(draw_dc, GetStockObject(NULL_PEN));
+		Ellipse(draw_dc, x - 1, y - 1, x + size + 1, y + size + 1);
+		SelectObject(draw_dc, previous_pen); SelectObject(draw_dc, previous);
+		if (pencil != NULL) DrawIconEx(draw_dc, x, y, pencil, size, size, 0, NULL, DI_NORMAL);
+	}
+
 	if (mii->text != NULL) {
 		// Text
 		hFont = menu_create_font();

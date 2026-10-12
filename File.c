@@ -257,6 +257,9 @@ static void file_expand_option(DATA_INFO *di, char *option)
 	p++;
 
 	di->op_paste = a2i(p);
+	for (; *p != ',' && *p != '\0'; p++)
+		;
+	if (*p == ',') di->image_edit_id = max(0, a2i(p + 1));
 }
 
 /*
@@ -657,6 +660,11 @@ static BOOL file_item_to_file(const HANDLE hFile, DATA_INFO *di, const BOOL filt
 		tp += lstrlen(tp);
 		*(tp++) = TEXT(',');
 		_itot_s(di->op_paste, tp, BUF_SIZE - (tp - str_op), 10);
+		if (di->image_edit_id > 0) {
+			tp += lstrlen(tp);
+			*(tp++) = TEXT(',');
+			_itot_s(di->image_edit_id, tp, BUF_SIZE - (tp - str_op), 10);
+		}
 		len += tchar_to_char_size(str_op);
 		len++;		// \0
 		len++;		// \x2

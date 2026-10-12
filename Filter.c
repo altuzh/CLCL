@@ -164,6 +164,7 @@ static DATA_INFO *filter_item_copy(const DATA_INFO *di, TCHAR *err_str)
 		new_item->window_name = alloc_copy(di->window_name);
 		new_item->plugin_string = alloc_copy(di->plugin_string);
 		new_item->plugin_param = di->plugin_param;
+		new_item->image_edit_id = di->image_edit_id;
 
 		for (cdi = di->child; cdi != NULL; cdi = cdi->next) {
 			// Check save filter

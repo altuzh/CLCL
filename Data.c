@@ -118,6 +118,7 @@ DATA_INFO *data_item_copy(const DATA_INFO *di, const BOOL next_copy, const BOOL 
 	new_di->window_name = alloc_copy(di->window_name);
 	new_di->plugin_string = alloc_copy(di->plugin_string);
 	new_di->plugin_param = di->plugin_param;
+	new_di->image_edit_id = di->image_edit_id;
 	if (move_flag == TRUE) {
 		new_di->hkey_id = di->hkey_id;
 		new_di->op_modifiers = di->op_modifiers;

@@ -227,6 +227,7 @@
     <ClInclude Include="Message.h" />
     <ClInclude Include="OleDragDrop.h" />
     <ClInclude Include="PinnedImage.h" />
+    <ClInclude Include="PinnedImageJson.h" />
     <ClInclude Include="Profile.h" />
     <ClInclude Include="Regist.h" />
     <ClInclude Include="resource.h" />
