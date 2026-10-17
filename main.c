@@ -1801,6 +1801,19 @@ static void set_tray_icon(const HWND hWnd, const HICON hIcon, const TCHAR *buf)
 }
 
 /*
+ * tray_icon_contains_point - verify hover against the shell's current icon bounds
+ */
+static BOOL tray_icon_contains_point(const HWND hWnd, const POINT pt)
+{
+	NOTIFYICONIDENTIFIER icon = {0};
+	RECT rect;
+	icon.cbSize = sizeof(icon);
+	icon.hWnd = hWnd;
+	icon.uID = TRAY_ID;
+	return SUCCEEDED(Shell_NotifyIconGetRect(&icon, &rect)) && PtInRect(&rect, pt);
+}
+
+/*
  * tray_cancel_preview - cancel/hide task tray preview
  */
 static void tray_cancel_preview(const HWND hWnd)
@@ -3797,10 +3810,8 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 					}
 				}
 
-				// Check if cursor is within tray icon area
-				int dx = abs(pt.x - tray_hover_pos.x);
-				int dy = abs(pt.y - tray_hover_pos.y);
-				if (dx > Scale(24) || dy > Scale(24)) {
+				// Shell notifications alone do not prove the pointer is over our icon.
+				if (!tray_icon_contains_point(hWnd, pt)) {
 					// Moved away from tray icon
 					if (tray_preview_showing) {
 						tooltip_hide(hToolTip);
@@ -3897,6 +3908,9 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 				active_wnd = GetForegroundWindow();
 				// Check taskbar
 				GetCursorPos(&pt);
+				if (!tray_icon_contains_point(hWnd, pt)) {
+					break;
+				}
 				mouse_wnd = WindowFromPoint(pt);
 				while (mouse_wnd != NULL && mouse_wnd != active_wnd) mouse_wnd = GetParent(mouse_wnd);
 				if (active_wnd != focus_info.active_wnd && active_wnd != hWnd && active_wnd != mouse_wnd) {

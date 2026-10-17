@@ -2,11 +2,21 @@
  * Only cursor I/O is recorded: Windows cannot move the pointer on a non-input
  * desktop. Menu creation, drawing, tracking, hooks and dialogs are real Win32. */
 #include <windows.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <winsqlite/winsqlite3.h>
 static POINT test_cursor = {300, 200};
 static BOOL test_get_cursor(LPPOINT pt) { *pt = test_cursor; return TRUE; }
 static BOOL test_set_cursor(int x, int y) { test_cursor.x = x; test_cursor.y = y; return TRUE; }
+static HWND test_tray_owner;
+static RECT test_tray_rect = {10, 10, 30, 30};
+static HRESULT test_tray_get_rect(const NOTIFYICONIDENTIFIER *icon, RECT *rect)
+{
+    if (test_tray_owner == NULL || icon->hWnd != test_tray_owner || icon->uID != 1) return E_FAIL;
+    *rect = test_tray_rect;
+    return S_OK;
+}
+#define Shell_NotifyIconGetRect test_tray_get_rect
 #define GetCursorPos test_get_cursor
 #define SetCursorPos test_set_cursor
 #define menu_show_align test_menu_show_align
@@ -24,6 +34,7 @@ static DWORD history_get_clipboard_sequence(void) { return history_clipboard_moc
 #define GetClipboardOwner history_get_clipboard_owner
 #define GetClipboardSequenceNumber history_get_clipboard_sequence
 #include "../main.c"
+#undef Shell_NotifyIconGetRect
 #undef GetClipboardSequenceNumber
 #undef GetClipboardOwner
 #undef CloseClipboard
@@ -3873,6 +3884,52 @@ static void test_pinned_preferences_preserve_options(void)
     RemoveDirectory(temp_dir);
 }
 
+static void test_tray_preview_hover(HWND owner)
+{
+    TCHAR error[BUF_SIZE];
+    POINT saved_cursor = test_cursor;
+    DATA_INFO *item = data_create_item(TEXT("Latest clipboard image"), FALSE, error);
+    item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"),
+        create_solid_bitmap(16, 16, RGB(40, 120, 200)), 0, FALSE, error);
+    history_data.child = item;
+    test_tray_owner = owner;
+    tray_last_click_tick = GetTickCount() - 2000;
+    test_cursor = (POINT){500, 500};
+    SendMessage(owner, WM_TRAY_NOTIFY, TRAY_ID, WM_MOUSEMOVE);
+    CHECK(!tray_hover_active && !IsWindowVisible(hToolTip),
+        "unsolicited startup tray notification does not schedule a preview away from the icon");
+    /* A delayed notification must also recheck the actual icon, not cursor distance. */
+    tray_hover_active = TRUE;
+    tray_hover_pos = test_cursor;
+    tray_hover_start_tick = GetTickCount() - 1000;
+    SendMessage(owner, WM_TIMER, ID_TRAY_HOVER_TIMER, 0);
+    CHECK(!tray_hover_active && !tray_preview_showing && !IsWindowVisible(hToolTip),
+        "stationary cursor outside the tray icon cannot show the latest record");
+
+    test_cursor = (POINT){20, 20};
+    SendMessage(owner, WM_TRAY_NOTIFY, TRAY_ID, WM_MOUSEMOVE);
+    CHECK(tray_hover_active, "real tray icon hover schedules the regular preview");
+    tray_hover_start_tick = GetTickCount() - 1000;
+    SendMessage(owner, WM_TIMER, ID_TRAY_HOVER_TIMER, 0);
+    SendMessage(hToolTip, WM_TIMER, 1, 0);
+    CHECK(tray_preview_showing && IsWindowVisible(hToolTip),
+        "regular tray hover still shows the latest record after the hover delay");
+    test_cursor.x = 31;
+    SendMessage(owner, WM_TIMER, ID_TRAY_HOVER_TIMER, 0);
+    CHECK(!tray_hover_active && !tray_preview_showing && !IsWindowVisible(hToolTip),
+        "preview hides immediately outside the icon even within the old distance threshold");
+
+    test_tray_owner = NULL;
+    test_cursor = (POINT){20, 20};
+    SendMessage(owner, WM_TRAY_NOTIFY, TRAY_ID, WM_MOUSEMOVE);
+    CHECK(!tray_hover_active, "unavailable tray icon bounds do not schedule a preview");
+    tray_cancel_preview(owner);
+    tray_last_click_tick = 0;
+    data_free(history_data.child);
+    history_data.child = NULL;
+    test_cursor = saved_cursor;
+}
+
 int main(void)
 {
     HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
@@ -3910,6 +3967,7 @@ int main(void)
     RegisterClass(&wc);
     owner = CreateWindow(wc.lpszClassName, TEXT("Menu regression"), WS_OVERLAPPED, 0, 0, 100, 100, NULL, NULL, hInst, NULL);
     history_data.type = regist_data.type = TYPE_ROOT;
+    test_tray_preview_hover(owner);
     {
         RECT anchor = {10, 10, 30, 30};
         RECT old_row = {-10000, -10000, -9990, -9990};
