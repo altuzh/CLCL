@@ -90,6 +90,8 @@ static BOOL test_editor_set_window_pos(HWND window, HWND after, int x, int y, in
 #undef GetClipboardSequenceNumber
 #undef SetWindowPos
 #undef GetWindow
+#include "../CLCLSet/SessionBackup.c"
+#include "../Installer/unzip.c"
 
 static COLORREF bitmap_pixel(HBITMAP bitmap, int x, int y)
 {
@@ -481,9 +483,38 @@ static void test_dimension_annotations(HWND owner, int tool)
         editor_tool_cursor(pin) == LoadCursor(NULL, IDC_CROSS),
         "Dimension is available in menu and toolbar with a crosshair");
     CHECK(pin->current_color == RGB(0, 0, 0), "Dimension starts with black");
+    SendMessage(editor, WM_COMMAND, ID_ARROW, 0);
+    CHECK(pin->current_color == colors[0], "arrow defaults to red");
+    SendMessage(editor, WM_COMMAND, ID_COLOR_BLUE, 0);
+    CHECK(pin->current_color == colors[1], "arrow permits changing color");
+    SendMessage(editor, WM_COMMAND, ID_FRAME_ARROW, 0);
+    CHECK(pin->current_color == colors[0], "frame arrow defaults to red");
+    SendMessage(editor, WM_COMMAND, tool, 0);
     SendMessage(editor, WM_COMMAND, ID_COLOR_BLUE, 0);
     CHECK(pin->current_color == colors[1], "Dimension still allows an explicit color choice");
     CHECK(ensure_drawing_resolution(pin), "dimension uses the editor drawing resolution");
+    {
+        PINNED_IMAGE snapping = {0};
+        POINT p;
+        snapping.width = snapping.height = 400;
+        snapping.image_rect = (RECT){0, 0, 400, 400};
+        p = snap_dimension_end(&snapping, (POINT){100, 100}, (POINT){300, 104});
+        CHECK(p.x == 300 && p.y == 100, "near-horizontal dimensions gently snap to level");
+        p = snap_dimension_end(&snapping, (POINT){100, 100}, (POINT){104, 300});
+        CHECK(p.x == 100 && p.y == 300, "near-vertical dimensions gently snap to plumb");
+        p = snap_dimension_end(&snapping, (POINT){300, 100}, (POINT){100, 96});
+        CHECK(p.x == 100 && p.y == 100, "axis snapping works in reverse");
+        p = snap_dimension_end(&snapping, (POINT){100, 100}, (POINT){300, 108});
+        CHECK(p.y == 108, "dimensions outside the light snap range stay free");
+        p = snap_dimension_end(&snapping, (POINT){100, 100}, (POINT){106, 104});
+        CHECK(p.x == 106 && p.y == 104, "short diagonal dimensions do not snap unpredictably");
+        snapping.image_rect.right = snapping.image_rect.bottom = 800;
+        p = snap_dimension_end(&snapping, (POINT){100, 100}, (POINT){300, 104});
+        CHECK(p.y == 104, "snap range stays small on screen when zoomed in");
+        snapping.image_rect.right = snapping.image_rect.bottom = 200;
+        p = snap_dimension_end(&snapping, (POINT){100, 100}, (POINT){300, 108});
+        CHECK(p.y == 100, "snap range follows screen pixels when zoomed out");
+    }
     for (i = 0; i < ARRAYSIZE(starts); i++) {
         starts[i].x = MulDiv(starts[i].x, pin->width, 320);
         starts[i].y = MulDiv(starts[i].y, pin->height, 240);
@@ -496,12 +527,17 @@ static void test_dimension_annotations(HWND owner, int tool)
         RECT box, first_line, bounds;
         POINT wings[4];
         int before = pin->undo_count, j;
+        POINT drag_end = to;
+        if (i < 2) drag_end.y += 2;
+        else if (i == 2) drag_end.x += 2;
         SendMessage(editor, WM_COMMAND, ID_COLOR_BLUE, 0);
         SendMessage(editor, WM_COMMAND, tool, 0);
         CHECK(pin->current_color == RGB(0, 0, 0), "selecting Dimension defaults to black");
         SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(from.x, from.y));
-        SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(to.x, to.y));
-        SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(to.x, to.y));
+        SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(drag_end.x, drag_end.y));
+        if (i < 2) CHECK(pin->last.y == pin->start.y, "horizontal snap is visible during the drag");
+        else if (i == 2) CHECK(pin->last.x == pin->start.x, "vertical snap is visible during the drag");
+        SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(drag_end.x, drag_end.y));
         CHECK(pin->text_edit != NULL && pin->undo_count == before &&
             pin->text_edit_font != NULL && pin->text_edit_brush != NULL,
             "dimension drag opens shared callout input without an undo step");
@@ -606,6 +642,60 @@ static void test_dimension_annotations(HWND owner, int tool)
             abs(item->box.left + item->box.right - item->start.x - item->end.x) <= 1 &&
             abs(item->box.top + item->box.bottom - item->start.y - item->end.y) <= 1,
             "re-editing a dimension keeps the note centered and endpoints intact");
+        {
+            POINT anchor = item->start, end_anchor = item->end, line_start, line_end;
+            POINT center = {(item->box.left + item->box.right) / 2, (item->box.top + item->box.bottom) / 2};
+            double dx = end_anchor.x - anchor.x, dy = end_anchor.y - anchor.y, length = sqrt(dx * dx + dy * dy);
+            int distance = max(12, pin->height / 10), undo = pin->undo_count;
+            POINT target = {center.x + (LONG)round(-dy * distance / length), center.y + (LONG)round(dx * distance / length)};
+            POINT a = image_to_client(pin, center), b = image_to_client(pin, target), offset;
+            PIN_ARTIFACT *decoded = NULL;
+            char *json;
+            SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(a.x, a.y));
+            CHECK(pin->drag_mode == 7, "dragging a single dimension offsets its line");
+            SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(b.x, b.y));
+            UpdateWindow(editor);
+            CHECK(pin->undo_count == undo && item->start.x == anchor.x && item->start.y == anchor.y &&
+                item->end.x == end_anchor.x && item->end.y == end_anchor.y, "live extension preview preserves measured points and undo history");
+            SendMessage(editor, WM_LBUTTONUP, 0, MAKELPARAM(b.x, b.y));
+            offset = item->dimension_offset;
+            dimension_line_points(item, &line_start, &line_end);
+            CHECK((offset.x || offset.y) && pin->undo_count == undo + 1 && item->start.x == anchor.x &&
+                item->start.y == anchor.y && item->end.x == end_anchor.x && item->end.y == end_anchor.y,
+                "dimension offset commits one undo step without moving either anchor");
+            CHECK(artifact_hit(item, (POINT){(anchor.x + line_start.x) / 2, (anchor.y + line_start.y) / 2}, 2) &&
+                artifact_hit(item, (POINT){(end_anchor.x + line_end.x) / 2, (end_anchor.y + line_end.y) / 2}, 2),
+                "both extension lines participate in hit testing");
+            if (i == 0) CHECK(bitmap_pixel(pin->bitmap, anchor.x, anchor.y + offset.y / 2) == item->color &&
+                bitmap_pixel(pin->bitmap, end_anchor.x, end_anchor.y + offset.y / 2) == item->color,
+                "offset dimension renders both extension lines to the measured points");
+            json = serialize_annotations(item);
+            CHECK(json != NULL && deserialize_annotations(json, &decoded) && decoded != NULL &&
+                decoded->dimension_offset.x == offset.x && decoded->dimension_offset.y == offset.y &&
+                decoded->start.x == anchor.x && decoded->end.y == end_anchor.y,
+                "saved dimensions retain extension offset and original anchors");
+            mem_free((void **)&json); free_artifacts(decoded);
+            swap_history(pin, TRUE); item = pin->artifacts;
+            CHECK(item->dimension_offset.x == 0 && item->dimension_offset.y == 0, "undo restores the original dimension position");
+            swap_history(pin, FALSE); item = pin->artifacts;
+            CHECK(item->dimension_offset.x == offset.x && item->dimension_offset.y == offset.y, "redo restores the extension lines");
+            item->selected = TRUE; pin->selected_artifact = item;
+            center = (POINT){(item->box.left + item->box.right) / 2, (item->box.top + item->box.bottom) / 2};
+            a = image_to_client(pin, center); b = image_to_client(pin, (POINT){center.x + 5, center.y + 8});
+            undo = pin->undo_count;
+            SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(a.x, a.y));
+            SendMessage(editor, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(b.x, b.y));
+            SendMessage(editor, WM_CAPTURECHANGED, 0, 0);
+            CHECK(!pin->drawing && pin->undo_count == undo && item->dimension_offset.x == offset.x &&
+                item->dimension_offset.y == offset.y, "lost capture cancels dimension offset without losing the saved geometry");
+            SendMessage(editor, WM_LBUTTONDOWN, MK_LBUTTON | MK_SHIFT, MAKELPARAM(a.x, a.y));
+            CHECK(pin->drag_mode == 1, "Shift retains whole-dimension movement");
+            SendMessage(editor, WM_LBUTTONUP, MK_SHIFT, MAKELPARAM(b.x, b.y));
+            CHECK(item->start.x != anchor.x && item->end.y != end_anchor.y && item->dimension_offset.x == offset.x &&
+                item->dimension_offset.y == offset.y, "whole-dimension movement retains the extension offset");
+            swap_history(pin, TRUE); swap_history(pin, TRUE);
+            item = pin->artifacts;
+        }
         box = item->box;
         offset_artifact(item, 3, 4);
         CHECK(item->box.left == box.left + 3 && item->box.top == box.top + 4 &&
@@ -3930,6 +4020,189 @@ static void test_tray_preview_hover(HWND owner)
     test_cursor = saved_cursor;
 }
 
+static void test_session_backup(void)
+{
+    TCHAR dirs[2][MAX_PATH], path[MAX_PATH], error[BUF_SIZE] = {0};
+    DATA_INFO *image = NULL, *root = NULL, *loaded = NULL, *text = NULL;
+    HBITMAP bitmap = create_solid_bitmap(16, 12, RGB(45, 90, 180)), initial = NULL, base = NULL;
+    BYTE *archive = NULL, *bad = NULL;
+    DWORD size = 0, bad_size = 0;
+    char *json = NULL;
+    int i, history_added, favourites_added, edit;
+    sqlite3 *inspect = NULL;
+    sqlite3_stmt *s = NULL;
+    ZIP_ARCHIVE zip;
+    ZIP_ENTRY entry;
+    BYTE *payload = NULL;
+    DWORD length;
+    init_gdip();
+    for (i = 0; i < 2; i++) {
+        TCHAR tmp[MAX_PATH];
+        GetTempPath(MAX_PATH, tmp); GetTempFileName(tmp, TEXT("csb"), 0, dirs[i]);
+        DeleteFile(dirs[i]); CreateDirectory(dirs[i], NULL);
+    }
+    db_history_close();
+    CHECK(db_history_init(dirs[0]) && bitmap != NULL, "session source initializes");
+    image = data_create_item(TEXT("Editable image"), TRUE, error);
+    CHECK(image != NULL, "session image allocates");
+    if (image == NULL || bitmap == NULL) goto cleanup;
+    image->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(bitmap, NULL, NULL), 0, FALSE, error);
+    CHECK(image->child != NULL && db_history_save_image_edit(image, bitmap, bitmap, bitmap,
+        "{\"version\":1,\"artifacts\":[]}", TRUE), "session persists editable history image");
+    root = data_create_folder(TEXT("\x0424\x043e\x0442\x043e"), error);
+    root->child = data_create_folder(TEXT("Nested"), error);
+    root->child->child = data_item_copy(image, FALSE, FALSE, error);
+    root->next = data_create_folder(TEXT("Empty folder"), error);
+    root->child->child->op_modifiers = MOD_CONTROL;
+    root->child->child->op_virtkey = 'I';
+    wsprintf(path, TEXT("%s\\%s"), dirs[0], REGIST_FILENAME);
+    CHECK(file_write_data(path, root, FALSE, error), "session writes nested favourite image");
+    /* Export while WAL connection remains open: the ZIP must contain committed pages. */
+    CHECK(session_backup_export(dirs[0], &archive, &size, error), "complete session exports as ZIP");
+    CHECK(archive != NULL && zip_open(archive, size, &zip) && zip.count == 1 && zip_get_entry(&zip, 0, &entry) &&
+        !lstrcmp(entry.name, TEXT("session.sqlite")), "session has one portable database entry");
+    if (archive == NULL) goto cleanup;
+    CHECK(file_write_buf(TEXT("Release\\session-backup-test.zip"), archive, size, error), "write synthetic ZIP for independent compatibility checks");
+    db_history_close();
+    CHECK(db_history_init(dirs[1]), "session destination initializes");
+    /* Occupy layer ID 1 so restore must remap the incoming reference. */
+    text = data_create_item(TEXT("Local layer"), TRUE, error);
+    CHECK(db_history_save_image_edit(text, bitmap, bitmap, bitmap, "{\"version\":1,\"artifacts\":[{}]}", FALSE), "destination has a different layer ID");
+    data_free(text); text = NULL;
+    loaded = data_create_folder(TEXT("Keep local folder"), error);
+    wsprintf(path, TEXT("%s\\%s"), dirs[1], REGIST_FILENAME);
+    CHECK(file_write_data(path, loaded, FALSE, error), "destination has existing favourites");
+    data_free(loaded); loaded = NULL;
+    CHECK(session_backup_import(dirs[1], archive, size, &history_added, &favourites_added, error) &&
+        history_added == 1 && favourites_added == 2, "restore merges complete History and Favourites");
+    CHECK(file_read_data(path, &loaded, error) && loaded != NULL && loaded->next != NULL &&
+        !lstrcmp(loaded->title, TEXT("Keep local folder")) && loaded->next->child != NULL &&
+        loaded->next->child->child != NULL && loaded->next->next != NULL,
+        "restore preserves local favourites, nested folders and empty folders");
+    if (loaded == NULL || loaded->next == NULL || loaded->next->child == NULL || loaded->next->child->child == NULL) goto cleanup;
+    text = loaded->next->child->child;
+    edit = text->image_edit_id;
+    CHECK(edit > 1 && text->op_modifiers == MOD_CONTROL && text->op_virtkey == 'I' && text->child != NULL &&
+        bitmap_pixel(text->child->data, 3, 4) == RGB(45, 90, 180), "restored favourite keeps bitmap, hotkey and remapped layer");
+    CHECK(db_history_load_image_edit(edit, &initial, &base, &json) && initial != NULL && base != NULL &&
+        !strcmp(json, "{\"version\":1,\"artifacts\":[]}"), "restored favourite remains editable");
+    text = NULL;
+    CHECK(session_backup_import(dirs[1], archive, size, &history_added, &favourites_added, error) &&
+        history_added == 0 && favourites_added == 0, "repeated session restore does not duplicate images or folders");
+    {
+        TCHAR blocked[MAX_PATH];
+        DATA_INFO *preserved = NULL;
+        wsprintf(blocked, TEXT("%s\\%s.tmp"), dirs[1], REGIST_FILENAME);
+        CHECK(CreateDirectory(blocked, NULL), "block atomic Favourite replacement");
+        CHECK(!session_backup_import(dirs[1], archive, size, &history_added, &favourites_added, error),
+            "Favourite replacement failure reports import failure");
+        CHECK(file_read_data(path, &preserved, error) && preserved != NULL && session_same_item(preserved, loaded),
+            "failed Favourite replacement preserves existing data");
+        data_free(preserved); RemoveDirectory(blocked);
+    }
+    archive[50] ^= 1;
+    CHECK(!session_backup_import(dirs[1], archive, size, &history_added, &favourites_added, error), "CRC-damaged session is rejected");
+    archive[50] ^= 1;
+    CHECK(!session_backup_import(dirs[1], archive, size - 30, &history_added, &favourites_added, error), "truncated session is rejected");
+    CHECK(zip_extract(&zip, &entry, &payload, &length) == UNZIP_OK, "inspect session payload");
+    if (payload != NULL) {
+        TCHAR temporary[MAX_PATH];
+        CHECK(session_temp(temporary) && file_write_buf(temporary, payload, length, error) &&
+            sqlite3_open16(temporary, &inspect) == SQLITE_OK, "open isolated session payload");
+        CHECK(sqlite3_exec(inspect, "PRAGMA user_version=2;", NULL, NULL, NULL) == SQLITE_OK, "make unsupported session version");
+        sqlite3_close(inspect); inspect = NULL;
+        mem_free((void **)&bad);
+        bad = file_read_buf(temporary, &bad_size, error);
+        {
+            BYTE *versioned = NULL;
+            DWORD versioned_size = 0;
+            CHECK(bad != NULL && session_zip(bad, bad_size, &versioned, &versioned_size) &&
+                !session_backup_import(dirs[1], versioned, versioned_size, &history_added, &favourites_added, error),
+                "unsupported version rejects without changing local data");
+            mem_free((void **)&versioned);
+        }
+        CHECK(sqlite3_open16(temporary, &inspect) == SQLITE_OK && sqlite3_exec(inspect,
+            "PRAGMA user_version=1; UPDATE favourites SET edit=999 WHERE kind=1;", NULL, NULL, NULL) == SQLITE_OK,
+            "make missing-layer fixture");
+        sqlite3_close(inspect); inspect = NULL;
+        mem_free((void **)&bad); bad = file_read_buf(temporary, &bad_size, error);
+        {
+            BYTE *broken = NULL;
+            DWORD broken_size = 0;
+            CHECK(bad != NULL && session_zip(bad, bad_size, &broken, &broken_size) &&
+                !session_backup_import(dirs[1], broken, broken_size, &history_added, &favourites_added, error),
+                "missing layer rolls back import");
+            mem_free((void **)&broken);
+        }
+        DeleteFile(temporary);
+    }
+    wsprintf(path, TEXT("%s\\history.db"), dirs[1]);
+    CHECK(sqlite3_open16(path, &inspect) == SQLITE_OK && sqlite3_prepare_v2(inspect,
+        "SELECT (SELECT count(*) FROM items),(SELECT count(*) FROM image_edits),image_edit_id FROM items;", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1 && sqlite3_column_int(s, 1) == 2 && sqlite3_column_int(s, 2) == edit,
+        "history is deduplicated and shares the restored favourite layer");
+cleanup:
+    sqlite3_finalize(s); if (inspect != NULL) sqlite3_close(inspect);
+    db_history_close(); data_free(image); data_free(root); data_free(loaded);
+    if (initial != NULL) DeleteObject(initial);
+    if (base != NULL) DeleteObject(base);
+    if (bitmap != NULL) DeleteObject(bitmap);
+    mem_free((void **)&json); mem_free((void **)&archive); mem_free((void **)&bad);
+    if (payload != NULL) HeapFree(GetProcessHeap(), 0, payload);
+    for (i = 0; i < 2; i++) {
+        wsprintf(path, TEXT("%s\\%s"), dirs[i], REGIST_FILENAME); DeleteFile(path);
+        wsprintf(path, TEXT("%s\\history.db"), dirs[i]); DeleteFile(path);
+        wsprintf(path, TEXT("%s\\history.db-wal"), dirs[i]); DeleteFile(path);
+        wsprintf(path, TEXT("%s\\history.db-shm"), dirs[i]); DeleteFile(path);
+        RemoveDirectory(dirs[i]);
+    }
+    printf("PASS: session ZIP preserves nested Favourites, images, layers and History; restore remaps IDs and rejects damage\n");
+    shutdown_gdip();
+}
+
+static void test_history_text_duplicates(void)
+{
+    DATA_INFO *root = NULL, *first, *second;
+    HGLOBAL a = GlobalAlloc(GMEM_MOVEABLE, 4), w = GlobalAlloc(GMEM_MOVEABLE, 8);
+    char *ap = a ? GlobalLock(a) : NULL;
+    WCHAR *wp = w ? GlobalLock(w) : NULL;
+    int saved_overlap = option.history_overlap_check;
+    if (ap == NULL || wp == NULL) {
+        CHECK(FALSE, "allocate text duplicate fixtures");
+        if (ap != NULL) GlobalUnlock(a);
+        if (wp != NULL) GlobalUnlock(w);
+        if (a != NULL) GlobalFree(a);
+        if (w != NULL) GlobalFree(w);
+        return;
+    }
+    memcpy(ap, "abc", 4); memcpy(wp, L"abc", 8);
+    GlobalUnlock(a); GlobalUnlock(w);
+    first = data_create_item(TEXT("first"), FALSE, NULL);
+    second = data_create_item(TEXT("second"), FALSE, NULL);
+    CHECK(first != NULL && second != NULL, "create text duplicate fixtures");
+    if (first == NULL || second == NULL) {
+        if (first != NULL) data_free(first);
+        if (second != NULL) data_free(second);
+        GlobalFree(a); GlobalFree(w);
+        return;
+    }
+    first->child = data_create_data(CF_TEXT, TEXT("TEXT"), a, 4, FALSE, NULL);
+    second->child = data_create_data(CF_UNICODETEXT, TEXT("UNICODE TEXT"), w, 8, FALSE, NULL);
+    CHECK(first->child != NULL && second->child != NULL, "create text formats");
+    if (first->child == NULL || second->child == NULL) {
+        if (first->child == NULL) GlobalFree(a);
+        if (second->child == NULL) GlobalFree(w);
+        data_free(first); data_free(second);
+        return;
+    }
+    first->content_hash = 1; second->content_hash = 2;
+    option.history_overlap_check = 2;
+    CHECK(history_add(&root, first, TRUE), "add original text");
+    CHECK(!history_add(&root, second, TRUE), "mixed text formats match despite different cached hashes");
+    data_free(second); data_free(root);
+    option.history_overlap_check = saved_overlap;
+}
+
 int main(void)
 {
     HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
@@ -4186,6 +4459,8 @@ int main(void)
     DestroyWindow(hToolTip);
     hToolTip = NULL;
     DestroyWindow(owner);
+    test_history_text_duplicates();
+    test_session_backup();
     test_bitmap_serialization();
     test_sqlite_multiple_bitmap_persistence();
     test_sqlite_space_reclamation();

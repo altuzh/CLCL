@@ -98,6 +98,10 @@ static char *serialize_annotations(const PIN_ARTIFACT *item)
 			pin_json_append(&json, "]");
 		}
 		pin_json_append(&json, "],\"magnified_png\":"); pin_json_bitmap(&json, item->magnified_source);
+		if (is_dimension_tool(item->tool) && (item->dimension_offset.x || item->dimension_offset.y)) {
+			pin_json_append(&json, ",\"dimension_offset\":["); pin_json_int(&json, item->dimension_offset.x);
+			pin_json_append(&json, ","); pin_json_int(&json, item->dimension_offset.y); pin_json_append(&json, "]");
+		}
 		pin_json_append(&json, "}");
 	}
 	pin_json_append(&json, "]}");
@@ -258,8 +262,14 @@ static BOOL deserialize_annotations(const char *json, PIN_ARTIFACT **result)
 			if (!append_artifact_point(item, point)) goto invalid;
 			if (*json != ']' && !pin_json_expect(&json, ",")) goto invalid;
 		}
-		if (!pin_json_expect(&json, ",\"magnified_png\":") || !pin_json_read_bitmap(&json, &item->magnified_source) ||
-			!pin_json_expect(&json, "}")) goto invalid;
+		if (!pin_json_expect(&json, ",\"magnified_png\":") || !pin_json_read_bitmap(&json, &item->magnified_source)) goto invalid;
+		if (pin_json_expect(&json, ",\"dimension_offset\":[")) {
+			int x, y;
+			if (!is_dimension_tool(item->tool) || !pin_json_read_int(&json, &x) || !pin_json_expect(&json, ",") ||
+				!pin_json_read_int(&json, &y) || !pin_json_expect(&json, "]") || x < -1000000 || x > 1000000 || y < -1000000 || y > 1000000) goto invalid;
+			item->dimension_offset = (POINT){x, y};
+		}
+		if (!pin_json_expect(&json, "}")) goto invalid;
 		if (*json != ']' && !pin_json_expect(&json, ",")) goto invalid;
 	}
 	if (!pin_json_expect(&json, "}") || !pin_json_expect(&json, "") || *json) goto invalid;

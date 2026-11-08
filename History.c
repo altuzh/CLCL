@@ -57,9 +57,7 @@ static BOOL history_compare(DATA_INFO *d1, DATA_INFO *d2)
 	h1 = (d1->content_hash != 0) ? d1->content_hash : data_calc_hash(d1);
 	h2 = (d2->content_hash != 0) ? d2->content_hash : data_calc_hash(d2);
 
-	if (h1 != 0 && h2 != 0) {
-		return (h1 == h2);
-	}
+	if (h1 != 0 && h1 == h2) return TRUE;
 
 	// Ensure lazy-loaded data from SQLite is loaded
 	if (db_history_is_open()) {
@@ -118,6 +116,18 @@ static BOOL history_compare(DATA_INFO *d1, DATA_INFO *d2)
 					}
 					if (a1 != NULL) GlobalUnlock(t1->data);
 					if (a2 != NULL) GlobalUnlock(t2->data);
+				} else if ((t1->format == CF_TEXT && t2->format == CF_UNICODETEXT) ||
+					(t1->format == CF_UNICODETEXT && t2->format == CF_TEXT)) {
+					DATA_INFO *ansi = t1->format == CF_TEXT ? t1 : t2;
+					DATA_INFO *unicode = ansi == t1 ? t2 : t1;
+					const char *a = (const char *)GlobalLock(ansi->data);
+					const WCHAR *w = (const WCHAR *)GlobalLock(unicode->data);
+					TCHAR *converted = a != NULL ? alloc_char_to_tchar(a) : NULL;
+					BOOL match = converted != NULL && w != NULL && wcscmp(converted, w) == 0;
+					mem_free((void **)&converted);
+					if (a != NULL) GlobalUnlock(ansi->data);
+					if (w != NULL) GlobalUnlock(unicode->data);
+					return match;
 				}
 			}
 			mem1 = format_data_to_bytes(t1, &size1);

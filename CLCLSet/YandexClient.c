@@ -178,9 +178,14 @@ static BOOL yandex_http_request(
 			if (dwSize == 0) {
 				break;
 			}
+			if (total_bytes > 512u * 1024u * 1024u + 256 || dwSize > 512u * 1024u * 1024u + 256 - total_bytes) {
+				bResults = FALSE;
+				break;
+			}
 
 			new_buf = (char *)realloc(response_buffer, total_bytes + dwSize + 1);
 			if (new_buf == NULL) {
+				bResults = FALSE;
 				break;
 			}
 			response_buffer = new_buf;
@@ -188,7 +193,8 @@ static BOOL yandex_http_request(
 			dwDownloaded = 0;
 			if (WinHttpReadData(hRequest, response_buffer + total_bytes, dwSize, &dwDownloaded)) {
 				total_bytes += dwDownloaded;
-			}
+				if (dwDownloaded == 0) break;
+			} else { bResults = FALSE; break; }
 		} while (dwSize > 0);
 
 		if (response_buffer != NULL) {

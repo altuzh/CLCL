@@ -111,6 +111,7 @@ typedef struct _PIN_ARTIFACT {
 	BOOL deleted;
 	BOOL selected;
 	POINT start, end;
+	POINT dimension_offset;
 	POINT *points;
 	RECT box;
 	TCHAR *text;
@@ -486,6 +487,8 @@ static void transform_artifacts(PINNED_IMAGE *pin, int old_width, int old_height
 		item->start.y = MulDiv(item->start.y - top, new_height, old_height);
 		item->end.x = MulDiv(item->end.x - left, new_width, old_width);
 		item->end.y = MulDiv(item->end.y - top, new_height, old_height);
+		item->dimension_offset.x = MulDiv(item->dimension_offset.x, new_width, old_width);
+		item->dimension_offset.y = MulDiv(item->dimension_offset.y, new_height, old_height);
 		item->box.left = MulDiv(item->box.left - left, new_width, old_width);
 		item->box.top = MulDiv(item->box.top - top, new_height, old_height);
 		item->box.right = MulDiv(item->box.right - left, new_width, old_width);
@@ -997,6 +1000,22 @@ static BOOL is_dimension_tool(int tool)
 	return tool == ID_DIMENSION || tool == ID_DIMENSION_SLASH;
 }
 
+static void dimension_line_points(const PIN_ARTIFACT *item, POINT *start, POINT *end)
+{
+	*start = (POINT){item->start.x + item->dimension_offset.x, item->start.y + item->dimension_offset.y};
+	*end = (POINT){item->end.x + item->dimension_offset.x, item->end.y + item->dimension_offset.y};
+}
+
+static POINT snap_dimension_end(PINNED_IMAGE *pin, POINT start, POINT end)
+{
+	int dx = abs(end.x - start.x), dy = abs(end.y - start.y);
+	int tolerance_x = max(1, MulDiv(Scale(6), pin->width, max(1, pin->image_rect.right - pin->image_rect.left)));
+	int tolerance_y = max(1, MulDiv(Scale(6), pin->height, max(1, pin->image_rect.bottom - pin->image_rect.top)));
+	if (dy <= tolerance_y && (LONGLONG)dy * 12 <= dx) end.y = start.y;
+	else if (dx <= tolerance_x && (LONGLONG)dx * 12 <= dy) end.x = start.x;
+	return end;
+}
+
 static void dimension_wings(int tool, POINT start, POINT end, int text_size, POINT wings[4])
 {
 	double dx = end.x - start.x, dy = end.y - start.y;
@@ -1335,7 +1354,11 @@ static void render_extra_artifact(PINNED_IMAGE *pin, const PIN_ARTIFACT *item)
 		HFONT font, old_font;
 		RECT text_rect = box;
 		if (is_dimension_tool(item->tool)) {
-			draw_dimension_line(dc, item->tool, item->start, item->end, text_font_size(item, item->stroke));
+			POINT start, end;
+			dimension_line_points(item, &start, &end);
+			MoveToEx(dc, item->start.x, item->start.y, NULL); LineTo(dc, start.x, start.y);
+			MoveToEx(dc, item->end.x, item->end.y, NULL); LineTo(dc, end.x, end.y);
+			draw_dimension_line(dc, item->tool, start, end, text_font_size(item, item->stroke));
 			RoundRect(dc, box.left, box.top, box.right, box.bottom, max(8, item->stroke * 4), max(8, item->stroke * 4));
 			InflateRect(&text_rect, -max(6, item->stroke * 2), -max(4, item->stroke));
 		} else if (item->tool == ID_CALLOUT) {
@@ -1437,12 +1460,15 @@ static BOOL artifact_hit(const PIN_ARTIFACT *item, POINT p, int eraser_radius)
 		return p.x >= item->box.left - eraser_radius && p.x <= item->box.right + eraser_radius &&
 			p.y >= item->box.top - eraser_radius && p.y <= item->box.bottom + eraser_radius;
 	if (is_dimension_tool(item->tool)) {
-		POINT wings[4];
+		POINT start, end, wings[4];
+		dimension_line_points(item, &start, &end);
 		if (PtInRect(&item->box, p) ||
-			segment_distance_squared(p, item->start, item->end) <= tolerance * tolerance) return TRUE;
-		dimension_wings(item->tool, item->start, item->end, text_font_size(item, item->stroke), wings);
+			segment_distance_squared(p, start, end) <= tolerance * tolerance ||
+			segment_distance_squared(p, item->start, start) <= tolerance * tolerance ||
+			segment_distance_squared(p, item->end, end) <= tolerance * tolerance) return TRUE;
+		dimension_wings(item->tool, start, end, text_font_size(item, item->stroke), wings);
 		for (i = 0; i < 4; i++)
-			if (segment_distance_squared(p, i < 2 ? item->end : item->start, wings[i]) <= tolerance * tolerance)
+			if (segment_distance_squared(p, i < 2 ? end : start, wings[i]) <= tolerance * tolerance)
 				return TRUE;
 		return FALSE;
 	}
@@ -1512,8 +1538,11 @@ static RECT artifact_bounds(const PIN_ARTIFACT *item)
 		box.bottom = max(box.bottom, item->box.bottom);
 	}
 	if (is_dimension_tool(item->tool)) {
-		POINT wings[4];
-		dimension_wings(item->tool, item->start, item->end, text_font_size(item, item->stroke), wings);
+		POINT start, end, wings[4];
+		dimension_line_points(item, &start, &end);
+		box.left = min(box.left, min(start.x, end.x)); box.top = min(box.top, min(start.y, end.y));
+		box.right = max(box.right, max(start.x, end.x)); box.bottom = max(box.bottom, max(start.y, end.y));
+		dimension_wings(item->tool, start, end, text_font_size(item, item->stroke), wings);
 		for (i = 0; i < 4; i++) {
 			box.left = min(box.left, wings[i].x); box.top = min(box.top, wings[i].y);
 			box.right = max(box.right, wings[i].x); box.bottom = max(box.bottom, wings[i].y);
@@ -1677,8 +1706,9 @@ static void update_text_edit(PINNED_IMAGE *pin)
 		text_box_for_content(pin, pin->selection, text, stroke, pin->text_edit_tool != ID_TEXT);
 	if (is_dimension_tool(pin->text_edit_tool)) {
 		PIN_ARTIFACT *item = pin->editing_artifact;
-		box = dimension_text_box(pin, box, item != NULL ? item->start : pin->text_anchor,
-			item != NULL ? item->end : pin->text_end);
+		POINT start = pin->text_anchor, end = pin->text_end;
+		if (item != NULL) dimension_line_points(item, &start, &end);
+		box = dimension_text_box(pin, box, start, end);
 	}
 	mem_free((void **)&text);
 	if (EqualRect(&box, &pin->selection)) return;
@@ -1803,6 +1833,8 @@ static void set_artifact_geometry(PIN_ARTIFACT *target, const PIN_ARTIFACT *sour
 	#define MAP_Y(y) (new_bounds.top + MulDiv((y) - old_bounds.top, new_height, old_height))
 	target->start.x = MAP_X(source->start.x); target->start.y = MAP_Y(source->start.y);
 	target->end.x = MAP_X(source->end.x); target->end.y = MAP_Y(source->end.y);
+	target->dimension_offset.x = MulDiv(source->dimension_offset.x, new_width, old_width);
+	target->dimension_offset.y = MulDiv(source->dimension_offset.y, new_height, old_height);
 	if (target->tool == ID_MAGNIFY) {
 		/* Moving/resizing the inset keeps its source anchored to the image. */
 		target->start = source->start; target->end = source->end;
@@ -1847,11 +1879,26 @@ static void preview_selection_drag(PINNED_IMAGE *pin, POINT point)
 	RECT old_bounds, new_bounds;
 	PIN_ARTIFACT *item, *original;
 	int dx, dy;
-	if (pin->drag_original == NULL || pin->drag_mode < 1 || pin->drag_mode > 5) return;
+	if (pin->drag_original == NULL || pin->drag_mode < 1 || (pin->drag_mode > 5 && pin->drag_mode != 7)) return;
 	if (!selected_bounds(pin->drag_original, &old_bounds)) return;
 	new_bounds = old_bounds;
 	dx = point.x - pin->start.x;
 	dy = point.y - pin->start.y;
+	if (pin->drag_mode == 7) {
+		for (item = pin->artifacts, original = pin->drag_original;
+			item != NULL && original != NULL; item = item->next, original = original->next) {
+			if (original->selected) {
+				double x = (double)original->end.x - original->start.x, y = (double)original->end.y - original->start.y;
+				double length_squared = x * x + y * y;
+				double distance = length_squared > 0 ? (dy * x - dx * y) / length_squared : 0;
+				int ox = (int)round(-y * distance), oy = (int)round(x * distance);
+				item->dimension_offset = (POINT){original->dimension_offset.x + ox, original->dimension_offset.y + oy};
+				item->box = original->box; OffsetRect(&item->box, ox, oy);
+				pin->drag_changed = ox != 0 || oy != 0;
+			}
+		}
+		return;
+	}
 	if (pin->drag_mode == 1) OffsetRect(&new_bounds, dx, dy);
 	else {
 		if (pin->drag_mode == 2 || pin->drag_mode == 4) new_bounds.left += dx;
@@ -1870,7 +1917,7 @@ static void restore_selection_drag(PINNED_IMAGE *pin)
 {
 	PIN_ARTIFACT *item, *original;
 	RECT old_bounds;
-	if (pin->drag_original == NULL || pin->drag_mode < 1 || pin->drag_mode > 5) return;
+	if (pin->drag_original == NULL || pin->drag_mode < 1 || (pin->drag_mode > 5 && pin->drag_mode != 7)) return;
 	if (!selected_bounds(pin->drag_original, &old_bounds)) return;
 	for (item = pin->artifacts, original = pin->drag_original;
 		item != NULL && original != NULL; item = item->next, original = original->next)
@@ -2488,7 +2535,11 @@ static BOOL apply_properties(PINNED_IMAGE *pin)
 		}
 		if ((changes & (PROP_TEXT | PROP_SIZE | PROP_TEXT_SIZE | PROP_FONT)) && (artifact_properties(item) & PROP_TEXT)) {
 			item->box = styled_text_box(pin, item->box, artifact_text(item), item->stroke, item->tool != ID_TEXT, item);
-			if (is_dimension_tool(item->tool)) item->box = dimension_text_box(pin, item->box, item->start, item->end);
+			if (is_dimension_tool(item->tool)) {
+				POINT start, end;
+				dimension_line_points(item, &start, &end);
+				item->box = dimension_text_box(pin, item->box, start, end);
+			}
 		}
 	}
 	mem_free((void **)&text);
@@ -4226,6 +4277,7 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 	pin->current_color = (option.pinned_color != 0 || option.pinned_tool != 0) ? option.pinned_color : PIN_DEFAULT_COLOR;
 	if (pin->current_color == 0 && option.pinned_tool == 0) pin->current_color = PIN_DEFAULT_COLOR;
 	if (is_dimension_tool(pin->tool)) pin->current_color = RGB(0, 0, 0);
+	if (pin->tool == ID_ARROW || pin->tool == ID_FRAME_ARROW) pin->current_color = colors[0];
 	pin->menu = create_editor_menu(pin->source_data != NULL);
 	if (pin->menu == NULL) {
 		DeleteObject(pin->initial); free_artifacts(pin->artifacts);
@@ -5153,6 +5205,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			pin->tool = LOWORD(wparam);
 			if (pin->tool != ID_SELECT && pin->tool != ID_FRAME_SELECT) clear_selection(pin);
 			if (pin->tool == ID_REDACT || is_dimension_tool(pin->tool)) pin->current_color = RGB(0, 0, 0);
+			if (pin->tool == ID_ARROW || pin->tool == ID_FRAME_ARROW) pin->current_color = colors[0];
 			if (pin->tool == ID_HIGHLIGHT || pin->tool == ID_HIGHLIGHT_BLOCK || pin->tool == ID_ROUGH_HIGHLIGHT) pin->current_color = RGB(255, 190, 0);
 			{
 				int i;
@@ -5344,8 +5397,14 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 					if (pin->drag_original != NULL) free_artifacts(pin->drag_original);
 					pin->drag_mode = handle != 0 ? handle : hit != NULL && hit->selected ? 1 :
 						pin->tool == ID_FRAME_SELECT ? 6 : 0;
-					pin->drag_original = pin->drag_mode >= 1 && pin->drag_mode <= 5 ? clone_artifacts(pin->artifacts) : NULL;
-					if (pin->drag_mode <= 5 && pin->drag_mode != 0 && pin->drag_original == NULL) pin->drag_mode = 0;
+					if (pin->drag_mode == 1 && pin->tool == ID_SELECT && !(wparam & MK_SHIFT) && is_dimension_tool(hit->tool)) {
+						PIN_ARTIFACT *item;
+						int selected = 0;
+						for (item = pin->artifacts; item != NULL; item = item->next) if (item->selected && !item->deleted) selected++;
+						if (selected == 1) pin->drag_mode = 7;
+					}
+					pin->drag_original = pin->drag_mode != 0 && pin->drag_mode != 6 ? clone_artifacts(pin->artifacts) : NULL;
+					if (pin->drag_mode != 6 && pin->drag_mode != 0 && pin->drag_original == NULL) pin->drag_mode = 0;
 					pin->drag_changed = FALSE;
 					pin->frame_additive = (wparam & MK_SHIFT) != 0;
 					pin->start = pin->last = image;
@@ -5395,6 +5454,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		if (pin != NULL && pin->drawing) {
 			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, image;
 			if (client_to_image(pin, point, &image)) {
+				if (is_dimension_tool(pin->tool)) image = snap_dimension_end(pin, pin->start, image);
 				if ((pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) && pin->drag_original != NULL) {
 					preview_selection_drag(pin, image);
 				} else if ((pin->tool == ID_PEN || pin->tool == ID_MARKER) &&
@@ -5417,6 +5477,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) }, end = pin->last;
 			PIN_ARTIFACT *added = pin->active_artifact != NULL && pin->active_artifact->count > 0 ? pin->active_artifact : NULL;
 			client_to_image(pin, point, &end);
+			if (is_dimension_tool(pin->tool)) end = snap_dimension_end(pin, pin->start, end);
 			if (pin->tool == ID_SELECT || pin->tool == ID_FRAME_SELECT) {
 				if (pin->drag_mode == 6) select_in_frame(pin, end);
 				else {
@@ -5516,6 +5577,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			HDC canvas = dc;
 			HBITMAP buffer = NULL, old_buffer = NULL;
 			HBITMAP old;
+			HBITMAP drag_preview = NULL;
 			RECT client, image_border, shadow, viewport;
 			HBRUSH brush;
 			int saved_canvas;
@@ -5539,7 +5601,15 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			FillRect(canvas, &shadow, brush);
 			DeleteObject(brush);
 			source = CreateCompatibleDC(dc);
-			old = SelectObject(source, pin->bitmap);
+			if (pin->drawing && pin->drag_mode == 7) {
+				PINNED_IMAGE preview = *pin;
+				preview.bitmap = clone_bitmap(pin->bitmap, NULL, NULL);
+				if (preview.bitmap != NULL) {
+					if (rebuild_artifacts(&preview)) drag_preview = preview.bitmap;
+					else DeleteObject(preview.bitmap);
+				}
+			}
+			old = SelectObject(source, drag_preview != NULL ? drag_preview : pin->bitmap);
 			SetStretchBltMode(canvas, HALFTONE);
 			SetBrushOrgEx(canvas, 0, 0, NULL);
 			StretchBlt(canvas, pin->image_rect.left, pin->image_rect.top,
@@ -5641,6 +5711,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			}
 			SelectObject(source, old);
 			DeleteDC(source);
+			if (drag_preview != NULL) DeleteObject(drag_preview);
 			RestoreDC(canvas, saved_canvas);
 			if (buffer != NULL) {
 				BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top,

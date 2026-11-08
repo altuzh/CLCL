@@ -51,6 +51,7 @@
 #include "DarkMode.h"
 #include "Search.h"
 #include "DbHistory.h"
+#include "CLCLSet/SessionBackup.h"
 #include "Favorites.h"
 #include "PinnedImage.h"
 #include "resource.h"
@@ -4094,6 +4095,36 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 	case WM_HISTORY_GET_ROOT:
 		// Get history item
 		return (LRESULT)&history_data;
+
+	case WM_COPYDATA:
+		{
+			const COPYDATASTRUCT *copy = (const COPYDATASTRUCT *)lParam;
+			const TCHAR *path;
+			WIN32_FILE_ATTRIBUTE_DATA attr;
+			BYTE *archive;
+			DWORD size;
+			TCHAR error[BUF_SIZE] = {0};
+			int history_added, favourites_added;
+			BOOL ok;
+			if (copy == NULL || copy->dwData != SESSION_COPYDATA || copy->lpData == NULL ||
+				copy->cbData < sizeof(TCHAR) || copy->cbData > MAX_PATH * sizeof(TCHAR) || copy->cbData % sizeof(TCHAR)) return FALSE;
+			path = (const TCHAR *)copy->lpData;
+			if (path[copy->cbData / sizeof(TCHAR) - 1] != 0 || popup_menu != NULL ||
+				!GetFileAttributesEx(path, GetFileExInfoStandard, &attr) || attr.nFileSizeHigh || attr.nFileSizeLow > 512u * 1024u * 1024u + 256) return FALSE;
+			/* Import on the owning UI thread so captures and Favourite edits cannot race the merge. */
+			if (!save_history(hWnd, 1) || !save_regist(hWnd)) return FALSE;
+			archive = file_read_buf(path, &size, error);
+			if (archive == NULL) return FALSE;
+			ok = session_backup_import(work_path, archive, size, &history_added, &favourites_added, error);
+			mem_free((void **)&archive);
+			if (!ok) OutputDebugString(error);
+			SendMessage(hWnd, WM_HISTORY_LOAD, 1, 0);
+			SendMessage(hWnd, WM_REGIST_LOAD, 0, 0);
+			SendMessage(hWnd, WM_OPTION_LOAD, 0, 0);
+			SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
+			SendMessage(hWnd, WM_HISTORY_CHANGED, 0, 0);
+			return ok;
+		}
 
 	case WM_HISTORY_LOAD:
 		// Load history
