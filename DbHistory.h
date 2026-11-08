@@ -9,6 +9,8 @@
 
 #include "Data.h"
 
+#define DB_HISTORY_MAX_BYTES (1024ULL * 1024 * 1024)
+
 // Search result item
 typedef struct _DB_SEARCH_RESULT {
 	int id;
@@ -29,6 +31,9 @@ static __inline BOOL db_history_save_image_edit(DATA_INFO *item, HBITMAP initial
 static __inline BOOL db_history_load_image_edit(int id, HBITMAP *initial, HBITMAP *base, char **json) { return FALSE; }
 static __inline BOOL db_history_delete_item(const int id) { return FALSE; }
 static __inline BOOL db_history_trim(const int max_count) { return FALSE; }
+static __inline BOOL db_history_trim_size(const ULONGLONG max_bytes) { return FALSE; }
+static __inline BOOL db_history_deduplicate_images(DATA_INFO *keep) { return FALSE; }
+static __inline BOOL db_history_has_edited_original(DATA_INFO *item) { return FALSE; }
 static __inline int db_history_load_recent(const int limit, DATA_INFO **out_root) { return 0; }
 static __inline DATA_INFO *db_history_get_item(const int id) { return NULL; }
 static __inline BOOL db_history_ensure_item_data(DATA_INFO *item) { return FALSE; }
@@ -49,6 +54,9 @@ BOOL db_history_save_image_edit(DATA_INFO *item, HBITMAP initial, HBITMAP base, 
 BOOL db_history_load_image_edit(int id, HBITMAP *initial, HBITMAP *base, char **json);
 BOOL db_history_delete_item(const int id);
 BOOL db_history_trim(const int max_count);
+BOOL db_history_trim_size(const ULONGLONG max_bytes);
+BOOL db_history_deduplicate_images(DATA_INFO *keep);
+BOOL db_history_has_edited_original(DATA_INFO *item);
 
 int db_history_load_recent(const int limit, DATA_INFO **out_root);
 DATA_INFO *db_history_get_item(const int id);

@@ -564,8 +564,20 @@ static void test_dimension_annotations(HWND owner, int tool)
             pin->undo_count == before + 1 && pin->text_edit == NULL &&
             pin->text_edit_font == NULL && pin->text_edit_brush == NULL,
             "Enter saves both dimension endpoints and note in one undo step");
+        CHECK(pin->tool == ID_SELECT && pin->selected_artifact == item && item != NULL && item->selected &&
+            SendMessage(pin->toolbar, TB_ISBUTTONCHECKED, ID_SELECT, 0),
+            "applying dimension text activates Select with the dimension ready to move");
         if (item == NULL) continue;
         dimension_wings(item->tool, item->start, item->end, text_font_size(item, item->stroke), wings);
+        if (tool == ID_DIMENSION) {
+            double dx = item->end.x - item->start.x, dy = item->end.y - item->start.y;
+            for (j = 0; j < 4; j++) {
+                POINT tip = j < 2 ? item->end : item->start;
+                double x = wings[j].x - tip.x, y = wings[j].y - tip.y;
+                CHECK(fabs(x * dx + y * dy) > 2 * fabs(x * dy - y * dx),
+                    "dimension arrowheads have a sharper included angle in every orientation");
+            }
+        }
         if (tool == ID_DIMENSION_SLASH) {
             CHECK(wings[0].x + wings[1].x == item->end.x * 2 &&
                 wings[0].y + wings[1].y == item->end.y * 2 &&
@@ -669,6 +681,20 @@ static void test_dimension_annotations(HWND owner, int tool)
             if (i == 0) CHECK(bitmap_pixel(pin->bitmap, anchor.x, anchor.y + offset.y / 2) == item->color &&
                 bitmap_pixel(pin->bitmap, end_anchor.x, end_anchor.y + offset.y / 2) == item->color,
                 "offset dimension renders both extension lines to the measured points");
+            {
+                POINT extension_start, extension_end;
+                RECT bounds = artifact_bounds(item);
+                dimension_extension_ends(item, &extension_start, &extension_end);
+                CHECK((extension_start.x - line_start.x) * offset.x + (extension_start.y - line_start.y) * offset.y > 0 &&
+                    (extension_end.x - line_end.x) * offset.x + (extension_end.y - line_end.y) * offset.y > 0,
+                    "both witness lines continue beyond the dimension tips for every orientation");
+                CHECK(artifact_hit(item, extension_start, 1) && artifact_hit(item, extension_end, 1) &&
+                    PtInRect(&bounds, extension_start) && PtInRect(&bounds, extension_end),
+                    "witness continuations are selectable and included in the selection bounds");
+                if (i == 0) CHECK(bitmap_pixel(pin->bitmap, anchor.x, (line_start.y + extension_start.y) / 2) == item->color &&
+                    bitmap_pixel(pin->bitmap, end_anchor.x, (line_end.y + extension_end.y) / 2) == item->color,
+                    "both witness lines visibly extend past the arrowheads or slash marks");
+            }
             json = serialize_annotations(item);
             CHECK(json != NULL && deserialize_annotations(json, &decoded) && decoded != NULL &&
                 decoded->dimension_offset.x == offset.x && decoded->dimension_offset.y == offset.y &&
@@ -1010,8 +1036,8 @@ static void test_annotation_properties(HWND owner, HBITMAP source)
             }
             CHECK(pin->selected_artifact != NULL && pin->selected_artifact->selected &&
                 pin->selected_artifact->tool == tools[i] && selected_bounds(pin->artifacts, &bounds) == 1 &&
-                IsWindowVisible(dialog) && pin->tool == tools[i],
-                "new shape, pen stroke and committed text stay selected with properties while retaining the drawing tool");
+                IsWindowVisible(dialog) && pin->tool == (tools[i] == ID_TEXT ? ID_SELECT : tools[i]),
+                "new annotations stay selected; committed text activates Select while shapes and pen retain their tools");
             CHECK(previous == NULL || !previous->selected, "adding the next annotation deselects the previous one");
             previous = pin->selected_artifact;
         }
@@ -2333,6 +2359,8 @@ static void test_pinned_image_edit_core(HWND owner)
                 CHECK(callout != NULL && callout->tool == ID_CALLOUT &&
                     EqualRect(&callout->box, &live_box) && p->text_edit_font == NULL && p->text_edit_brush == NULL,
                     "saved callout retains live text frame and releases preview resources");
+                CHECK(p->tool == ID_SELECT && p->selected_artifact == callout && callout != NULL && callout->selected,
+                    "applying callout text activates Select and retains the annotation selection");
             }
             {
                 PIN_ARTIFACT *plain;
@@ -2355,8 +2383,17 @@ static void test_pinned_image_edit_core(HWND owner)
                 for (plain = p->artifacts; plain != NULL && plain->next != NULL; plain = plain->next) {}
                 CHECK(plain != NULL && plain->tool == ID_TEXT && EqualRect(&plain->box, &live_box),
                     "saved Text keeps its live editor size");
+                CHECK(p->tool == ID_SELECT && p->selected_artifact == plain && plain != NULL && plain->selected &&
+                    SendMessage(p->toolbar, TB_ISBUTTONCHECKED, ID_SELECT, 0),
+                    "applying plain text activates the checked Select tool with the text selected");
                 if (plain != NULL) {
+                    int undo = p->undo_count;
                     int old_width = plain->box.right - plain->box.left;
+                    p->tool = ID_TEXT;
+                    begin_text_edit(p, plain, plain->box);
+                    SendMessage(editor, WM_FINISH_TEXT, TRUE, 0);
+                    CHECK(p->tool == ID_SELECT && p->selected_artifact == plain && p->undo_count == undo,
+                        "applying unchanged text activates Select without adding an undo step");
                     begin_text_edit(p, plain, plain->box);
                     if (p->text_edit != NULL) {
                         SetWindowText(p->text_edit, TEXT("Longer text"));
@@ -3332,6 +3369,114 @@ static void test_sqlite_space_reclamation(void)
     printf("PASS: SQLite migration, deletion and trimming reclaim disk space\n");
 }
 
+static void test_sqlite_size_cap(void)
+{
+    TCHAR directory[MAX_PATH], database[MAX_PATH], favourites[MAX_PATH], temp[MAX_PATH], error[BUF_SIZE] = {0};
+    DATA_INFO *old_history = history_data.child, *old_favourites = regist_data.child, *folder, *newest;
+    sqlite3 *inspect = NULL;
+    sqlite3_stmt *s = NULL;
+    BYTE *saved_favourites = NULL, *after_favourites = NULL;
+    DWORD saved_size = 0, after_size = 0;
+    ULONGLONG boundary;
+    WIN32_FILE_ATTRIBUTE_DATA attributes;
+    int saved_failures = failures;
+    GetTempPath(MAX_PATH, temp); GetTempFileName(temp, TEXT("cap"), 0, directory);
+    DeleteFile(directory); CreateDirectory(directory, NULL);
+    wsprintf(database, TEXT("%s\\history.db"), directory);
+    wsprintf(favourites, TEXT("%s\\%s"), directory, REGIST_FILENAME);
+    db_history_close(); history_data.child = regist_data.child = NULL;
+    CHECK(DB_HISTORY_MAX_BYTES == 1073741824ULL && db_history_init(directory), "production database cap is 1 GiB");
+    CHECK(sqlite3_open16(database, &inspect) == SQLITE_OK && sqlite3_exec(inspect,
+        "INSERT INTO image_edits(id,initial,merged,annotations) VALUES"
+        "(1,zeroblob(32768),zeroblob(32768),'Favourite layer'),"
+        "(2,zeroblob(65536),zeroblob(65536),'Old History layer'),"
+        "(3,zeroblob(524288),zeroblob(524288),'Unreferenced layer');"
+        "INSERT INTO items(id,created_at,title,total_size,image_edit_id,pinned) VALUES"
+        "(1,10,'Oldest',262144,2,0),(2,20,'Older tied timestamp',262144,0,0),"
+        "(3,20,'Newest tied timestamp',262144,0,0),(4,1,'Pinned',16384,0,1);"
+        "INSERT INTO item_formats VALUES(1,'fixture',49152,262144,zeroblob(262144)),"
+        "(2,'fixture',49152,262144,zeroblob(262144)),(3,'fixture',49152,262144,zeroblob(262144)),"
+        "(4,'fixture',49152,16384,zeroblob(16384));"
+        "INSERT INTO history_fts(docid,title) VALUES(1,'Oldest'),(2,'Older tied timestamp'),(3,'Newest tied timestamp'),(4,'Pinned');",
+        NULL, NULL, NULL) == SQLITE_OK, "seed size-cap fixture with History, protected and unused image layers");
+    folder = data_create_folder(TEXT("Old date"), error);
+    CHECK(folder != NULL, "size-cap History folder allocates");
+    if (folder == NULL) goto cleanup;
+    history_data.child = folder; folder->child = db_history_get_item(1);
+    folder->next = db_history_get_item(2);
+    newest = db_history_get_item(3);
+    CHECK(folder->child != NULL && folder->next != NULL && newest != NULL, "load History nodes for cap synchronization");
+    if (folder->child == NULL || folder->next == NULL || newest == NULL) { data_free(newest); goto cleanup; }
+    folder->next->next = newest;
+    regist_data.child = data_create_folder(TEXT("Keep Favourites"), error);
+    CHECK(regist_data.child != NULL, "size-cap Favourites folder allocates");
+    if (regist_data.child == NULL) goto cleanup;
+    regist_data.child->child = data_create_item(TEXT("Protected favourite image"), TRUE, error);
+    CHECK(regist_data.child->child != NULL, "protected Favourite allocates");
+    if (regist_data.child->child == NULL) goto cleanup;
+    regist_data.child->child->image_edit_id = 1;
+    CHECK(file_write_data(favourites, regist_data.child, FALSE, error), "save protected Favourites fixture");
+    saved_favourites = file_read_buf(favourites, &saved_size, error);
+    CHECK(db_history_trim_size(1536ULL * 1024), "size cap reclaims unreferenced snapshots before deleting History");
+    CHECK(sqlite3_prepare_v2(inspect, "SELECT (SELECT count(*) FROM items),(SELECT count(*) FROM image_edits);", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 4 && sqlite3_column_int(s, 1) == 2,
+        "unused layer cleanup preserves every live History item and the Favourite layer");
+    sqlite3_finalize(s); s = NULL;
+    CHECK(sqlite3_exec(inspect, "CREATE TRIGGER fail_cap BEFORE DELETE ON items BEGIN SELECT raise(ABORT,'test'); END;", NULL, NULL, NULL) == SQLITE_OK,
+        "simulate a failed size-cap deletion");
+    CHECK(!db_history_trim_size(768ULL * 1024) && history_data.child == folder && folder->child != NULL,
+        "failed cap deletion preserves the visible History tree");
+    CHECK(!db_history_trim(1), "count trimming also reports and rolls back deletion failures");
+    CHECK(sqlite3_prepare_v2(inspect, "SELECT (SELECT count(*) FROM items),(SELECT count(*) FROM item_formats),(SELECT count(*) FROM history_fts),(SELECT count(*) FROM image_edits);", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 4 && sqlite3_column_int(s, 1) == 4 &&
+        sqlite3_column_int(s, 2) == 4 && sqlite3_column_int(s, 3) == 2, "failed pruning rolls back History, formats, search rows and layers together");
+    sqlite3_finalize(s); s = NULL;
+    CHECK(sqlite3_exec(inspect, "DROP TRIGGER fail_cap;", NULL, NULL, NULL) == SQLITE_OK, "remove pruning failure fixture");
+    CHECK(sqlite3_exec(inspect, "BEGIN; SELECT id FROM items;", NULL, NULL, NULL) == SQLITE_OK, "hold a reader on the pre-prune WAL snapshot");
+    CHECK(!db_history_trim_size(768ULL * 1024) && history_data.child != folder && history_data.child->param1 == 2,
+        "busy checkpoint reports delayed disk reclamation after committing the minimal History deletion");
+    CHECK(sqlite3_exec(inspect, "COMMIT;", NULL, NULL, NULL) == SQLITE_OK, "release the WAL reader");
+    CHECK(db_history_trim_size(768ULL * 1024), "size cap deletes oldest History until database fits");
+    CHECK(history_data.child != folder && history_data.child->param1 == 2 && history_data.child->next == newest,
+        "oldest live History item and its empty date folder disappear after commit");
+    CHECK(sqlite3_prepare_v2(inspect, "SELECT (SELECT count(*) FROM items),(SELECT count(*) FROM items WHERE id=1),"
+        "(SELECT count(*) FROM image_edits WHERE id=2),(SELECT count(*) FROM image_edits WHERE id=1);", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 3 && sqlite3_column_int(s, 1) == 0 &&
+        sqlite3_column_int(s, 2) == 0 && sqlite3_column_int(s, 3) == 1,
+        "size pruning collects deleted History snapshots and preserves the Favourite snapshot");
+    sqlite3_finalize(s); s = NULL;
+    CHECK(history_db_file_size(database) <= 768UL * 1024, "cap shrinks the actual database file while connection remains open");
+    wsprintf(temp, TEXT("%s-wal"), database);
+    CHECK(!GetFileAttributesEx(temp, GetFileExInfoStandard, &attributes) || (attributes.nFileSizeHigh == 0 && attributes.nFileSizeLow == 0),
+        "cap checkpoints and truncates the WAL instead of leaving deleted payloads on disk");
+    CHECK(db_history_trim_size(512ULL * 1024) && history_data.child == newest && newest->next == NULL,
+        "equal timestamps prune lower item ID first and retain the newest");
+    boundary = history_db_file_size(database);
+    CHECK(db_history_trim_size(boundary) && history_data.child == newest, "exact budget boundary does not delete another item");
+    CHECK(!db_history_trim_size(1) && history_data.child == NULL, "unreachable cap stops after unpinned History is exhausted");
+    CHECK(sqlite3_prepare_v2(inspect, "SELECT (SELECT count(*) FROM items),(SELECT id FROM items),"
+        "(SELECT count(*) FROM item_formats),(SELECT count(*) FROM history_fts),(SELECT count(*) FROM image_edits WHERE id=1 AND length(initial)=32768 AND annotations='Favourite layer');", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 1 && sqlite3_column_int(s, 1) == 4 &&
+        sqlite3_column_int(s, 2) == 1 && sqlite3_column_int(s, 3) == 1 && sqlite3_column_int(s, 4) == 1,
+        "even an impossible cap preserves pinned History and Favourite layers without orphan rows");
+    sqlite3_finalize(s); s = NULL;
+    after_favourites = file_read_buf(favourites, &after_size, error);
+    CHECK(saved_favourites != NULL && after_favourites != NULL && saved_size == after_size && !memcmp(saved_favourites, after_favourites, saved_size) &&
+        regist_data.child->child->image_edit_id == 1, "size pruning never modifies the Favourite file or its live tree");
+    CHECK(sqlite3_prepare_v2(inspect, "PRAGMA integrity_check;", -1, &s, NULL) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW &&
+        !strcmp((const char *)sqlite3_column_text(s, 0), "ok"), "size-pruned database passes integrity check");
+cleanup:
+    sqlite3_finalize(s); if (inspect != NULL) sqlite3_close(inspect);
+    db_history_close(); data_free(history_data.child); data_free(regist_data.child);
+    history_data.child = old_history; regist_data.child = old_favourites;
+    mem_free((void **)&saved_favourites); mem_free((void **)&after_favourites);
+    DeleteFile(favourites); DeleteFile(database);
+    wsprintf(temp, TEXT("%s-wal"), database); DeleteFile(temp);
+    wsprintf(temp, TEXT("%s-shm"), database); DeleteFile(temp);
+    RemoveDirectory(directory);
+    if (failures == saved_failures) printf("PASS: database size cap prunes oldest History, shrinks disk/WAL, preserves Favourites and rolls back failures\n");
+}
+
 static void test_sqlite_multiple_bitmap_persistence(void)
 {
     TCHAR err_str[BUF_SIZE] = {0};
@@ -4020,6 +4165,143 @@ static void test_tray_preview_hover(HWND owner)
     test_cursor = saved_cursor;
 }
 
+static void test_initial_image_deduplication(void)
+{
+    TCHAR directory[MAX_PATH], path[MAX_PATH], temporary[MAX_PATH], error[BUF_SIZE] = {0};
+    DATA_INFO *saved_history = history_data.child, *saved_favourites = regist_data.child;
+    DATA_INFO *item, *latest, *other, *loaded = NULL;
+    HBITMAP original = create_solid_bitmap(24, 18, RGB(30, 80, 150));
+    HBITMAP marked = create_solid_bitmap(24, 18, RGB(200, 30, 20));
+    HBITMAP revised = create_solid_bitmap(24, 18, RGB(20, 180, 70));
+    HBITMAP alpha_copy = NULL, restored_initial = NULL, restored_base = NULL;
+    sqlite3 *inspect = NULL;
+    sqlite3_stmt *s = NULL;
+    int original_id, first_edit, latest_id, other_id;
+    char *json = NULL;
+    init_gdip(); db_history_close();
+    history_data.child = regist_data.child = NULL;
+    GetTempPath(MAX_PATH, temporary); GetTempFileName(temporary, TEXT("cid"), 0, directory);
+    DeleteFile(directory); CreateDirectory(directory, NULL);
+    CHECK(db_history_init(directory) && original != NULL && marked != NULL && revised != NULL, "initial-image dedup fixture initializes");
+    if (original == NULL || marked == NULL || revised == NULL) goto cleanup;
+    item = data_create_item(TEXT("Original"), TRUE, error);
+    item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(original, NULL, NULL), 0, FALSE, error);
+    history_add(&history_data.child, item, FALSE);
+    CHECK(db_history_save_item(item), "save original unmarked image");
+    original_id = (int)item->param1;
+    {
+        DATA_INFO *folder = data_create_folder(TEXT("Old History date"), error);
+        CHECK(folder != NULL, "create nested duplicate fixture");
+        if (folder != NULL) { folder->child = history_data.child; history_data.child = folder; }
+    }
+    item = data_create_item(TEXT("First edit"), TRUE, error);
+    item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(marked, NULL, NULL), 0, FALSE, error);
+    history_add(&history_data.child, item, FALSE);
+    CHECK(db_history_save_image_edit(item, original, marked, marked, "{\"version\":1,\"artifacts\":[]}", TRUE),
+        "first edit saves with original pixels as its identity");
+    CHECK(history_data.child == item && item->next == NULL && db_history_get_item(original_id) == NULL,
+        "edited image supersedes its unmarked original in memory and SQLite and prunes the empty date folder");
+    first_edit = item->image_edit_id;
+    regist_data.child = data_item_copy(item, FALSE, FALSE, error);
+    wsprintf(path, TEXT("%s\\%s"), directory, REGIST_FILENAME);
+    CHECK(regist_data.child != NULL && file_write_data(path, regist_data.child, FALSE, error), "favourite retains the earlier editable version");
+    latest = data_create_item(TEXT("Newest edit"), TRUE, error);
+    latest->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(revised, NULL, NULL), 0, FALSE, error);
+    history_add(&history_data.child, latest, FALSE);
+    CHECK(db_history_save_image_edit(latest, original, revised, revised, "{\"version\":1,\"artifacts\":[]}", TRUE), "different markup saves as the newest revision");
+    CHECK(history_data.child == latest && latest->next == NULL && regist_data.child->image_edit_id == first_edit &&
+        bitmap_pixel(regist_data.child->child->data, 0, 0) == RGB(200, 30, 20),
+        "newest revision replaces old History versions without modifying Favourites");
+    {
+        DATA_INFO *raw = data_create_item(TEXT("Unmarked recopy"), TRUE, error);
+        raw->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(original, NULL, NULL), 0, FALSE, error);
+        CHECK(db_history_has_edited_original(raw), "recopying the original cannot replace its edited History version with a plain image");
+        data_free(raw);
+        raw = data_create_item(TEXT("DIB recopy"), TRUE, error);
+        {
+            DWORD n = 0;
+            BYTE *dib = bitmap_to_dib(original, &n);
+            HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, n);
+            BYTE *target = memory != NULL ? GlobalLock(memory) : NULL;
+            if (dib != NULL && target != NULL) memcpy(target, dib, n);
+            if (target != NULL) GlobalUnlock(memory);
+            raw->child = data_create_data(CF_DIB, TEXT("DIB"), memory, n, FALSE, error);
+            CHECK(dib != NULL && target != NULL && db_history_has_edited_original(raw), "initial-image comparison matches DIB and bitmap representations");
+            mem_free((void **)&dib);
+        }
+        data_free(raw);
+    }
+    other = data_create_item(TEXT("Different source, same visible result"), TRUE, error);
+    other->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(revised, NULL, NULL), 0, FALSE, error);
+    history_add(&history_data.child, other, FALSE);
+    CHECK(db_history_save_image_edit(other, marked, revised, revised, "{\"version\":1,\"artifacts\":[]}", TRUE) &&
+        history_data.child == other && other->next == latest, "different originals remain distinct even when merged images match");
+    other_id = (int)other->param1;
+    alpha_copy = clone_bitmap(original, NULL, NULL);
+    {
+        DIBSECTION dib = {0};
+        int x, y;
+        CHECK(GetObject(alpha_copy, sizeof(dib), &dib) == sizeof(dib) && dib.dsBm.bmBits != NULL && dib.dsBm.bmBitsPixel == 32,
+            "alpha-independent initial-image fixture exposes 32-bit pixels");
+        if (dib.dsBm.bmBits != NULL && dib.dsBm.bmBitsPixel == 32)
+            for (y = 0; y < dib.dsBm.bmHeight; y++) for (x = 0; x < dib.dsBm.bmWidth; x++)
+                ((BYTE *)dib.dsBm.bmBits)[y * dib.dsBm.bmWidthBytes + x * 4 + 3] = 127;
+    }
+    latest = data_create_item(TEXT("Same source with different alpha bytes"), TRUE, error);
+    latest->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(marked, NULL, NULL), 0, FALSE, error);
+    history_add(&history_data.child, latest, FALSE);
+    CHECK(db_history_save_image_edit(latest, alpha_copy, marked, marked, "{\"version\":1,\"artifacts\":[]}", TRUE) &&
+        history_data.child == latest && latest->next == other && other->next == NULL,
+        "reserved alpha and PNG encoding differences do not create another source identity");
+    latest_id = (int)latest->param1;
+    CHECK(db_history_trim(100) && db_history_load_image_edit(first_edit, &restored_initial, &restored_base, &json),
+        "History source deduplication preserves snapshots still referenced by Favourites");
+    wsprintf(path, TEXT("%s\\history.db"), directory);
+    CHECK(sqlite3_open16(path, &inspect) == SQLITE_OK && sqlite3_exec(inspect,
+        "INSERT INTO items(created_at,window_title,title,pinned,total_size,text_content,content_hash,image_edit_id) "
+        "SELECT 1,window_title,'Old revision',pinned,total_size,text_content,content_hash,image_edit_id FROM items ORDER BY id DESC LIMIT 1;"
+        "INSERT INTO item_formats SELECT (SELECT max(id) FROM items),format_name,format_id,data_size,data FROM item_formats WHERE item_id=(SELECT max(id) FROM items WHERE title!='Old revision');"
+        "CREATE TRIGGER block_source_dedup BEFORE DELETE ON items BEGIN SELECT raise(ABORT,'test'); END;", NULL, NULL, NULL) == SQLITE_OK,
+        "seed an older revision and simulate deletion failure");
+    CHECK(!db_history_deduplicate_images(NULL), "deduplication failure rolls back instead of removing visible items");
+    CHECK(history_data.child == latest && latest->next == other && sqlite3_prepare_v2(inspect,
+        "SELECT count(*) FROM items;", -1, &s, NULL) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 3,
+        "failed deduplication preserves all database rows and live history nodes");
+    sqlite3_finalize(s); s = NULL;
+    CHECK(sqlite3_exec(inspect, "DROP TRIGGER block_source_dedup;", NULL, NULL, NULL) == SQLITE_OK, "remove deduplication failure fixture");
+    sqlite3_close(inspect); inspect = NULL;
+    db_history_close();
+    data_free(history_data.child); history_data.child = NULL;
+    CHECK(db_history_init(directory), "source dedup database reopens without loading History");
+    item = data_create_item(TEXT("Capture with history loading disabled"), TRUE, error);
+    item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(original, NULL, NULL), 0, FALSE, error);
+    CHECK(db_history_has_edited_original(item), "cold capture initializes original identities and retains the edited version");
+    data_free(item);
+    db_history_close();
+    CHECK(db_history_init(directory) && db_history_load_recent(100, &history_data.child) == 2,
+        "startup consolidates existing revisions by initial image");
+    item = db_history_get_item(latest_id); CHECK(item != NULL, "startup keeps the newest revision"); data_free(item);
+    item = db_history_get_item(other_id); CHECK(item != NULL, "startup preserves a genuinely different original"); data_free(item);
+    CHECK(sqlite3_open16(path, &inspect) == SQLITE_OK && sqlite3_prepare_v2(inspect,
+        "SELECT (SELECT count(*) FROM items),(SELECT count(DISTINCT item_id) FROM item_formats);", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 2 && sqlite3_column_int(s, 1) == 2,
+        "deduplication removes superseded format rows as well as History records");
+cleanup:
+    sqlite3_finalize(s); if (inspect != NULL) sqlite3_close(inspect);
+    db_history_close(); data_free(history_data.child); data_free(regist_data.child);
+    history_data.child = saved_history; regist_data.child = saved_favourites;
+    if (original != NULL) DeleteObject(original); if (marked != NULL) DeleteObject(marked); if (revised != NULL) DeleteObject(revised);
+    if (alpha_copy != NULL) DeleteObject(alpha_copy);
+    if (restored_initial != NULL) DeleteObject(restored_initial); if (restored_base != NULL) DeleteObject(restored_base);
+    mem_free((void **)&json);
+    wsprintf(path, TEXT("%s\\%s"), directory, REGIST_FILENAME); DeleteFile(path);
+    wsprintf(path, TEXT("%s\\history.db"), directory); DeleteFile(path);
+    wsprintf(path, TEXT("%s\\history.db-wal"), directory); DeleteFile(path);
+    wsprintf(path, TEXT("%s\\history.db-shm"), directory); DeleteFile(path);
+    RemoveDirectory(directory); shutdown_gdip();
+    printf("PASS: original-image deduplication replaces markup revisions, preserves Favourites and rolls back failures\n");
+}
+
 static void test_session_backup(void)
 {
     TCHAR dirs[2][MAX_PATH], path[MAX_PATH], error[BUF_SIZE] = {0};
@@ -4461,9 +4743,11 @@ int main(void)
     DestroyWindow(owner);
     test_history_text_duplicates();
     test_session_backup();
+    test_initial_image_deduplication();
     test_bitmap_serialization();
     test_sqlite_multiple_bitmap_persistence();
     test_sqlite_space_reclamation();
+    test_sqlite_size_cap();
     test_date_folder_deletion();
     printf("%s: 21 native-menu scenarios + pinned image editor + bitmap serialization + SQLite multiple bitmap persistence + date folder deletion\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

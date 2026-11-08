@@ -58,6 +58,7 @@
 #define WM_HISTORY_GET_ROOT				(WM_APP + 301)
 #define WM_HISTORY_LOAD					(WM_APP + 302)
 #define WM_HISTORY_SAVE					(WM_APP + 303)
+#define WM_HISTORY_TRIM                  (WM_APP + 304)
 #define WM_REGIST_CHANGED				(WM_APP + 350)
 #define WM_REGIST_GET_ROOT				(WM_APP + 351)
 #define WM_REGIST_LOAD					(WM_APP + 352)

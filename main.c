@@ -74,6 +74,7 @@
 #define ID_RCLICK_TIMER					7
 #define ID_TRAY_HOVER_TIMER				8
 #define ID_MENU_HOVER_SAFETY_TIMER		9
+#define ID_HISTORY_TRIM_TIMER            10
 
 #define RECLIP_INTERVAL					1000
 #define RECHAIN_INTERVAL				60000
@@ -2699,7 +2700,8 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	// Crop detected screenshots before deduplication or persistence.
 	pinned_image_auto_open(hWnd, di, sequence);
 	// Add to history
-	if (history_add(&history_data.child, di, (cp_tmi.enable == TRUE) ? FALSE : TRUE) == FALSE) {
+	if (db_history_has_edited_original(di) ||
+		history_add(&history_data.child, di, (cp_tmi.enable == TRUE) ? FALSE : TRUE) == FALSE) {
 		pinned_image_bind_history(di, clipboard_sequence, FALSE);
 		data_free(di);
 		return TRUE;
@@ -2711,7 +2713,6 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	// Atomically save to SQLite immediately
 	if (db_history_is_open()) {
 		db_history_save_item(di);
-		db_history_trim(10000);
 	}
 
 	// Execute tool from menu
@@ -2744,6 +2745,7 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	}
 	// Notify history change
 	SendMessage(hWnd, WM_HISTORY_CHANGED, 0, 0);
+	PostMessage(hWnd, WM_HISTORY_TRIM, 0, 0);
 	return TRUE;
 }
 
@@ -2834,6 +2836,8 @@ static BOOL load_history(const HWND hWnd, const int load_flag)
 	if (PathFileExists(path) == TRUE) {
 		db_history_migrate_from_dat(path);
 	}
+	if (db_history_is_open() && !db_history_trim(10000))
+		OutputDebugString(TEXT("CLCL: startup History trimming could not complete.\n"));
 
 	// Load history (fast load of metadata only, lazy load of data body)
 	if (load_flag != 0 || option.history_save == 1) {
@@ -2909,8 +2913,8 @@ static BOOL save_history(const HWND hWnd, const int save_flag)
 	}
 
 	if (db_history_is_open()) {
-		db_history_trim(10000);
-		return TRUE;
+		if (popup_menu != NULL) { PostMessage(hWnd, WM_HISTORY_TRIM, 0, 0); return TRUE; }
+		return db_history_trim(10000);
 	}
 
 	// Save history (stream directly without memory copying when filter_save = TRUE)
@@ -3127,12 +3131,12 @@ static BOOL winodw_initialize(const HWND hWnd)
 		_SetForegroundWindow(hWnd);
 		MessageBox(hWnd, err_str, ERROR_TITLE, MB_ICONERROR);
 	}
-	// Load history
-	if (load_history(hWnd, 0) == FALSE) {
-		return FALSE;
-	}
 	// Load registered items
 	if (load_regist(hWnd) == FALSE) {
+		return FALSE;
+	}
+	// Favourites must be loaded before History pruning protects their image layers.
+	if (load_history(hWnd, 0) == FALSE) {
 		return FALSE;
 	}
 	// Prepare item titles, icons and previews before the first menu request.
@@ -3840,6 +3844,10 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 			}
 			break;
 
+		case ID_HISTORY_TRIM_TIMER:
+			SendMessage(hWnd, WM_HISTORY_TRIM, 0, 0);
+			break;
+
 		case ID_MENU_HOVER_SAFETY_TIMER:
 			KillTimer(hWnd, ID_MENU_HOVER_SAFETY_TIMER);
 			menu_context_reopen_target = NULL;
@@ -4118,8 +4126,8 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 			ok = session_backup_import(work_path, archive, size, &history_added, &favourites_added, error);
 			mem_free((void **)&archive);
 			if (!ok) OutputDebugString(error);
-			SendMessage(hWnd, WM_HISTORY_LOAD, 1, 0);
 			SendMessage(hWnd, WM_REGIST_LOAD, 0, 0);
+			SendMessage(hWnd, WM_HISTORY_LOAD, 1, 0);
 			SendMessage(hWnd, WM_OPTION_LOAD, 0, 0);
 			SendMessage(hWnd, WM_REGIST_CHANGED, 0, 0);
 			SendMessage(hWnd, WM_HISTORY_CHANGED, 0, 0);
@@ -4138,6 +4146,15 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 	case WM_HISTORY_SAVE:
 		// Save history
 		return save_history(hWnd, wParam);
+
+	case WM_HISTORY_TRIM:
+		if (popup_menu != NULL) { SetTimer(hWnd, ID_HISTORY_TRIM_TIMER, 1000, NULL); return 0; }
+		KillTimer(hWnd, ID_HISTORY_TRIM_TIMER);
+		if (db_history_is_open()) {
+			if (!db_history_trim(10000)) OutputDebugString(TEXT("CLCL: History trimming could not complete.\n"));
+			SendMessage(hWnd, WM_HISTORY_CHANGED, 0, 0);
+		}
+		return 0;
 
 	case WM_REGIST_CHANGED:
 		// Registered items content change
@@ -4165,7 +4182,9 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 
 	case WM_REGIST_SAVE:
 		// Save registered items
-		return save_regist(hWnd);
+		if (!save_regist(hWnd)) return FALSE;
+		PostMessage(hWnd, WM_HISTORY_TRIM, 0, 0);
+		return TRUE;
 
 	case WM_ITEM_TO_CLIPBOARD:
 		// Set data to clipboard

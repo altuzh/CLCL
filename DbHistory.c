@@ -308,6 +308,7 @@ BOOL db_history_save_item(DATA_INFO *item)
 				}
 				item->param1 = (LPARAM)last_id;
 				if (text_content != NULL) mem_free((void **)&text_content);
+				if (sqlite3_get_autocommit(db)) db_history_deduplicate_images(item);
 				return TRUE;
 			}
 		}
@@ -467,6 +468,7 @@ BOOL db_history_save_item(DATA_INFO *item)
 			sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
 			return FALSE;
 		}
+		db_history_deduplicate_images(item);
 	}
 	return TRUE;
 }
@@ -487,6 +489,7 @@ int db_history_load_recent(const int limit, DATA_INFO **out_root)
 		return 0;
 	}
 	*out_root = NULL;
+	db_history_deduplicate_images(NULL);
 
 	rc = sqlite3_prepare16_v2(db,
 		L"SELECT id, created_at, window_title, title, text_content, content_hash, image_edit_id FROM items ORDER BY created_at DESC, id DESC LIMIT ?;",
@@ -981,6 +984,210 @@ BOOL db_history_delete_item(const int id)
 	return TRUE;
 }
 
+/* Identity uses unmarked source pixels, ignoring bitmap encoding and reserved alpha bytes. */
+static BYTE *db_initial_image_pixels(DATA_INFO *item, DWORD *size)
+{
+	HBITMAP bitmap = NULL;
+	BOOL owned = FALSE;
+	BITMAP object;
+	BITMAPINFO info = {0};
+	BYTE *pixels = NULL;
+	HDC dc;
+	DWORD bytes, i;
+	*size = 0;
+	if (item == NULL || item->type != TYPE_ITEM) return NULL;
+	if (item->image_edit_id > 0) {
+		sqlite3_stmt *s = NULL;
+		if (sqlite3_prepare_v2(db, "SELECT initial FROM image_edits WHERE id=?;", -1, &s, NULL) == SQLITE_OK) {
+			sqlite3_bind_int(s, 1, item->image_edit_id);
+			if (sqlite3_step(s) == SQLITE_ROW) bitmap = png_to_bitmap(sqlite3_column_blob(s, 0), (DWORD)sqlite3_column_bytes(s, 0));
+		}
+		sqlite3_finalize(s);
+		owned = TRUE;
+	} else {
+		DATA_INFO *c;
+		/* A rich-text clip with an embedded bitmap is still a text clip. */
+		for (c = item->child; c != NULL; c = c->next)
+			if (c->format == CF_UNICODETEXT || c->format == CF_TEXT || c->format == CF_OEMTEXT) return NULL;
+		if (!db_history_ensure_item_data(item)) return NULL;
+		for (c = item->child; c != NULL; c = c->next) {
+			UINT format = c->format ? c->format : clipboard_get_format(0, c->format_name);
+			if (format == CF_BITMAP || format == CF_DSPBITMAP) { bitmap = (HBITMAP)c->data; break; }
+		}
+		if (bitmap == NULL) for (c = item->child; c != NULL; c = c->next) {
+			UINT format = c->format ? c->format : clipboard_get_format(0, c->format_name);
+			if ((format == CF_DIB || format == CF_DIBV5) && c->data != NULL) {
+				const BYTE *memory = GlobalLock(c->data);
+				SIZE_T length = GlobalSize(c->data);
+				if (memory != NULL && length >= sizeof(BITMAPINFOHEADER)) {
+					const BITMAPINFOHEADER *b = (const BITMAPINFOHEADER *)memory;
+					ULONGLONG offset = b->biSize;
+					if (b->biBitCount <= 8) offset += (ULONGLONG)(b->biClrUsed ? b->biClrUsed : 1u << b->biBitCount) * sizeof(RGBQUAD);
+					else offset += (ULONGLONG)b->biClrUsed * sizeof(RGBQUAD);
+					if (b->biSize == sizeof(*b) && b->biCompression == BI_BITFIELDS) offset += 12;
+					if (b->biSize >= sizeof(*b) && b->biWidth > 0 && b->biHeight != 0 && b->biHeight != LONG_MIN && b->biPlanes == 1 &&
+						(b->biBitCount == 1 || b->biBitCount == 4 || b->biBitCount == 8 || b->biBitCount == 16 || b->biBitCount == 24 || b->biBitCount == 32) &&
+						(b->biCompression == BI_RGB || b->biCompression == BI_BITFIELDS) && offset <= length &&
+						(((ULONGLONG)b->biWidth * b->biBitCount + 31) / 32) * 4 * (b->biHeight < 0 ? -(LONGLONG)b->biHeight : b->biHeight) <= length - offset) {
+						dc = GetDC(NULL);
+						if (dc != NULL) { bitmap = CreateDIBitmap(dc, b, CBM_INIT, memory + (SIZE_T)offset, (const BITMAPINFO *)memory, DIB_RGB_COLORS); ReleaseDC(NULL, dc); }
+					}
+				}
+				if (memory != NULL) GlobalUnlock(c->data);
+				owned = TRUE;
+				if (bitmap != NULL) break;
+			}
+		}
+	}
+	if (bitmap == NULL || !GetObject(bitmap, sizeof(object), &object) || object.bmWidth <= 0 || object.bmHeight <= 0 ||
+		(ULONGLONG)object.bmWidth * object.bmHeight * 4 + 8 > MAXDWORD) goto done;
+	bytes = (DWORD)object.bmWidth * object.bmHeight * 4;
+	pixels = mem_alloc(bytes + 8);
+	if (pixels == NULL) goto done;
+	((LONG *)pixels)[0] = object.bmWidth; ((LONG *)pixels)[1] = object.bmHeight;
+	info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth = object.bmWidth;
+	info.bmiHeader.biHeight = -object.bmHeight; info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+	dc = GetDC(NULL);
+	if (dc == NULL || GetDIBits(dc, bitmap, 0, object.bmHeight, pixels + 8, &info, DIB_RGB_COLORS) != object.bmHeight) {
+		mem_free((void **)&pixels);
+	} else {
+		for (i = 11; i < bytes + 8; i += 4) pixels[i] = 0;
+		*size = bytes + 8;
+	}
+	if (dc != NULL) ReleaseDC(NULL, dc);
+done:
+	if (owned && bitmap != NULL) DeleteObject(bitmap);
+	return pixels;
+}
+
+BOOL db_history_has_edited_original(DATA_INFO *item)
+{
+	sqlite3_stmt *rows = NULL;
+	BYTE *pixels;
+	DWORD size;
+	BOOL found = FALSE;
+	if (db == NULL || item == NULL || item->image_edit_id != 0) return FALSE;
+	/* History loading can be disabled; initialize identities before the first capture too. */
+	if (sqlite3_prepare_v2(db, "SELECT 1 FROM temp.sqlite_master WHERE name='initial_image_keys';", -1, &rows, NULL) != SQLITE_OK) return FALSE;
+	if (sqlite3_step(rows) != SQLITE_ROW) {
+		sqlite3_finalize(rows); rows = NULL;
+		if (!db_history_deduplicate_images(NULL)) return FALSE;
+	}
+	sqlite3_finalize(rows); rows = NULL;
+	pixels = db_initial_image_pixels(item, &size);
+	if (pixels == NULL) return FALSE;
+	if (sqlite3_prepare_v2(db, "SELECT i.id FROM items i JOIN initial_image_keys k ON i.id=k.id WHERE i.image_edit_id>0 AND k.hash=?;", -1, &rows, NULL) == SQLITE_OK) {
+		sqlite3_bind_int64(rows, 1, (sqlite3_int64)fnv1a_64(pixels, size, 0xCBF29CE484222325ULL));
+		while (sqlite3_step(rows) == SQLITE_ROW) {
+			DATA_INFO *other = db_history_get_item(sqlite3_column_int(rows, 0));
+			DWORD other_size;
+			BYTE *original = db_initial_image_pixels(other, &other_size);
+			data_free(other);
+			found = original != NULL && size == other_size && !memcmp(pixels, original, size);
+			mem_free((void **)&original);
+			if (found) break;
+		}
+	}
+	sqlite3_finalize(rows); mem_free((void **)&pixels);
+	return found;
+}
+
+static void db_remove_missing_history(DATA_INFO **root, DATA_INFO *keep, sqlite3_stmt *exists)
+{
+	while (*root != NULL) {
+		DATA_INFO *item = *root;
+		BOOL remove = FALSE;
+		if (item->type == TYPE_FOLDER) {
+			db_remove_missing_history(&item->child, keep, exists);
+			remove = item->child == NULL;
+		} else if (item->type == TYPE_ITEM && item != keep && item->param1 > 0) {
+			sqlite3_reset(exists); sqlite3_bind_int64(exists, 1, item->param1);
+			remove = sqlite3_step(exists) == SQLITE_DONE || (keep != NULL && item->param1 == keep->param1);
+		}
+		if (remove) { *root = item->next; item->next = NULL; data_free(item); }
+		else root = &item->next;
+	}
+}
+
+BOOL db_history_deduplicate_images(DATA_INFO *keep)
+{
+	sqlite3_stmt *rows = NULL, *cache = NULL, *matches = NULL, *remember = NULL;
+	BYTE *pixels = NULL;
+	int rc, deleted = 0;
+	BOOL ok = FALSE;
+	if (db == NULL || !sqlite3_get_autocommit(db)) return FALSE;
+	/* Only hashes live in this connection-local cache; clipboard payloads stay on disk. */
+	if (sqlite3_exec(db, "CREATE TEMP TABLE IF NOT EXISTS initial_image_keys(id INTEGER PRIMARY KEY,hash INTEGER);"
+		"CREATE INDEX IF NOT EXISTS initial_image_hash ON initial_image_keys(hash);"
+		"CREATE TEMP TABLE IF NOT EXISTS initial_image_keep(id INTEGER PRIMARY KEY,hash INTEGER);"
+		"CREATE INDEX IF NOT EXISTS initial_keep_hash ON initial_image_keep(hash);"
+		"DELETE FROM initial_image_keep; BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
+	if (sqlite3_prepare_v2(db, "SELECT id FROM items WHERE id NOT IN (SELECT id FROM initial_image_keys);", -1, &rows, NULL) != SQLITE_OK ||
+		sqlite3_prepare_v2(db, "INSERT INTO initial_image_keys VALUES(?,?);", -1, &cache, NULL) != SQLITE_OK) goto done;
+	while ((rc = sqlite3_step(rows)) == SQLITE_ROW) {
+		int id = sqlite3_column_int(rows, 0);
+		DWORD size;
+		DATA_INFO *item = db_history_get_item(id);
+		UINT64 hash = 0;
+		if (item == NULL) goto done;
+		pixels = db_initial_image_pixels(item, &size); data_free(item);
+		if (pixels != NULL) hash = fnv1a_64(pixels, size, 0xCBF29CE484222325ULL);
+		mem_free((void **)&pixels);
+		sqlite3_reset(cache); sqlite3_bind_int(cache, 1, id); sqlite3_bind_int64(cache, 2, (sqlite3_int64)hash);
+		if (sqlite3_step(cache) != SQLITE_DONE) goto done;
+	}
+	if (rc != SQLITE_DONE) goto done;
+	sqlite3_finalize(rows); rows = NULL;
+	if (sqlite3_prepare_v2(db, "SELECT i.id,k.hash FROM items i JOIN initial_image_keys k ON i.id=k.id WHERE k.hash!=0 "
+		"AND (?=0 OR k.hash=(SELECT hash FROM initial_image_keys WHERE id=?)) "
+		"ORDER BY (i.id=?) DESC,(i.image_edit_id>0) DESC,i.created_at DESC,i.id DESC;", -1, &rows, NULL) != SQLITE_OK ||
+		sqlite3_prepare_v2(db, "SELECT id FROM initial_image_keep WHERE hash=?;", -1, &matches, NULL) != SQLITE_OK ||
+		sqlite3_prepare_v2(db, "INSERT INTO initial_image_keep VALUES(?,?);", -1, &remember, NULL) != SQLITE_OK) goto done;
+	sqlite3_bind_int64(rows, 1, keep != NULL ? keep->param1 : 0);
+	sqlite3_bind_int64(rows, 2, keep != NULL ? keep->param1 : 0);
+	sqlite3_bind_int64(rows, 3, keep != NULL ? keep->param1 : 0);
+	while ((rc = sqlite3_step(rows)) == SQLITE_ROW) {
+		int id = sqlite3_column_int(rows, 0), match;
+		sqlite3_int64 hash = sqlite3_column_int64(rows, 1);
+		DWORD size = 0;
+		BOOL duplicate = FALSE;
+		sqlite3_reset(matches); sqlite3_bind_int64(matches, 1, hash);
+		while ((match = sqlite3_step(matches)) == SQLITE_ROW) {
+			DATA_INFO *a, *b;
+			BYTE *other;
+			DWORD other_size;
+			if (pixels == NULL) { a = db_history_get_item(id); pixels = db_initial_image_pixels(a, &size); data_free(a); }
+			b = db_history_get_item(sqlite3_column_int(matches, 0));
+			other = db_initial_image_pixels(b, &other_size); data_free(b);
+			duplicate = pixels != NULL && other != NULL && size == other_size && !memcmp(pixels, other, size);
+			mem_free((void **)&other);
+			if (duplicate) break;
+		}
+		mem_free((void **)&pixels);
+		if (match != SQLITE_ROW && match != SQLITE_DONE) goto done;
+		sqlite3_reset(matches);
+		if (duplicate) { if (!db_history_delete_item(id)) goto done; deleted++; }
+		else {
+			sqlite3_reset(remember); sqlite3_bind_int(remember, 1, id); sqlite3_bind_int64(remember, 2, hash);
+			if (sqlite3_step(remember) != SQLITE_DONE) goto done;
+		}
+	}
+	if (rc != SQLITE_DONE) goto done;
+	/* Finalize the read before committing deleted rows and reclaiming their pages. */
+	sqlite3_finalize(rows); rows = NULL;
+	ok = sqlite3_exec(db, "DELETE FROM initial_image_keys WHERE id NOT IN (SELECT id FROM items); COMMIT;", NULL, NULL, NULL) == SQLITE_OK;
+done:
+	mem_free((void **)&pixels); sqlite3_finalize(rows); sqlite3_finalize(cache); sqlite3_finalize(matches); sqlite3_finalize(remember);
+	if (!ok) { sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL); OutputDebugString(TEXT("CLCL: initial-image history deduplication failed.\n")); }
+	else if (deleted || keep != NULL) {
+		sqlite3_stmt *exists = NULL;
+		if (sqlite3_prepare_v2(db, "SELECT 1 FROM items WHERE id=?;", -1, &exists, NULL) == SQLITE_OK)
+			db_remove_missing_history(&history_data.child, keep, exists);
+		sqlite3_finalize(exists);
+	}
+	return ok;
+}
+
 /* Replace an existing item atomically, preserving the old row if saving fails. */
 BOOL db_history_update_item(DATA_INFO *item)
 {
@@ -1005,6 +1212,7 @@ BOOL db_history_update_item(DATA_INFO *item)
 		sqlite3_exec(db, "ROLLBACK TO update_item; RELEASE update_item;", NULL, NULL, NULL);
 		return FALSE;
 	}
+	if (sqlite3_get_autocommit(db)) db_history_deduplicate_images(item);
 	return TRUE;
 }
 
@@ -1041,6 +1249,7 @@ BOOL db_history_save_image_edit(DATA_INFO *item, HBITMAP initial, HBITMAP base, 
 	item->content_hash = 0;
 	if (history && !(item->param1 > 0 ? db_history_update_item(item) : db_history_save_item(item))) goto rollback;
 	if (sqlite3_exec(db, "RELEASE save_image;", NULL, NULL, NULL) != SQLITE_OK) goto rollback;
+	if (history && sqlite3_get_autocommit(db)) db_history_deduplicate_images(item);
 	ok = TRUE;
 	goto done;
 rollback:
@@ -1110,56 +1319,102 @@ static BOOL db_prune_image_edits(void)
 		"AND id NOT IN (SELECT id FROM favourite_edits);", NULL, NULL, NULL) == SQLITE_OK;
 }
 
-/*
- * db_history_trim - keep only the latest max_count items
- */
+/* Refresh only History after committed pruning; Favourites own independent copies. */
+static void db_sync_trimmed_history(void)
+{
+	sqlite3_stmt *exists = NULL;
+	if (sqlite3_prepare_v2(db, "SELECT 1 FROM items WHERE id=?;", -1, &exists, NULL) == SQLITE_OK)
+		db_remove_missing_history(&history_data.child, NULL, exists);
+	sqlite3_finalize(exists);
+}
+
+static BOOL db_history_size(BOOL used_only, ULONGLONG *bytes)
+{
+	const char *queries[] = {"PRAGMA page_count;", "PRAGMA page_size;", "PRAGMA freelist_count;"};
+	sqlite3_int64 values[3] = {0};
+	int i;
+	for (i = 0; i < (used_only ? 3 : 2); i++) {
+		sqlite3_stmt *stmt = NULL;
+		int rc = sqlite3_prepare_v2(db, queries[i], -1, &stmt, NULL);
+		if (rc == SQLITE_OK) rc = sqlite3_step(stmt);
+		if (rc == SQLITE_ROW) values[i] = sqlite3_column_int64(stmt, 0);
+		sqlite3_finalize(stmt);
+		if (rc != SQLITE_ROW || values[i] < 0) return FALSE;
+	}
+	if (values[1] == 0 || values[0] < values[2]) return FALSE;
+	*bytes = (ULONGLONG)(values[0] - values[2]) * values[1];
+	return TRUE;
+}
+
+/* FULL auto-vacuum shrinks the database at commit; checkpoint publishes it to disk. */
+BOOL db_history_trim_size(const ULONGLONG max_bytes)
+{
+	sqlite3_stmt *oldest = NULL;
+	ULONGLONG bytes;
+	BOOL ok = FALSE, transaction = FALSE, exhausted = FALSE, changed = FALSE;
+	if (db == NULL || max_bytes == 0 || !sqlite3_get_autocommit(db) || !db_history_size(FALSE, &bytes)) return FALSE;
+	if (bytes <= max_bytes) return sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL) == SQLITE_OK;
+	if (sqlite3_prepare_v2(db, "SELECT id FROM items WHERE pinned=0 ORDER BY created_at,id LIMIT 1;", -1, &oldest, NULL) != SQLITE_OK) return FALSE;
+	while (bytes > max_bytes && !exhausted) {
+		ULONGLONG before = bytes;
+		if (sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) goto done;
+		transaction = TRUE;
+		if (!db_prune_image_edits() || !db_history_size(TRUE, &bytes)) goto done;
+		while (bytes > max_bytes) {
+			int id, rc;
+			sqlite3_reset(oldest);
+			rc = sqlite3_step(oldest);
+			if (rc == SQLITE_DONE) { exhausted = TRUE; break; }
+			if (rc != SQLITE_ROW) goto done;
+			id = sqlite3_column_int(oldest, 0);
+			sqlite3_reset(oldest);
+			if (!db_history_delete_item(id) || !db_prune_image_edits() || !db_history_size(TRUE, &bytes)) goto done;
+		}
+		if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) goto done;
+		transaction = FALSE; changed = TRUE;
+		if (!db_history_size(FALSE, &bytes)) goto done;
+		if (bytes >= before) break;
+	}
+	/* A busy reader may delay shrinking the main file/WAL; never delete extra History for that. */
+	ok = sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL) == SQLITE_OK && bytes <= max_bytes;
+ done:
+	sqlite3_finalize(oldest);
+	if (transaction) sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+	if (changed) db_sync_trimmed_history();
+	if (!ok) OutputDebugString(TEXT("CLCL: database size cap could not be reached; protected data or a busy reader may remain.\n"));
+	return ok;
+}
+
+/* Keep the latest max_count unpinned items, then enforce the disk-size budget. */
 BOOL db_history_trim(const int max_count)
 {
+	const char *deletes[] = {
+		"DELETE FROM item_formats WHERE item_id IN (SELECT id FROM items WHERE pinned=0 ORDER BY created_at DESC,id DESC LIMIT -1 OFFSET ?);",
+		"DELETE FROM history_fts WHERE docid IN (SELECT id FROM items WHERE pinned=0 ORDER BY created_at DESC,id DESC LIMIT -1 OFFSET ?);",
+		"DELETE FROM items WHERE pinned=0 AND id IN (SELECT id FROM items WHERE pinned=0 ORDER BY created_at DESC,id DESC LIMIT -1 OFFSET ?);"
+	};
 	sqlite3_stmt *stmt = NULL;
-	int rc;
-
+	BOOL own_transaction;
+	int i, rc;
 	if (db == NULL || max_count <= 0) return FALSE;
-
-	BOOL inside_tx = (sqlite3_get_autocommit(db) == 0);
-	if (!inside_tx) {
-		sqlite3_exec(db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
-	}
-
-	rc = sqlite3_prepare_v2(db,
-		"DELETE FROM item_formats WHERE item_id IN ("
-		"  SELECT id FROM items WHERE pinned = 0 ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?"
-		");", -1, &stmt, NULL);
-	if (rc == SQLITE_OK) {
+	own_transaction = sqlite3_get_autocommit(db) != 0;
+	if (sqlite3_exec(db, "SAVEPOINT trim_history;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
+	for (i = 0; i < ARRAYSIZE(deletes); i++) {
+		rc = sqlite3_prepare_v2(db, deletes[i], -1, &stmt, NULL);
+		if (rc != SQLITE_OK) goto rollback;
 		sqlite3_bind_int(stmt, 1, max_count);
-		sqlite3_step(stmt);
-		sqlite3_finalize(stmt);
+		rc = sqlite3_step(stmt);
+		sqlite3_finalize(stmt); stmt = NULL;
+		if (rc != SQLITE_DONE) goto rollback;
 	}
-
-	rc = sqlite3_prepare_v2(db,
-		"DELETE FROM history_fts WHERE docid IN ("
-		"  SELECT id FROM items WHERE pinned = 0 ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?"
-		");", -1, &stmt, NULL);
-	if (rc == SQLITE_OK) {
-		sqlite3_bind_int(stmt, 1, max_count);
-		sqlite3_step(stmt);
-		sqlite3_finalize(stmt);
-	}
-
-	rc = sqlite3_prepare_v2(db,
-		"DELETE FROM items WHERE pinned = 0 AND id NOT IN ("
-		"  SELECT id FROM items WHERE pinned = 0 ORDER BY created_at DESC, id DESC LIMIT ?"
-		");", -1, &stmt, NULL);
-	if (rc == SQLITE_OK) {
-		sqlite3_bind_int(stmt, 1, max_count);
-		sqlite3_step(stmt);
-		sqlite3_finalize(stmt);
-	}
-
-	if (!inside_tx) {
-		sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL);
-	}
-
-	return db_prune_image_edits();
+	if (!db_prune_image_edits() || sqlite3_exec(db, "RELEASE trim_history;", NULL, NULL, NULL) != SQLITE_OK) goto rollback;
+	if (!own_transaction) return TRUE;
+	db_sync_trimmed_history();
+	return db_history_trim_size(DB_HISTORY_MAX_BYTES);
+ rollback:
+	sqlite3_finalize(stmt);
+	sqlite3_exec(db, "ROLLBACK TO trim_history; RELEASE trim_history;", NULL, NULL, NULL);
+	return FALSE;
 }
 
 /*

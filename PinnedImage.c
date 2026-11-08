@@ -103,6 +103,7 @@
 #define WM_FINISH_TEXT (WM_APP + 150)
 
 #define PIN_DEFAULT_COLOR RGB(220, 32, 32)
+#define PIN_ARROW_HALF_ANGLE 0.35
 
 typedef struct _PIN_ARTIFACT {
 	struct _PIN_ARTIFACT *next;
@@ -1006,6 +1007,19 @@ static void dimension_line_points(const PIN_ARTIFACT *item, POINT *start, POINT 
 	*end = (POINT){item->end.x + item->dimension_offset.x, item->end.y + item->dimension_offset.y};
 }
 
+static void dimension_extension_ends(const PIN_ARTIFACT *item, POINT *start, POINT *end)
+{
+	double x = item->dimension_offset.x, y = item->dimension_offset.y;
+	double length = sqrt(x * x + y * y);
+	dimension_line_points(item, start, end);
+	if (length > 0) {
+		int overrun = max(item->stroke * 3, text_font_size(item, item->stroke) / 3);
+		int dx = (int)round(x * overrun / length), dy = (int)round(y * overrun / length);
+		start->x += dx; start->y += dy;
+		end->x += dx; end->y += dy;
+	}
+}
+
 static POINT snap_dimension_end(PINNED_IMAGE *pin, POINT start, POINT end)
 {
 	int dx = abs(end.x - start.x), dy = abs(end.y - start.y);
@@ -1030,7 +1044,7 @@ static void dimension_wings(int tool, POINT start, POINT end, int text_size, POI
 			wings[i] = (POINT){ end.x + x, end.y + y };
 			wings[i + 2] = (POINT){ start.x + x, start.y + y };
 		} else {
-			double side = i ? 0.55 : -0.55;
+			double side = i ? PIN_ARROW_HALF_ANGLE : -PIN_ARROW_HALF_ANGLE;
 			wings[i] = (POINT){ end.x - (LONG)(cos(angle + side) * size),
 				end.y - (LONG)(sin(angle + side) * size) };
 			wings[i + 2] = (POINT){ start.x + (LONG)(cos(angle + side) * size),
@@ -1069,8 +1083,8 @@ static void finish_shape(PINNED_IMAGE *pin, POINT end)
 		if (pin->tool == ID_ARROW) {
 			double angle = atan2((double)(end.y - pin->start.y), (double)(end.x - pin->start.x));
 			int size = max(stroke * 4, image_stroke_width(pin, 3));
-			POINT wing1 = { end.x - (int)(cos(angle - 0.55) * size), end.y - (int)(sin(angle - 0.55) * size) };
-			POINT wing2 = { end.x - (int)(cos(angle + 0.55) * size), end.y - (int)(sin(angle + 0.55) * size) };
+			POINT wing1 = { end.x - (int)(cos(angle - PIN_ARROW_HALF_ANGLE) * size), end.y - (int)(sin(angle - PIN_ARROW_HALF_ANGLE) * size) };
+			POINT wing2 = { end.x - (int)(cos(angle + PIN_ARROW_HALF_ANGLE) * size), end.y - (int)(sin(angle + PIN_ARROW_HALF_ANGLE) * size) };
 			MoveToEx(dc, end.x, end.y, NULL); LineTo(dc, wing1.x, wing1.y);
 			MoveToEx(dc, end.x, end.y, NULL); LineTo(dc, wing2.x, wing2.y);
 		}
@@ -1354,10 +1368,11 @@ static void render_extra_artifact(PINNED_IMAGE *pin, const PIN_ARTIFACT *item)
 		HFONT font, old_font;
 		RECT text_rect = box;
 		if (is_dimension_tool(item->tool)) {
-			POINT start, end;
+			POINT start, end, extension_start, extension_end;
 			dimension_line_points(item, &start, &end);
-			MoveToEx(dc, item->start.x, item->start.y, NULL); LineTo(dc, start.x, start.y);
-			MoveToEx(dc, item->end.x, item->end.y, NULL); LineTo(dc, end.x, end.y);
+			dimension_extension_ends(item, &extension_start, &extension_end);
+			MoveToEx(dc, item->start.x, item->start.y, NULL); LineTo(dc, extension_start.x, extension_start.y);
+			MoveToEx(dc, item->end.x, item->end.y, NULL); LineTo(dc, extension_end.x, extension_end.y);
 			draw_dimension_line(dc, item->tool, start, end, text_font_size(item, item->stroke));
 			RoundRect(dc, box.left, box.top, box.right, box.bottom, max(8, item->stroke * 4), max(8, item->stroke * 4));
 			InflateRect(&text_rect, -max(6, item->stroke * 2), -max(4, item->stroke));
@@ -1460,12 +1475,13 @@ static BOOL artifact_hit(const PIN_ARTIFACT *item, POINT p, int eraser_radius)
 		return p.x >= item->box.left - eraser_radius && p.x <= item->box.right + eraser_radius &&
 			p.y >= item->box.top - eraser_radius && p.y <= item->box.bottom + eraser_radius;
 	if (is_dimension_tool(item->tool)) {
-		POINT start, end, wings[4];
+		POINT start, end, extension_start, extension_end, wings[4];
 		dimension_line_points(item, &start, &end);
+		dimension_extension_ends(item, &extension_start, &extension_end);
 		if (PtInRect(&item->box, p) ||
 			segment_distance_squared(p, start, end) <= tolerance * tolerance ||
-			segment_distance_squared(p, item->start, start) <= tolerance * tolerance ||
-			segment_distance_squared(p, item->end, end) <= tolerance * tolerance) return TRUE;
+			segment_distance_squared(p, item->start, extension_start) <= tolerance * tolerance ||
+			segment_distance_squared(p, item->end, extension_end) <= tolerance * tolerance) return TRUE;
 		dimension_wings(item->tool, start, end, text_font_size(item, item->stroke), wings);
 		for (i = 0; i < 4; i++)
 			if (segment_distance_squared(p, i < 2 ? end : start, wings[i]) <= tolerance * tolerance)
@@ -1490,8 +1506,8 @@ static BOOL artifact_hit(const PIN_ARTIFACT *item, POINT p, int eraser_radius)
 		if (item->tool == ID_ARROW) {
 			double angle = atan2((double)(item->end.y - item->start.y), (double)(item->end.x - item->start.x));
 			int size = max(item->stroke * 4, item->stroke * 3);
-			POINT wing1 = { item->end.x - (int)(cos(angle - 0.55) * size), item->end.y - (int)(sin(angle - 0.55) * size) };
-			POINT wing2 = { item->end.x - (int)(cos(angle + 0.55) * size), item->end.y - (int)(sin(angle + 0.55) * size) };
+			POINT wing1 = { item->end.x - (int)(cos(angle - PIN_ARROW_HALF_ANGLE) * size), item->end.y - (int)(sin(angle - PIN_ARROW_HALF_ANGLE) * size) };
+			POINT wing2 = { item->end.x - (int)(cos(angle + PIN_ARROW_HALF_ANGLE) * size), item->end.y - (int)(sin(angle + PIN_ARROW_HALF_ANGLE) * size) };
 			return segment_distance_squared(p, item->end, wing1) <= tolerance * tolerance ||
 				segment_distance_squared(p, item->end, wing2) <= tolerance * tolerance;
 		}
@@ -1538,10 +1554,11 @@ static RECT artifact_bounds(const PIN_ARTIFACT *item)
 		box.bottom = max(box.bottom, item->box.bottom);
 	}
 	if (is_dimension_tool(item->tool)) {
-		POINT start, end, wings[4];
+		POINT start, end, extension_start, extension_end, wings[4];
 		dimension_line_points(item, &start, &end);
-		box.left = min(box.left, min(start.x, end.x)); box.top = min(box.top, min(start.y, end.y));
-		box.right = max(box.right, max(start.x, end.x)); box.bottom = max(box.bottom, max(start.y, end.y));
+		dimension_extension_ends(item, &extension_start, &extension_end);
+		box.left = min(box.left, min(extension_start.x, extension_end.x)); box.top = min(box.top, min(extension_start.y, extension_end.y));
+		box.right = max(box.right, max(extension_start.x, extension_end.x)); box.bottom = max(box.bottom, max(extension_start.y, extension_end.y));
 		dimension_wings(item->tool, start, end, text_font_size(item, item->stroke), wings);
 		for (i = 0; i < 4; i++) {
 			box.left = min(box.left, wings[i].x); box.top = min(box.top, wings[i].y);
@@ -1788,6 +1805,8 @@ static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept)
 	if (item != NULL && item->text != NULL && lstrcmp(item->text, value) == 0 &&
 		EqualRect(&item->box, &pin->selection)) {
 		mem_free((void **)&value);
+		select_added_artifact(pin, item);
+		SendMessage(pin->hwnd, WM_COMMAND, ID_SELECT, 0);
 		return;
 	}
 	if (!begin_change(pin)) { mem_free((void **)&value); return; }
@@ -1806,6 +1825,7 @@ static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept)
 		if (rebuild_artifacts(pin)) {
 			if (old != NULL) mem_free((void **)&old);
 			select_added_artifact(pin, item);
+			SendMessage(pin->hwnd, WM_COMMAND, ID_SELECT, 0);
 		} else {
 			item->text = old;
 			item->box = old_box;
@@ -2278,6 +2298,7 @@ static BOOL save_editor_copy_to_history(PINNED_IMAGE *pin)
 	pin->dirty = FALSE;
 	EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE, MF_BYCOMMAND | MF_ENABLED);
 	SendMessage(pin->owner, WM_HISTORY_CHANGED, 0, 0);
+	PostMessage(pin->owner, WM_HISTORY_TRIM, 0, 0);
 	return TRUE;
 }
 
@@ -2350,6 +2371,7 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	clear_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts, &pin->undo_count);
 	clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
 	update_properties(pin);
+	PostMessage(pin->owner, WM_HISTORY_TRIM, 0, 0);
 	return TRUE;
 }
 
@@ -5645,8 +5667,8 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 					if (pin->tool == ID_ARROW && (start.x != end.x || start.y != end.y)) {
 						double angle = atan2((double)(end.y - start.y), (double)(end.x - start.x));
 						int wing_size = max(preview_width * 4, shown_w > 0 ? MulDiv(image_stroke_width(pin, 3), shown_w, pin->width) : Scale(pin->stroke_width * 3));
-						POINT wing1 = { end.x - (int)(cos(angle - 0.55) * wing_size), end.y - (int)(sin(angle - 0.55) * wing_size) };
-						POINT wing2 = { end.x - (int)(cos(angle + 0.55) * wing_size), end.y - (int)(sin(angle + 0.55) * wing_size) };
+						POINT wing1 = { end.x - (int)(cos(angle - PIN_ARROW_HALF_ANGLE) * wing_size), end.y - (int)(sin(angle - PIN_ARROW_HALF_ANGLE) * wing_size) };
+						POINT wing2 = { end.x - (int)(cos(angle + PIN_ARROW_HALF_ANGLE) * wing_size), end.y - (int)(sin(angle + PIN_ARROW_HALF_ANGLE) * wing_size) };
 						MoveToEx(canvas, end.x, end.y, NULL); LineTo(canvas, wing1.x, wing1.y);
 						MoveToEx(canvas, end.x, end.y, NULL); LineTo(canvas, wing2.x, wing2.y);
 					}
