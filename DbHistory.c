@@ -24,6 +24,7 @@
 #include "File.h"
 #include "Ini.h"
 #include "DbHistory.h"
+#include "PinnedImage.h"
 #include "gdip.h"
 
 static sqlite3 *db = NULL;
@@ -1060,6 +1061,33 @@ done:
 	return pixels;
 }
 
+BOOL db_history_image_edit_matches(DATA_INFO *item, int id)
+{
+	sqlite3_stmt *stmt = NULL;
+	DATA_INFO saved = {0}, image = {0};
+	BYTE *pixels, *merged = NULL;
+	DWORD size, merged_size;
+	BOOL match = FALSE;
+	if (db == NULL || item == NULL || item->image_edit_id != 0 || id <= 0) return FALSE;
+	pixels = db_initial_image_pixels(item, &size);
+	if (pixels == NULL) return FALSE;
+	if (sqlite3_prepare_v2(db, "SELECT merged FROM image_edits WHERE id=?;", -1, &stmt, NULL) == SQLITE_OK) {
+		sqlite3_bind_int(stmt, 1, id);
+		if (sqlite3_step(stmt) == SQLITE_ROW)
+			image.data = png_to_bitmap(sqlite3_column_blob(stmt, 0), sqlite3_column_bytes(stmt, 0));
+	}
+	sqlite3_finalize(stmt);
+	if (image.data != NULL) {
+		saved.type = TYPE_ITEM; saved.child = &image;
+		image.type = TYPE_DATA; image.format = CF_BITMAP;
+		merged = db_initial_image_pixels(&saved, &merged_size);
+		match = merged != NULL && size == merged_size && !memcmp(pixels, merged, size);
+		DeleteObject(image.data);
+	}
+	mem_free((void **)&pixels); mem_free((void **)&merged);
+	return match;
+}
+
 BOOL db_history_has_edited_original(DATA_INFO *item)
 {
 	sqlite3_stmt *rows = NULL;
@@ -1309,10 +1337,16 @@ static BOOL db_prune_image_edits(void)
 {
 	sqlite3_stmt *stmt = NULL;
 	BOOL ok;
+	int pending = pinned_image_pending_clipboard_edit();
 	if (sqlite3_exec(db, "CREATE TEMP TABLE IF NOT EXISTS favourite_edits(id INTEGER PRIMARY KEY);"
 		"DELETE FROM favourite_edits;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
 	if (sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO favourite_edits VALUES(?);", -1, &stmt, NULL) != SQLITE_OK) return FALSE;
 	ok = db_keep_favourite_edits(regist_data.child, stmt);
+	/* Copy publishes before the delayed History capture can own its snapshot. */
+	if (ok && pending > 0) {
+		sqlite3_reset(stmt); sqlite3_bind_int(stmt, 1, pending);
+		ok = sqlite3_step(stmt) == SQLITE_DONE;
+	}
 	sqlite3_finalize(stmt);
 	return ok && sqlite3_exec(db, "DELETE FROM image_edits WHERE id NOT IN "
 		"(SELECT image_edit_id FROM items WHERE image_edit_id > 0) "

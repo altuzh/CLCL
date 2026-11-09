@@ -233,7 +233,7 @@ static const COLORREF marker_colors[] = {
 static HINSTANCE pin_instance;
 static PINNED_IMAGE *pin_windows;
 static DWORD last_auto_sequence, last_copy_sequence;
-static int last_copy_edit_id;
+static int last_copy_edit_id, pending_copy_edit_id;
 extern OPTION_INFO option;
 extern TCHAR work_path[];
 
@@ -2175,7 +2175,7 @@ static BOOL copy_bitmap_to_clipboard(HWND owner, HBITMAP bitmap, int edit_id)
 	}
 	// DIB owns complete pixel data; BITMAP is an optional compatibility format.
 	if (copy != NULL && SetClipboardData(CF_BITMAP, copy) == NULL) DeleteObject(copy);
-	last_copy_edit_id = edit_id;
+	last_copy_edit_id = pending_copy_edit_id = edit_id;
 	CloseClipboard();
 	last_copy_sequence = GetClipboardSequenceNumber();
 	return TRUE;
@@ -4348,6 +4348,8 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 void pinned_image_bind_history(DATA_INFO *item, DWORD sequence, BOOL added)
 {
 	PINNED_IMAGE *pin = pin_windows;
+	if (!added || item == NULL || item->param1 > 0 || !db_history_is_open())
+		pending_copy_edit_id = 0;
 	if (pin == NULL || (pin->pending_item != item &&
 		(pin->pending_sequence == 0 || pin->pending_sequence != sequence))) return;
 	if (added) {
@@ -4399,9 +4401,18 @@ BOOL pinned_image_clipboard_is_screenshot(HWND owner)
 
 BOOL pinned_image_restore_clipboard_layer(DATA_INFO *item, DWORD sequence)
 {
-	if (sequence == 0 || sequence != last_copy_sequence) return FALSE;
+	if (sequence == 0) return FALSE;
+	if (sequence != last_copy_sequence) {
+		if (!db_history_image_edit_matches(item, last_copy_edit_id)) return FALSE;
+		last_copy_sequence = sequence;
+	}
 	if (item != NULL) item->image_edit_id = last_copy_edit_id;
 	return TRUE;
+}
+
+int pinned_image_pending_clipboard_edit(void)
+{
+	return pending_copy_edit_id;
 }
 
 void pinned_image_auto_open(HWND owner, DATA_INFO *source, DWORD sequence)

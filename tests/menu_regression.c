@@ -3261,10 +3261,34 @@ static void test_saved_image_annotations(HWND owner)
         CHECK(!IsWindow(editor) && last_copy_edit_id > 0, "Copy and close saves an editable snapshot before closing");
         CHECK(last_copy_sequence == history_clipboard_sequence,
             "Copy and close records the published sequence after CloseClipboard");
+        CHECK(pinned_image_pending_clipboard_edit() == last_copy_edit_id,
+            "Copy and close protects its layer after the editor is destroyed");
+        {
+            DATA_INFO unsaved = {0};
+            pinned_image_bind_history(&unsaved, history_clipboard_sequence, TRUE);
+            CHECK(pinned_image_pending_clipboard_edit() == last_copy_edit_id,
+                "a History capture without a durable record keeps its copied layer protected");
+        }
+        CHECK(db_history_trim(10000) &&
+            db_history_load_image_edit(last_copy_edit_id, &initial, &base, &layer),
+            "history maintenance preserves a copied layer awaiting clipboard capture");
+        if (initial != NULL) DeleteObject(initial); if (base != NULL) DeleteObject(base);
+        initial = base = NULL; mem_free((void **)&layer);
+        /* Clipboard observers can republish the same pixels under a new sequence. */
+        history_clipboard_sequence++;
+        {
+            DATA_INFO unrelated = {0}, pixels = {0};
+            unrelated.type = TYPE_ITEM; unrelated.child = &pixels;
+            pixels.type = TYPE_DATA; pixels.format = CF_BITMAP; pixels.data = source;
+            CHECK(!pinned_image_restore_clipboard_layer(&unrelated, history_clipboard_sequence) &&
+                unrelated.image_edit_id == 0, "sequence fallback rejects different clipboard pixels");
+        }
         /* Capture an editor-owned clipboard through the real history entry point. */
         capture_formats[0] = CF_BITMAP; capture_format_count = 1;
         capture_marker = copied_bitmap;
         CHECK(clipboard_to_history(owner), "editor-owned clipboard passes through history capture");
+        CHECK(pinned_image_pending_clipboard_edit() == 0,
+            "completed clipboard capture releases the pending layer protection");
         history_clipboard_mock = FALSE;
         capture_format_count = 0; capture_marker = NULL;
         clipboard_item = history_data.child;

@@ -2706,7 +2706,6 @@ static BOOL clipboard_to_history(const HWND hWnd)
 		data_free(di);
 		return TRUE;
 	}
-	pinned_image_bind_history(di, clipboard_sequence, TRUE);
 	// Tool to execute when added to history
 	tool_execute_all(hWnd, CALLTYPE_ADD_HISTORY, di);
 
@@ -2714,6 +2713,7 @@ static BOOL clipboard_to_history(const HWND hWnd)
 	if (db_history_is_open()) {
 		db_history_save_item(di);
 	}
+	pinned_image_bind_history(di, clipboard_sequence, TRUE);
 
 	// Execute tool from menu
 	if (cp_tmi.enable == TRUE &&
