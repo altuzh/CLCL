@@ -3250,6 +3250,7 @@ static BOOL winodw_reset(const HWND hWnd)
  */
 static BOOL winodw_save(const HWND hWnd)
 {
+	if (!pinned_image_save_all()) return FALSE;
 	// Save history
 	if (save_history(hWnd, 0) == FALSE && session_ending == FALSE &&
 		MessageBox(hWnd, message_get_res(IDS_ERROR_END), ERROR_TITLE, MB_ICONQUESTION | MB_YESNO) == IDNO) {
@@ -3357,9 +3358,8 @@ static LRESULT CALLBACK main_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPa
 	case WM_QUERYENDSESSION:
 		// Windows shutdown
 		session_ending = TRUE;
-		winodw_save(hWnd);
-		save_flag = TRUE;
-		return TRUE;
+		save_flag = winodw_save(hWnd);
+		return save_flag;
 
 	case WM_DPICHANGED:
 	case WM_DISPLAYCHANGE:

@@ -34,7 +34,7 @@ static __inline BOOL db_history_trim(const int max_count) { return FALSE; }
 static __inline BOOL db_history_trim_size(const ULONGLONG max_bytes) { return FALSE; }
 static __inline BOOL db_history_deduplicate_images(DATA_INFO *keep) { return FALSE; }
 static __inline BOOL db_history_has_edited_original(DATA_INFO *item) { return FALSE; }
-static __inline BOOL db_history_image_edit_matches(DATA_INFO *item, int id) { return FALSE; }
+static __inline int db_history_find_image_edit(DATA_INFO *item) { return 0; }
 static __inline int db_history_load_recent(const int limit, DATA_INFO **out_root) { return 0; }
 static __inline DATA_INFO *db_history_get_item(const int id) { return NULL; }
 static __inline BOOL db_history_ensure_item_data(DATA_INFO *item) { return FALSE; }
@@ -58,7 +58,7 @@ BOOL db_history_trim(const int max_count);
 BOOL db_history_trim_size(const ULONGLONG max_bytes);
 BOOL db_history_deduplicate_images(DATA_INFO *keep);
 BOOL db_history_has_edited_original(DATA_INFO *item);
-BOOL db_history_image_edit_matches(DATA_INFO *item, int id);
+int db_history_find_image_edit(DATA_INFO *item);
 
 int db_history_load_recent(const int limit, DATA_INFO **out_root);
 DATA_INFO *db_history_get_item(const int id);

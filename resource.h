@@ -124,6 +124,8 @@
 #define IDS_SNIP_NEW                    1200
 #define IDS_SNIP_SCROLLING              1201
 #define IDS_PIN_TITLE                   1202
+#define IDS_PIN_KEEP_OPEN               1203
+#define IDS_PIN_SAVE_EDITS_FAILED       1204
 #define IDS_PIN_PNG_FILTER              1205
 #define IDS_PIN_SAVE_FAILED             1206
 #define IDS_PIN_SOURCE_MISSING          1207
@@ -205,6 +207,7 @@
 #define IDS_PIN_CUSTOM_SIZE            1285
 #define IDS_PIN_CUSTOM_WIDTH           1286
 #define IDS_PIN_APPLY_WIDTH            1287
+#define IDS_PIN_UNPIN_CLOSE            1288
 #define IDS_PIN_PALETTE_STANDARD       1300
 #define IDS_PIN_PALETTE_MARKER         1316
 #define IDC_TREE                        1000

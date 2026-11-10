@@ -86,7 +86,16 @@ static BOOL test_editor_set_window_pos(HWND window, HWND after, int x, int y, in
     return SetWindowPos(window, after, x, y, w, h, flags);
 }
 #define SetWindowPos test_editor_set_window_pos
+static int editor_alerts;
+static int test_editor_message_box(HWND owner, const TCHAR *text, const TCHAR *caption, UINT flags)
+{
+    (void)owner; (void)text; (void)caption; (void)flags;
+    editor_alerts++;
+    return IDOK;
+}
+#define MessageBoxW test_editor_message_box
 #include "../PinnedImage.c"
+#undef MessageBoxW
 #undef GetClipboardSequenceNumber
 #undef SetWindowPos
 #undef GetWindow
@@ -1046,6 +1055,232 @@ static void test_annotation_properties(HWND owner, HBITMAP source)
     CHECK(!IsWindow(dialog), "closing editor destroys its properties dialog");
 }
 
+static void click_editor_pin_through_message_loop(HWND button)
+{
+    RECT client;
+    MSG message;
+    GetClientRect(button, &client);
+    SendMessage(button, WM_MOUSEACTIVATE, (WPARAM)GetAncestor(button, GA_ROOTOWNER),
+        MAKELPARAM(HTCLIENT, WM_LBUTTONDOWN));
+    PostMessage(button, WM_LBUTTONDOWN, MK_LBUTTON,
+        MAKELPARAM(client.right / 2, client.bottom / 2));
+    PostMessage(button, WM_LBUTTONUP, 0,
+        MAKELPARAM(client.right / 2, client.bottom / 2));
+    while (PeekMessage(&message, NULL, 0, 0, PM_REMOVE)) {
+        if (pinned_image_dialog_message(&message)) continue;
+        TranslateMessage(&message);
+        DispatchMessage(&message);
+    }
+}
+
+static void test_editor_pinning(HWND owner, HBITMAP bitmap)
+{
+    TCHAR error[BUF_SIZE];
+    DATA_INFO *saved = history_data.child;
+    DATA_INFO *item = data_create_item(TEXT("Pin test"), FALSE, error);
+    DATA_INFO next = {0};
+    HBITMAP smaller = scale_bitmap(bitmap, 40, 20);
+    HWND first = NULL, second = NULL, third = NULL;
+    PINNED_IMAGE *a, *b, *c;
+    PIN_ARTIFACT *annotation;
+    RECT button;
+    POINT point;
+    CHECK(item != NULL && smaller != NULL, "pin fixtures allocate");
+    if (item == NULL || smaller == NULL) goto cleanup;
+    item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(bitmap, NULL, NULL), 0, FALSE, error);
+    CHECK(item->child != NULL, "pin fixture has a source bitmap");
+    if (item->child == NULL) goto cleanup;
+    item->next = saved;
+    history_data.child = item;
+    next.type = TYPE_DATA; next.format = CF_BITMAP;
+    next.format_name = TEXT("BITMAP"); next.data = smaller;
+    first = pinned_image_open(owner, item);
+    a = first != NULL ? (PINNED_IMAGE *)GetWindowLongPtr(first, GWLP_USERDATA) : NULL;
+    CHECK(a != NULL, "first editor opens for pinning");
+    if (a == NULL) goto cleanup;
+    ShowWindow(first, SW_RESTORE);
+    CHECK(editor_pin_rect(first, &button), "pin button is present in restored title bar");
+    {
+        TITLEBARINFOEX title = { sizeof(title) };
+        MENUBARINFO menu = { sizeof(menu) };
+        RECT native, window;
+        SendMessage(first, WM_GETTITLEBARINFOEX, 0, (LPARAM)&title);
+        if (SUCCEEDED(DwmGetWindowAttribute(first, DWMWA_CAPTION_BUTTON_BOUNDS, &native, sizeof(native))) &&
+            !IsRectEmpty(&native) && GetWindowRect(first, &window)) {
+            CHECK(button.right == window.left + native.left && button.top == window.top + native.top,
+                "pin button stays immediately beside the native caption buttons");
+        } else CHECK(button.right == title.rgrect[2].left && button.top == title.rgrect[2].top,
+            "pin button sits immediately left of Minimize without DWM");
+        CHECK(GetMenuBarInfo(first, OBJID_MENU, 0, &menu) && button.bottom == menu.rcBar.top,
+            "normal pin background reaches the menu bar without a bottom gap");
+    }
+    save_properties_preview(first, L"Release\\editor-unpinned.png");
+    {
+        RECT actual;
+        CHECK(a->pin_button != NULL && IsWindowVisible(a->pin_button) &&
+            GetWindowRect(a->pin_button, &actual) && EqualRect(&button, &actual),
+            "native pin control is aligned with the restored caption");
+    }
+    point = (POINT){(button.right - button.left) / 2, (button.bottom - button.top) / 2};
+    SendMessage(a->pin_button, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+    ReleaseCapture();
+    CHECK(!a->pinned && !(SendMessage(a->pin_button, BM_GETSTATE, 0, 0) & BST_PUSHED),
+        "cancelled pin click leaves window unpinned");
+    SendMessage(a->pin_button, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+    SendMessage(a->pin_button, WM_LBUTTONUP, 0, MAKELPARAM(point.x, point.y));
+    CHECK(a->pinned && (GetWindowLongPtr(first, GWL_EXSTYLE) & WS_EX_TOPMOST) &&
+        (GetMenuState(GetSystemMenu(first, FALSE), ID_PIN_WINDOW, MF_BYCOMMAND) & MF_CHECKED),
+        "caption button pins window on top and checks accessible system menu");
+    SendMessage(a->pin_button, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+    SendMessage(a->pin_button, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(-1, -1));
+    SendMessage(a->pin_button, WM_LBUTTONUP, 0, MAKELPARAM(-1, -1));
+    CHECK(a->pinned && GetCapture() != a->pin_button,
+        "releasing outside the pin cancels the click and releases capture");
+    {
+        HWND temporary = pinned_image_open(owner, &next);
+        PINNED_IMAGE *other = temporary != NULL ? (PINNED_IMAGE *)GetWindowLongPtr(temporary, GWLP_USERDATA) : NULL;
+        CHECK(other != NULL, "temporary editor opens for native pin invocation");
+        if (other != NULL) {
+            HWND control = other->pin_button;
+            SendMessage(control, BM_CLICK, 0, 0);
+            CHECK(other->pinned, "native button invocation pins exactly once");
+            SendMessage(control, BM_CLICK, 0, 0);
+            CHECK(!IsWindow(temporary) && !IsWindow(control) && IsWindow(first),
+                "native unpin invocation closes only its editor and caption control");
+        }
+    }
+    save_properties_preview(first, L"Release\\editor-pinned.png");
+    ShowWindow(first, SW_SHOWMAXIMIZED);
+    CHECK(editor_pin_rect(first, &button), "pin button remains available when maximized");
+    {
+        RECT actual, expected;
+        HWND normal = CreateWindowEx(WS_EX_APPWINDOW, TEXT("STATIC"), TEXT("Frame reference"),
+            WS_OVERLAPPEDWINDOW, 100, 100, 410, 260, NULL, NULL, hInst, NULL);
+        ShowWindow(normal, SW_SHOWMAXIMIZED);
+        GetWindowRect(normal, &expected);
+        GetWindowRect(first, &actual);
+        CHECK(EqualRect(&actual, &expected), "maximized editor retains native frame bounds without an inset");
+        CHECK(GetWindowRect(a->pin_button, &actual) && EqualRect(&actual, &button),
+            "pin control stays aligned after maximizing");
+        {
+            MENUBARINFO menu = { sizeof(menu) };
+            RECT visible;
+            CHECK(GetMenuBarInfo(first, OBJID_MENU, 0, &menu) && button.bottom == menu.rcBar.top,
+                "maximized pin background reaches the menu bar");
+            if (SUCCEEDED(DwmGetWindowAttribute(first, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible))))
+                CHECK(button.top >= visible.top, "maximized pin has no clipped off-screen caption area");
+        }
+        CHECK(IsWindowVisible(a->pin_button) &&
+            (GetWindowLongPtr(a->pin_button, GWL_EXSTYLE) & WS_EX_TOPMOST),
+            "pinned caption control is visible above its maximized owner");
+        save_properties_preview(a->pin_button, L"Release\\editor-pin-button-maximized.png");
+        {
+            HDC screen = GetDC(NULL), dc = CreateCompatibleDC(screen);
+            HBITMAP bitmap = CreateCompatibleBitmap(screen, button.right - button.left, button.bottom - button.top);
+            HBITMAP old = SelectObject(dc, bitmap);
+            int x, y, top = button.bottom - button.top, bottom = -1;
+            PrintWindow(a->pin_button, dc, 0);
+            CHECK(GetPixel(dc, (button.right - button.left) / 2, (button.bottom - button.top) / 2) == RGB(240, 240, 240) &&
+                GetPixel(dc, 1, 1) == RGB(0, 90, 158),
+                "maximized pin control paints its glyph and pinned background");
+            for (y = 0; y < button.bottom - button.top; y++)
+                for (x = 0; x < button.right - button.left; x++)
+                    if (GetPixel(dc, x, y) == RGB(240, 240, 240)) { top = min(top, y); bottom = max(bottom, y); }
+            CHECK(bottom >= top && abs(top + bottom - (button.bottom - button.top - 1)) <= 1,
+                "full pin glyph is vertically centered in the visible caption");
+            SelectObject(dc, old);
+            DeleteObject(bitmap); DeleteDC(dc); ReleaseDC(NULL, screen);
+        }
+        ShowWindow(first, SW_MINIMIZE);
+        CHECK(!IsWindowVisible(a->pin_button), "minimizing hides the caption pin control");
+        ShowWindow(first, SW_SHOWMAXIMIZED);
+        CHECK(IsWindowVisible(a->pin_button), "restoring reveals the caption pin control");
+        DestroyWindow(normal);
+    }
+    CHECK(begin_change(a), "pinned editor retains an undo snapshot");
+    annotation = add_artifact(a, ID_RECT, (POINT){5, 5}, 3);
+    CHECK(annotation != NULL, "pinned editor creates an annotation");
+    if (annotation != NULL) annotation->end = (POINT){20, 20};
+    rebuild_artifacts(a);
+    if (annotation != NULL) { annotation->selected = TRUE; a->selected_artifact = annotation; }
+    update_properties(a);
+    CHECK(a->properties != NULL && IsWindowVisible(a->properties), "pin click fixture opens annotation Properties");
+    click_editor_pin_through_message_loop(a->pin_button);
+    CHECK(IsWindow(first) && a->pinned && a->dirty && a->artifacts == annotation && IsWindowVisible(a->properties),
+        "failed unpin save retains the pinned editor, markup and modeless Properties");
+    second = pinned_image_open_from_menu(owner, &next);
+    b = second != NULL ? (PINNED_IMAGE *)GetWindowLongPtr(second, GWLP_USERDATA) : NULL;
+    CHECK(second != NULL && second != first && IsWindow(first) && a->pinned && a->dirty &&
+        a->artifacts == annotation && a->undo_count == 1 && b != NULL && !b->pinned,
+        "opening another image preserves pinned canvas, annotations and undo state");
+    CHECK(pinned_image_open(owner, item) == first && a->artifacts == annotation,
+        "opening the same pinned source focuses its existing editor");
+    a->source_item = a->source_data = NULL;
+    a->pending_sequence = 50001;
+    pinned_image_bind_history(item, 50001, TRUE);
+    CHECK(a->source_item == item && a->source_data == item->child && a->pending_sequence == 0 &&
+        b != NULL && b->source_item == NULL,
+        "history binding finds the matching editor beyond the list head");
+    if (b == NULL) goto cleanup;
+    SendMessage(second, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
+    third = pinned_image_open(owner, &next);
+    c = third != NULL ? (PINNED_IMAGE *)GetWindowLongPtr(third, GWLP_USERDATA) : NULL;
+    CHECK(third != NULL && third != first && third != second && c != NULL && !c->pinned &&
+        IsWindow(first) && IsWindow(second) && a->pinned && b->pinned,
+        "a new editor is created when all existing editors are pinned");
+    if (c == NULL) goto cleanup;
+    /* This fixture has no database, so end its edits before checking successful unpin. */
+    a->dirty = FALSE;
+    {
+        HWND control = a->pin_button, properties = a->properties;
+        click_editor_pin_through_message_loop(control);
+        CHECK(!IsWindow(first) && !IsWindow(control) && !IsWindow(properties) && IsWindow(second) && IsWindow(third),
+            "queued unpin closes its editor, caption control and Properties without closing other editors");
+        first = NULL;
+    }
+    CHECK(pinned_image_open(owner, &next) == third && c->width == 40 && IsWindow(second) && b->pinned,
+        "opening another image continues reusing the remaining unpinned editor");
+    SendMessage(second, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
+    CHECK(!IsWindow(second) && IsWindow(third), "system-menu unpin closes only the chosen pinned editor");
+    second = NULL;
+cleanup:
+    if (IsWindow(first)) DestroyWindow(first);
+    if (IsWindow(second)) DestroyWindow(second);
+    if (IsWindow(third)) DestroyWindow(third);
+    history_data.child = saved;
+    if (item != NULL) { item->next = NULL; data_free(item); }
+    if (smaller != NULL) DeleteObject(smaller);
+}
+
+static BOOL CALLBACK test_editor_monitor_move(HMONITOR monitor, HDC dc, LPRECT bounds, LPARAM param)
+{
+    HWND editor = (HWND)param;
+    MONITORINFO mi = { sizeof(mi) };
+    RECT before, after;
+    int width, height, x, y;
+    (void)dc;
+    (void)bounds;
+    CHECK(GetMonitorInfo(monitor, &mi), "drag destination monitor is available");
+    GetWindowRect(editor, &before);
+    width = min(before.right - before.left, mi.rcWork.right - mi.rcWork.left);
+    height = min(before.bottom - before.top, mi.rcWork.bottom - mi.rcWork.top);
+    x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - width) / 2;
+    y = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - height) / 2;
+    SendMessage(editor, WM_ENTERSIZEMOVE, 0, 0);
+    CHECK(SetWindowPos(editor, NULL, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE),
+        "editor moves to drag destination");
+    GetWindowRect(editor, &after);
+    CHECK(after.left == x && after.top == y,
+        "editor follows drag onto each connected monitor");
+    SendMessage(editor, WM_EXITSIZEMOVE, 0, 0);
+    GetWindowRect(editor, &after);
+    CHECK(MonitorFromWindow(editor, MONITOR_DEFAULTTONEAREST) == monitor &&
+        after.left >= mi.rcWork.left && after.right <= mi.rcWork.right &&
+        after.top >= mi.rcWork.top && after.bottom <= mi.rcWork.bottom,
+        "editor stays inside destination monitor after drag ends");
+    return TRUE;
+}
+
 static void test_pinned_image_edit_core(HWND owner)
 {
     HDC screen = GetDC(NULL), dc = CreateCompatibleDC(screen);
@@ -1067,6 +1302,7 @@ static void test_pinned_image_edit_core(HWND owner)
     ReleaseDC(NULL, screen);
     test_frame_annotations(source);
     test_annotation_properties(owner, source);
+    test_editor_pinning(owner, source);
     {
         BITMAPINFO info = {0};
         DWORD *pixels = NULL;
@@ -1361,8 +1597,8 @@ static void test_pinned_image_edit_core(HWND owner)
     }
     editor = pinned_image_open(owner, &image_data);
     CHECK(dark_mode_window_is_dark(editor) != dark_mode_is_dark(), "editor theme is inverse of application theme");
-    CHECK(editor != NULL && (GetWindowLongPtr(editor, GWL_EXSTYLE) & WS_EX_TOPMOST),
-        "pinned editor opens topmost");
+    CHECK(editor != NULL && !pin_windows->pinned && !(GetWindowLongPtr(editor, GWL_EXSTYLE) & WS_EX_TOPMOST),
+        "editor opens unpinned as a normal window");
     CHECK(editor != NULL && (GetWindowLongPtr(editor, GWL_STYLE) & WS_OVERLAPPEDWINDOW) == WS_OVERLAPPEDWINDOW &&
         GetWindow(editor, GW_OWNER) == NULL && (GetWindowLongPtr(editor, GWL_EXSTYLE) & WS_EX_APPWINDOW),
         "pinned editor uses an independent standard Windows frame");
@@ -1624,7 +1860,8 @@ static void test_pinned_image_edit_core(HWND owner)
             SetThreadUILanguage(languages[language]);
             CHECK(*pin_text(IDS_SNIP_NEW) && *pin_text(IDS_PIN_TOOL_REDACT) && *pin_text(IDS_PIN_TOOL_INVERT) &&
                 *pin_text(IDS_PIN_TOOL_HIGHLIGHT) && *pin_text(IDS_PIN_TOOL_HIGHLIGHT_BLOCK) && *pin_text(IDS_PIN_TOOL_MAGNIFY) &&
-                *pin_text(IDS_PIN_TOOL_FRAME_SELECT) && *pin_text(IDS_PIN_TOOL_DIMENSION) && *pin_text(IDS_PIN_PALETTE_MARKER + 15),
+                *pin_text(IDS_PIN_TOOL_FRAME_SELECT) && *pin_text(IDS_PIN_TOOL_DIMENSION) && *pin_text(IDS_PIN_PALETTE_MARKER + 15) &&
+                *pin_text(IDS_PIN_KEEP_OPEN) && *pin_text(IDS_PIN_SAVE_EDITS_FAILED) && *pin_text(IDS_PIN_UNPIN_CLOSE),
                 "snip and image editor strings load in every supported language");
             if (language != 0)
                 CHECK(lstrcmp(english_snip, pin_text(IDS_SNIP_NEW)) != 0,
@@ -1927,6 +2164,22 @@ static void test_pinned_image_edit_core(HWND owner)
             if (!GetMonitorInfo(hmon, &mi)) SystemParametersInfo(SPI_GETWORKAREA, 0, &mi.rcWork, 0);
             work = mi.rcWork;
 
+            /* A drag must cross the old monitor edge before release-time clamping. */
+            GetWindowRect(editor, &after_resize);
+            wp.hwnd = editor;
+            wp.x = work.right - 100;
+            wp.y = work.top + 100;
+            wp.cx = after_resize.right - after_resize.left;
+            wp.cy = after_resize.bottom - after_resize.top;
+            wp.flags = SWP_NOZORDER | SWP_NOACTIVATE;
+            SendMessage(editor, WM_ENTERSIZEMOVE, 0, 0);
+            SendMessage(editor, WM_WINDOWPOSCHANGING, 0, (LPARAM)&wp);
+            CHECK(wp.x == work.right - 100 && wp.y == work.top + 100 &&
+                wp.cx == after_resize.right - after_resize.left &&
+                wp.cy == after_resize.bottom - after_resize.top,
+                "live drag can straddle a monitor edge without snapping back");
+            SendMessage(editor, WM_EXITSIZEMOVE, 0, 0);
+
             /* 1. Test WM_SIZING with right border dragged past screen edge */
             sizing_rect.left = work.right - 200;
             sizing_rect.top = work.top + 100;
@@ -1966,6 +2219,8 @@ static void test_pinned_image_edit_core(HWND owner)
             CHECK(after_resize.left >= work.left && after_resize.right <= work.right &&
                 after_resize.top >= work.top && after_resize.bottom <= work.bottom,
                 "WM_EXITSIZEMOVE restores all borders on screen after resize/move");
+            CHECK(EnumDisplayMonitors(NULL, NULL, test_editor_monitor_move, (LPARAM)editor),
+                "editor drag checks every connected monitor");
             /* 5. Test highlighter tracks cursor directly */
             {
                 POINT pt1 = image_to_client(pin_windows, (POINT){20, 20});
@@ -2093,16 +2348,23 @@ static void test_pinned_image_edit_core(HWND owner)
                 if (info.hbmColor != NULL) DeleteObject(info.hbmColor);
             }
 
-            /* 7. Test closing a dirty pinned window closes without confirmation dialog */
+            /* 7. Closing a dirty bitmap saves it without asking for confirmation. */
             DestroyWindow(editor);
             editor = NULL;
             {
                 HWND close_test = pinned_image_open(owner, &image_data);
                 CHECK(close_test != NULL, "editor opens for close check");
                 if (close_test != NULL) {
+                    DATA_INFO *before = history_data.child;
                     pin_windows->dirty = TRUE;
                     SendMessage(close_test, WM_CLOSE, 0, 0);
-                    CHECK(!IsWindow(close_test), "WM_CLOSE destroys pinned window immediately without prompt");
+                    CHECK(!IsWindow(close_test) && history_data.child != before,
+                        "WM_CLOSE saves a dirty bitmap to History before closing");
+                    if (history_data.child != before) {
+                        DATA_INFO *saved = history_data.child;
+                        history_data.child = saved->next;
+                        saved->next = NULL; data_free(saved);
+                    }
                 }
                 close_test = pinned_image_open(owner, &image_data);
                 CHECK(close_test != NULL, "editor opens for Escape check");
@@ -2238,8 +2500,16 @@ static void test_pinned_image_edit_core(HWND owner)
                 "undo removes duplicate and clears stale selection");
             clipboard_available = TRUE;
             SendMessage(annotations, WM_COMMAND, ID_COPY_KEEP, 0);
-            CHECK(IsWindow(annotations) && copied_bitmap != NULL,
-                "Copy keep open publishes bitmap without closing editor");
+            CHECK(IsWindow(annotations) && copied_bitmap == NULL && p->artifacts != NULL,
+                "Copy refuses to flatten annotations when their database is unavailable");
+            {
+                int alerts = editor_alerts;
+                SendMessage(annotations, WM_CLOSE, 0, 0);
+                CHECK(IsWindow(annotations) && p->dirty && p->artifacts != NULL && editor_alerts == alerts + 1,
+                    "failed close save keeps annotations open and explains the failure");
+                CHECK(!pinned_image_save_all() && IsWindow(annotations) && p->artifacts != NULL,
+                    "application save refuses to discard annotations without durable storage");
+            }
             if (copied_bitmap != NULL) DeleteObject(copied_bitmap);
             copied_bitmap = NULL;
             DestroyWindow(annotations);
@@ -3256,6 +3526,31 @@ static void test_saved_image_annotations(HWND owner)
             "Copy and keep retains the editor and associates its annotation snapshot with the clipboard");
         CHECK(last_copy_sequence == history_clipboard_sequence,
             "Copy and keep records the published sequence after CloseClipboard");
+        {
+            int saved_edit = last_copy_edit_id;
+            HBITMAP earlier = clone_bitmap(copied_bitmap, NULL, NULL);
+            CHECK(history_data.child != NULL && history_data.child->param1 > 0 &&
+                history_data.child->image_edit_id == saved_edit && pin_windows->source_item == regist_data.child,
+                "Copy commits an editable History record immediately without changing the Favourite source");
+            if (copied_bitmap != NULL) { DeleteObject(copied_bitmap); copied_bitmap = NULL; }
+            CHECK(copy_bitmap_to_clipboard(owner, source, 0), "another clipboard image replaces the editor copy");
+            last_copy_sequence = 0;
+            db_history_close();
+            CHECK(db_history_init(directory) && db_history_trim(10000),
+                "copied markup survives database restart and maintenance before clipboard capture");
+            history_clipboard_sequence++;
+            history_clipboard_owner = NULL;
+            capture_formats[0] = CF_BITMAP; capture_format_count = 1; capture_marker = earlier;
+            CHECK(clipboard_to_history(owner) && history_data.child != NULL &&
+                history_data.child->image_edit_id == saved_edit &&
+                db_history_load_image_edit(saved_edit, &initial, &base, &layer),
+                "pasting an earlier copied image restores its editable layer without any last-copy hint");
+            if (initial != NULL) DeleteObject(initial); if (base != NULL) DeleteObject(base);
+            initial = base = NULL; mem_free((void **)&layer);
+            capture_format_count = 0; capture_marker = NULL;
+            history_clipboard_owner = owner;
+            if (earlier != NULL) DeleteObject(earlier);
+        }
         if (copied_bitmap != NULL) { DeleteObject(copied_bitmap); copied_bitmap = NULL; }
         SendMessage(editor, WM_COMMAND, ID_COPY, 0);
         CHECK(!IsWindow(editor) && last_copy_edit_id > 0, "Copy and close saves an editable snapshot before closing");
@@ -3301,6 +3596,61 @@ static void test_saved_image_annotations(HWND owner)
             "Copy and close result reopens with editable annotations");
         if (editor != NULL) DestroyWindow(editor);
         if (copied_bitmap != NULL) { DeleteObject(copied_bitmap); copied_bitmap = NULL; }
+    }
+    {
+        DATA_INFO draft = {0};
+        PIN_ARTIFACT *shape;
+        int saved_id = 0, saved_edit = 0;
+        draft.type = TYPE_DATA; draft.format = CF_BITMAP;
+        draft.format_name = TEXT("BITMAP"); draft.data = source;
+        editor = pinned_image_open(owner, &draft);
+        CHECK(editor != NULL, "draft opens for close and application-save checks");
+        if (editor != NULL) {
+            pin = (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA);
+            CHECK(begin_change(pin), "draft starts an annotation change");
+            shape = add_artifact(pin, ID_RECT, (POINT){5, 5}, 3);
+            if (shape != NULL) shape->end = (POINT){30, 30};
+            CHECK(shape != NULL && rebuild_artifacts(pin), "draft annotation renders");
+            CHECK(sqlite3_open16(database, &inspect) == SQLITE_OK && sqlite3_exec(inspect,
+                "CREATE TRIGGER reject_close_save BEFORE INSERT ON image_edits BEGIN SELECT RAISE(ABORT, 'test'); END;",
+                NULL, NULL, NULL) == SQLITE_OK, "close-save failure fixture installs");
+            {
+                int alerts = editor_alerts;
+                SendMessage(editor, WM_CLOSE, 0, 0);
+                CHECK(IsWindow(editor) && pin->dirty && pin->artifacts == shape && editor_alerts == alerts + 1,
+                    "failed database write vetoes editor close without discarding markup");
+                SendMessage(editor, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
+                click_editor_pin_through_message_loop(pin->pin_button);
+                CHECK(IsWindow(editor) && pin->pinned && pin->dirty && pin->artifacts == shape && editor_alerts == alerts + 2,
+                    "failed unpin save leaves the editor pinned with its markup intact");
+                CHECK(!pinned_image_save_all() && IsWindow(editor) && pin->artifacts == shape,
+                    "failed database write vetoes application save and retains the draft");
+            }
+            CHECK(sqlite3_exec(inspect, "DROP TRIGGER reject_close_save;", NULL, NULL, NULL) == SQLITE_OK,
+                "close-save failure fixture removes");
+            sqlite3_close(inspect); inspect = NULL;
+            CHECK(pinned_image_save_all() && IsWindow(editor) && !pin->dirty &&
+                pin->source_item != NULL && pin->source_item->image_edit_id > 0,
+                "application save persists an editable draft before closing any windows");
+            saved_edit = pin->source_item->image_edit_id;
+            CHECK(begin_change(pin), "saved draft starts a second annotation change");
+            shape = add_artifact(pin, ID_ARROW, (POINT){60, 60}, 3);
+            if (shape != NULL) shape->end = (POINT){100, 90};
+            CHECK(shape != NULL && rebuild_artifacts(pin), "second draft annotation renders");
+            click_editor_pin_through_message_loop(pin->pin_button);
+            CHECK(!IsWindow(editor) && history_data.child->image_edit_id != saved_edit,
+                "unpin commits the latest editable revision before closing its editor");
+            saved_id = (int)history_data.child->param1;
+            db_history_close();
+            CHECK(db_history_init(directory), "database restarts after close-time save");
+            loaded = db_history_get_item(saved_id);
+            editor = loaded != NULL ? pinned_image_open(owner, loaded) : NULL;
+            CHECK(editor != NULL && pin_windows->artifacts != NULL && pin_windows->artifacts->tool == ID_RECT &&
+                pin_windows->artifacts->next != NULL && pin_windows->artifacts->next->tool == ID_ARROW,
+                "closed draft reopens after restart with both annotations selectable");
+            if (editor != NULL) DestroyWindow(editor);
+            data_free(loaded); loaded = NULL;
+        }
     }
     CHECK(db_history_delete_item(history_id) && db_history_trim(1) &&
         db_history_load_image_edit(favourite_edit, &initial, &base, &layer),
@@ -3994,6 +4344,7 @@ static void test_bitmap_edit_context(HWND owner)
                 RECT before, after, bounds;
                 HWND overlay, normal, active;
                 int width = pin->min_window_width, height = pin->min_window_height;
+                SendMessage(editor, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
                 CHECK(GetMonitorInfo(MonitorFromWindow(editor, MONITOR_DEFAULTTONEAREST), &monitor),
                     "editor monitor work area available");
                 bounds = monitor.rcWork;
@@ -4011,8 +4362,13 @@ static void test_bitmap_edit_context(HWND owner)
                 pin->placing_topmost = FALSE;
                 active = GetActiveWindow();
                 editor_window_walks = 0;
+                SendMessage(editor, WM_ENTERSIZEMOVE, 0, 0);
                 SetWindowPos(editor, NULL, bounds.left, bounds.top + 1, 0, 0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                GetWindowRect(editor, &after);
+                CHECK(after.left == bounds.left && after.top == bounds.top + 1,
+                    "topmost avoidance does not reposition editor during a drag");
+                SendMessage(editor, WM_EXITSIZEMOVE, 0, 0);
                 CHECK(editor_window_walks == 0, "editor placement avoids live window-chain traversal");
                 GetWindowRect(editor, &after);
                 CHECK(after.top == bounds.top + 80 && after.bottom <= bounds.bottom &&
@@ -4062,10 +4418,12 @@ static void test_bitmap_edit_context(HWND owner)
             if (editor != NULL) DestroyWindow(editor);
             fail_editor_topmost = TRUE;
             editor = pinned_image_open_from_menu(owner, source);
+            if (editor != NULL) SendMessage(editor, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
             fail_editor_topmost = FALSE;
             CHECK(editor != NULL && IsWindowVisible(editor) &&
-                !(GetWindowLongPtr(editor, GWL_EXSTYLE) & WS_EX_TOPMOST),
-                "failed topmost request still opens a visible normal editor");
+                !pin_windows->pinned && !(GetWindowLongPtr(editor, GWL_EXSTYLE) & WS_EX_TOPMOST) &&
+                !(GetMenuState(GetSystemMenu(editor, FALSE), ID_PIN_WINDOW, MF_BYCOMMAND) & MF_CHECKED),
+                "failed pin request leaves a visible unpinned editor and unchecked menu");
             if (editor != NULL) DestroyWindow(editor);
         }
     }
@@ -4509,9 +4867,11 @@ static void test_history_text_duplicates(void)
     option.history_overlap_check = saved_overlap;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
-    HDESK desktop = CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
+    BOOL preview = argc == 2 && strcmp(argv[1], "--pin-preview") == 0;
+    HDESK desktop = preview ? GetThreadDesktop(GetCurrentThreadId()) :
+        CreateDesktop(TEXT("CLCLMenuRegression"), NULL, NULL, 0, GENERIC_ALL, NULL);
     WNDCLASS wc = {0};
     HWND owner;
     TCHAR error[BUF_SIZE];
@@ -4525,6 +4885,7 @@ int main(void)
         return 1;
     }
     hInst = GetModuleHandle(NULL);
+    if (preview) { InitDpi(); dark_mode_init(); }
     InitCommonControls();
     pinned_image_regist(hInst);
     SetDpi(96);
@@ -4546,6 +4907,100 @@ int main(void)
     RegisterClass(&wc);
     owner = CreateWindow(wc.lpszClassName, TEXT("Menu regression"), WS_OVERLAPPED, 0, 0, 100, 100, NULL, NULL, hInst, NULL);
     history_data.type = regist_data.type = TYPE_ROOT;
+    if (preview) {
+        HDC dc = GetDC(NULL);
+        HBITMAP source = CreateCompatibleBitmap(dc, 80, 40), screenshot;
+        DATA_INFO image = {0};
+        RECT bounds;
+        HWND editor;
+        ReleaseDC(NULL, dc);
+        image.type = TYPE_DATA; image.format = CF_BITMAP;
+        image.format_name = TEXT("BITMAP"); image.data = source;
+        editor = pinned_image_open(owner, &image);
+        CHECK(editor != NULL, "live caption preview opens");
+        if (editor != NULL) {
+            DWORD until;
+            int phase = 0;
+            TCHAR caption[128];
+            CHECK(GetWindowText(editor, caption, ARRAYSIZE(caption)) > 0, "live editor has a caption");
+            ShowWindow(editor, SW_RESTORE);
+            SetWindowPos(editor, NULL, 200, 200, 900, 600, SWP_NOZORDER);
+            SendMessage(editor, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
+            for (phase = 0; phase < 2; phase++) {
+                if (phase == 1) ShowWindow(editor, SW_SHOWMAXIMIZED);
+                UpdateWindow(editor);
+                until = GetTickCount() + 600;
+                while ((LONG)(GetTickCount() - until) < 0) {
+                    MSG message;
+                    while (PeekMessage(&message, NULL, 0, 0, PM_REMOVE)) {
+                        TranslateMessage(&message);
+                        DispatchMessage(&message);
+                    }
+                    Sleep(10);
+                }
+                {
+                    PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA);
+                    RECT button;
+                    POINT point;
+                    HWND hit;
+                    /* Keep another app's topmost window from covering the live QA fixture. */
+                    SetWindowPos(editor, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                    SetWindowPos(pin->pin_button, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                    GetWindowRect(pin->pin_button, &button);
+                    {
+                        RECT visible;
+                        MENUBARINFO menu = { sizeof(menu) };
+                        CHECK(GetMenuBarInfo(editor, OBJID_MENU, 0, &menu) && button.bottom == menu.rcBar.top,
+                            "live pin background meets the menu bar without a gap");
+                        if (SUCCEEDED(DwmGetWindowAttribute(editor, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible))))
+                            CHECK(button.top >= visible.top, "live pin control stays inside the visible caption");
+                    }
+                    point = (POINT){(button.left + button.right) / 2, (button.top + button.bottom) / 2};
+                    hit = WindowFromPoint(point);
+                    CHECK(hit == pin->pin_button, "live mouse hit reaches the caption pin control");
+                }
+                GetWindowRect(editor, &bounds);
+                {
+                    RECT visible;
+                    if (SUCCEEDED(DwmGetWindowAttribute(editor, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible))) &&
+                        !IsRectEmpty(&visible)) {
+                        bounds = visible;
+                        if (phase == 1) {
+                            MONITORINFO monitor = { sizeof(monitor) };
+                            GetMonitorInfo(MonitorFromWindow(editor, MONITOR_DEFAULTTONEAREST), &monitor);
+                            CHECK(EqualRect(&visible, &monitor.rcWork),
+                                "live maximized frame fills the monitor work area without an inset or shadow margin");
+                        }
+                    }
+                }
+                screenshot = capture_screen_region(bounds);
+                init_gdip();
+                CHECK(screenshot != NULL && save_png(screenshot, phase == 0 ?
+                    L"Release\\editor-pin-live-restored.png" : L"Release\\editor-pin-live-maximized.png"),
+                    "live native title bar preview is saved");
+                shutdown_gdip();
+                if (screenshot != NULL) DeleteObject(screenshot);
+                {
+                    PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA);
+                    click_editor_pin_through_message_loop(pin->pin_button);
+                    CHECK(!IsWindow(editor), "live queued unpin closes the editor");
+                }
+                if (phase == 0) {
+                    editor = pinned_image_open(owner, &image);
+                    CHECK(editor != NULL, "live editor reopens for maximized pin preview");
+                    if (editor == NULL) break;
+                    SendMessage(editor, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
+                }
+            }
+            if (IsWindow(editor)) DestroyWindow(editor);
+        }
+        if (source != NULL) DeleteObject(source);
+        DestroyWindow(hToolTip);
+        DestroyWindow(owner);
+        return failures ? 1 : 0;
+    }
     test_tray_preview_hover(owner);
     {
         RECT anchor = {10, 10, 30, 30};

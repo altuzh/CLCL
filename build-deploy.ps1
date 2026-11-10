@@ -99,7 +99,14 @@ if ($Deploy) {
     if ($running) {
         foreach ($p in $running) {
             Write-Host "Stopping running process $($p.ProcessName) (PID: $($p.Id))..." -ForegroundColor Yellow
-            $p | Stop-Process -Force
+            if ($p.ProcessName -eq 'CLCL') {
+                $quitProcess = Start-Process -FilePath $p.Path -ArgumentList '/x' -WindowStyle Hidden -PassThru
+                if (-not $p.WaitForExit(15000) -or -not $quitProcess.WaitForExit(15000)) {
+                    throw 'CLCL did not exit. Resolve any image save error and retry; deployment will not discard open edits.'
+                }
+            } else {
+                $p | Stop-Process -Force
+            }
         }
         Start-Sleep -Milliseconds 500
     }

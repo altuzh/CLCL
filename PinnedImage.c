@@ -3,6 +3,7 @@
 #undef _INC_OLE
 #include <commctrl.h>
 #include <commdlg.h>
+#include <dwmapi.h>
 #include <tchar.h>
 #include <windowsx.h>
 #include <math.h>
@@ -29,6 +30,7 @@
 #include "resource.h"
 
 #pragma comment(lib, "msimg32.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 #define PIN_CLASS TEXT("CLCL_PinnedImage")
 #define SNIP_CLASS TEXT("CLCL_SnipOverlay")
@@ -101,6 +103,7 @@
 #define ID_DIMENSION_SLASH 6161
 #define MENU_TIP_TIMER 6
 #define WM_FINISH_TEXT (WM_APP + 150)
+#define ID_PIN_WINDOW 0x1F00
 
 #define PIN_DEFAULT_COLOR RGB(220, 32, 32)
 #define PIN_ARROW_HALF_ANGLE 0.35
@@ -125,6 +128,9 @@ typedef struct _PIN_ARTIFACT {
 typedef struct _PINNED_IMAGE {
 	HWND hwnd;
 	BOOL placing_topmost;
+	BOOL in_size_move;
+	BOOL pinned, pin_hot;
+	HWND pin_button;
 	HWND owner;
 	HWND toolbar;
 	HWND menu_tip;
@@ -314,6 +320,7 @@ static LRESULT CALLBACK editor_toolbar_proc(HWND hwnd, UINT msg, WPARAM wparam, 
 	UINT_PTR id, DWORD_PTR ref);
 static void refit_image(PINNED_IMAGE *pin);
 static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept);
+static DATA_INFO *save_editor_copy_to_history(PINNED_IMAGE *pin);
 static void update_properties(PINNED_IMAGE *pin);
 static BOOL create_property_toolbars(PINNED_IMAGE *pin, HWND dialog);
 static void update_property_buttons(PINNED_IMAGE *pin);
@@ -2232,20 +2239,15 @@ static BOOL save_editor_layer(PINNED_IMAGE *pin, DATA_INFO *item, BOOL history)
 
 static BOOL copy_editor_to_clipboard(PINNED_IMAGE *pin)
 {
-	DATA_INFO snapshot = {0};
-	char *json;
-	BOOL ok;
-	if (!db_history_is_open()) return copy_bitmap_to_clipboard(pin->owner, pin->bitmap, 0);
+	DATA_INFO *saved;
 	if (pin->artifacts == NULL && (pin->source_item == NULL ||
 		(data_check(&history_data, pin->source_item) == NULL && data_check(&regist_data, pin->source_item) == NULL) ||
 		pin->source_item->image_edit_id == 0))
 		return copy_bitmap_to_clipboard(pin->owner, pin->bitmap, 0);
-	json = serialize_annotations(pin->artifacts);
-	if (json == NULL) return FALSE;
-	snapshot.type = TYPE_ITEM;
-	ok = db_history_save_image_edit(&snapshot, pin->initial, pin->original, pin->bitmap, json, FALSE);
-	mem_free((void **)&json);
-	return ok && copy_bitmap_to_clipboard(pin->owner, pin->bitmap, snapshot.image_edit_id);
+	if (!db_history_is_open()) return FALSE;
+	/* Clipboard capture may be delayed, replaced by a paste, or never arrive. */
+	saved = save_editor_copy_to_history(pin);
+	return saved != NULL && copy_bitmap_to_clipboard(pin->owner, pin->bitmap, saved->image_edit_id);
 }
 
 static BOOL save_bitmap_as_png(PINNED_IMAGE *pin)
@@ -2271,35 +2273,38 @@ static BOOL save_bitmap_as_png(PINNED_IMAGE *pin)
 }
 
 
-static BOOL save_editor_copy_to_history(PINNED_IMAGE *pin)
+static DATA_INFO *save_editor_copy_to_history(PINNED_IMAGE *pin)
 {
 	TCHAR error[BUF_SIZE];
 	DATA_INFO *item = data_create_item(TEXT("(BITMAP)"), TRUE, error);
 	HBITMAP bitmap;
-	if (item == NULL) return FALSE;
+	BOOL favourite = pin->source_item != NULL && data_check(&regist_data, pin->source_item) != NULL;
+	if (item == NULL) return NULL;
 	bitmap = clone_bitmap(pin->bitmap, NULL, NULL);
 	if (bitmap != NULL)
 		item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), bitmap, 0, FALSE, error);
 	if (item->child == NULL) {
 		if (bitmap != NULL) DeleteObject(bitmap);
 		data_free(item);
-		return FALSE;
+		return NULL;
 	}
 	// Persist before switching canvases; a failed save must keep the edits open.
 	if (!save_editor_layer(pin, item, TRUE)) {
 		data_free(item);
-		return FALSE;
+		return NULL;
 	}
 	history_add(&history_data.child, item, FALSE);
-	pin->source_item = item;
-	pin->source_data = item->child;
-	pin->pending_item = NULL;
-	pin->pending_sequence = 0;
-	pin->dirty = FALSE;
-	EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE, MF_BYCOMMAND | MF_ENABLED);
+	if (!favourite) {
+		pin->source_item = item;
+		pin->source_data = item->child;
+		pin->pending_item = NULL;
+		pin->pending_sequence = 0;
+		pin->dirty = FALSE;
+		EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE, MF_BYCOMMAND | MF_ENABLED);
+	}
 	SendMessage(pin->owner, WM_HISTORY_CHANGED, 0, 0);
 	PostMessage(pin->owner, WM_HISTORY_TRIM, 0, 0);
-	return TRUE;
+	return item;
 }
 
 static BOOL replace_source(PINNED_IMAGE *pin)
@@ -2319,7 +2324,7 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	if (owner == NULL || pin->source_data == NULL ||
 		(data_check(&history_data, owner) == NULL && data_check(&regist_data, owner) == NULL) ||
 		(owner != pin->source_data && data_check(owner, pin->source_data) == NULL))
-		return save_editor_copy_to_history(pin);
+		return save_editor_copy_to_history(pin) != NULL;
 	if (pin->source_data->format == CF_BITMAP ||
 		(pin->source_data->format_name && lstrcmpi(pin->source_data->format_name, TEXT("BITMAP")) == 0)) {
 		replacement = clone_bitmap(pin->bitmap, NULL, NULL);
@@ -4162,7 +4167,7 @@ static void place_editor_below_topmost(HWND editor)
 	PINNED_IMAGE *pin = (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA);
 	MONITORINFO monitor = { sizeof(monitor) };
 	int width, height, x;
-	if (pin == NULL || pin->placing_topmost || IsIconic(editor) ||
+	if (pin == NULL || !pin->pinned || pin->placing_topmost || pin->in_size_move || IsIconic(editor) ||
 		!GetWindowRect(editor, &order.bounds) ||
 		!GetMonitorInfo(MonitorFromWindow(editor, MONITOR_DEFAULTTONEAREST), &monitor)) return;
 	order.editor = editor;
@@ -4182,9 +4187,149 @@ static void place_editor_below_topmost(HWND editor)
 	pin->placing_topmost = FALSE;
 }
 
+static BOOL editor_pin_rect(HWND hwnd, RECT *rect)
+{
+	TITLEBARINFOEX title = { sizeof(title) };
+	MENUBARINFO menu = { sizeof(menu) };
+	RECT buttons, window, frame;
+	if (IsIconic(hwnd)) return FALSE;
+	if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &buttons, sizeof(buttons))) &&
+		!IsRectEmpty(&buttons) && GetWindowRect(hwnd, &window)) {
+		SetRect(rect, buttons.left - (buttons.right - buttons.left) / 3, buttons.top,
+			buttons.left, buttons.bottom);
+		OffsetRect(rect, window.left, window.top);
+	} else {
+		SendMessage(hwnd, WM_GETTITLEBARINFOEX, 0, (LPARAM)&title);
+		*rect = title.rgrect[2];
+		if (IsRectEmpty(rect)) return FALSE;
+		OffsetRect(rect, -(rect->right - rect->left), 0);
+	}
+	/* Maximized DWM button bounds include the off-screen resize border. */
+	if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame))) &&
+		!IsRectEmpty(&frame)) rect->top = max(rect->top, frame.top);
+	if (GetMenuBarInfo(hwnd, OBJID_MENU, 0, &menu) && menu.rcBar.top > rect->top)
+		rect->bottom = menu.rcBar.top;
+	return !IsRectEmpty(rect);
+}
+
+static void paint_editor_pin(PINNED_IMAGE *pin, HDC dc, RECT rect, BOOL pressed)
+{
+	COLORREF background, foreground;
+	POINT shape[8];
+	int x, y, unit;
+	UINT dpi;
+	HPEN pen, old_pen;
+	HBRUSH old_brush;
+	background = dark_mode_window_is_dark(pin->hwnd) ? RGB(0, 0, 0) : RGB(255, 255, 255);
+	dpi = GetWindowDpi(pin->hwnd);
+	if (dpi == 0) dpi = 96;
+	if (pin->pinned) background = RGB(0, 90, 158);
+	else if (pin->pin_hot) background = dark_mode_window_is_dark(pin->hwnd) ? RGB(55, 55, 55) : RGB(225, 225, 225);
+	foreground = pin->pinned || dark_mode_window_is_dark(pin->hwnd) ? RGB(240, 240, 240) : RGB(25, 25, 25);
+	SetDCBrushColor(dc, background);
+	FillRect(dc, &rect, (HBRUSH)GetStockObject(DC_BRUSH));
+	x = (rect.left + rect.right) / 2;
+	unit = max(1, MulDiv(2, dpi, 96));
+	y = (rect.top + rect.bottom - unit) / 2 + (pressed ? 1 : 0);
+	shape[0] = (POINT){x - 2 * unit, y - 3 * unit};
+	shape[1] = (POINT){x + 2 * unit, y - 3 * unit};
+	shape[2] = (POINT){x + unit, y - 2 * unit};
+	shape[3] = (POINT){x + unit, y};
+	shape[4] = (POINT){x + 3 * unit, y + unit};
+	shape[5] = (POINT){x - 3 * unit, y + unit};
+	shape[6] = (POINT){x - unit, y};
+	shape[7] = (POINT){x - unit, y - 2 * unit};
+	pen = CreatePen(PS_SOLID, max(1, unit / 2), foreground);
+	old_pen = SelectObject(dc, pen);
+	SetDCBrushColor(dc, foreground);
+	old_brush = SelectObject(dc, GetStockObject(pin->pinned ? DC_BRUSH : HOLLOW_BRUSH));
+	Polygon(dc, shape, ARRAYSIZE(shape));
+	MoveToEx(dc, x, y + unit, NULL);
+	LineTo(dc, x, y + 4 * unit);
+	SelectObject(dc, old_brush);
+	SelectObject(dc, old_pen);
+	DeleteObject(pen);
+}
+
+static void draw_editor_pin(PINNED_IMAGE *pin)
+{
+	if (pin != NULL && pin->pin_button != NULL) InvalidateRect(pin->pin_button, NULL, FALSE);
+}
+
+static void position_editor_pin(PINNED_IMAGE *pin)
+{
+	RECT rect;
+	if (pin == NULL || pin->pin_button == NULL) return;
+	if (!IsWindowVisible(pin->hwnd) || !editor_pin_rect(pin->hwnd, &rect)) {
+		ShowWindow(pin->pin_button, SW_HIDE);
+		return;
+	}
+	SetWindowPos(pin->pin_button, NULL, rect.left, rect.top, rect.right - rect.left,
+		rect.bottom - rect.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+	draw_editor_pin(pin);
+}
+
+static LRESULT CALLBACK editor_pin_button_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
+	UINT_PTR id, DWORD_PTR data)
+{
+	PINNED_IMAGE *pin = (PINNED_IMAGE *)data;
+	if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+	/* This non-activating popup must not rely on child-button focus to report clicks. */
+	if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+		SetCapture(hwnd);
+		SendMessage(hwnd, BM_SETSTATE, TRUE, 0);
+		return 0;
+	}
+	if (msg == WM_LBUTTONUP) {
+		RECT client;
+		POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+		BOOL pressed = GetCapture() == hwnd;
+		GetClientRect(hwnd, &client);
+		SendMessage(hwnd, BM_SETSTATE, FALSE, 0);
+		if (pressed) ReleaseCapture();
+		if (pressed && PtInRect(&client, point))
+			SendMessage(pin->hwnd, WM_SYSCOMMAND, ID_PIN_WINDOW, 0);
+		return 0;
+	}
+	if (msg == WM_CAPTURECHANGED) SendMessage(hwnd, BM_SETSTATE, FALSE, 0);
+	if (msg == WM_MOUSEMOVE || msg == WM_MOUSELEAVE) {
+		RECT client;
+		POINT point = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+		GetClientRect(hwnd, &client);
+		pin->pin_hot = msg == WM_MOUSEMOVE && PtInRect(&client, point);
+		if (GetCapture() == hwnd) SendMessage(hwnd, BM_SETSTATE, pin->pin_hot, 0);
+		if (pin->pin_hot) {
+			TRACKMOUSEEVENT track = { sizeof(track), TME_LEAVE, hwnd, 0 };
+			TrackMouseEvent(&track);
+		}
+		draw_editor_pin(pin);
+	}
+	if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, editor_pin_button_proc, id);
+	return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+static void toggle_editor_pin(PINNED_IMAGE *pin)
+{
+	if (pin->pinned) {
+		SendMessage(pin->hwnd, WM_CLOSE, 0, 0);
+		return;
+	}
+	if (!SetWindowPos(pin->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)) {
+		MessageBeep(MB_ICONWARNING);
+		return;
+	}
+	pin->pinned = TRUE;
+	ModifyMenu(GetSystemMenu(pin->hwnd, FALSE), ID_PIN_WINDOW, MF_BYCOMMAND | MF_STRING | MF_CHECKED,
+		ID_PIN_WINDOW, pin_text(IDS_PIN_UNPIN_CLOSE));
+	SetWindowText(pin->pin_button, pin_text(IDS_PIN_UNPIN_CLOSE) + 1);
+	place_editor_below_topmost(pin->hwnd);
+	draw_editor_pin(pin);
+}
+
 static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_tool)
 {
-	PINNED_IMAGE *pin;
+	PINNED_IMAGE *pin, *reuse = NULL;
 	DATA_INFO *data = find_bitmap_data(source);
 	HBITMAP bitmap, original;
 	int width, height, window_w, window_h, x, y;
@@ -4192,13 +4337,15 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 	RECT work;
 	MONITORINFO monitor = { sizeof(monitor) };
 	if (data == NULL) return NULL;
-	if (pin_windows != NULL && IsWindow(pin_windows->hwnd)) {
-		pin = pin_windows;
+	for (pin = pin_windows; pin != NULL; pin = pin->next) {
 		if (pin->source_data == data) {
 			ShowWindow(pin->hwnd, SW_SHOWMAXIMIZED);
 			SetForegroundWindow(pin->hwnd);
 			return pin->hwnd;
 		}
+		if (!pin->pinned && reuse == NULL) reuse = pin;
+	}
+	if ((pin = reuse) != NULL) {
 		cancel_annotation_drag(pin);
 		if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
 		if (source->type == TYPE_ITEM && db_history_is_open()) db_history_ensure_item_data(source);
@@ -4330,11 +4477,6 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 		mem_free(&pin);
 		return NULL;
 	}
-	/* Start normal so a failed topmost request still leaves a usable editor. */
-	if (!SetWindowPos(pin->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
-		SetWindowPos(pin->hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-			SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 	SendMessage(pin->hwnd, WM_SIZE, SIZE_RESTORED, 0);
 	ShowWindow(pin->hwnd, SW_SHOWMAXIMIZED);
 	SetForegroundWindow(pin->hwnd);
@@ -4347,19 +4489,22 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 
 void pinned_image_bind_history(DATA_INFO *item, DWORD sequence, BOOL added)
 {
-	PINNED_IMAGE *pin = pin_windows;
+	PINNED_IMAGE *pin;
 	if (!added || item == NULL || item->param1 > 0 || !db_history_is_open())
 		pending_copy_edit_id = 0;
-	if (pin == NULL || (pin->pending_item != item &&
-		(pin->pending_sequence == 0 || pin->pending_sequence != sequence))) return;
-	if (added) {
-		pin->source_item = item;
-		pin->source_data = find_bitmap_data(item);
-		EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE,
-			MF_BYCOMMAND | (pin->source_data != NULL ? MF_ENABLED : MF_GRAYED));
+	if (item == NULL) return;
+	for (pin = pin_windows; pin != NULL; pin = pin->next) {
+		if (pin->pending_item != item &&
+			(pin->pending_sequence == 0 || pin->pending_sequence != sequence)) continue;
+		if (added) {
+			pin->source_item = item;
+			pin->source_data = find_bitmap_data(item);
+			EnableMenuItem(GetSubMenu(pin->menu, 0), ID_UPDATE,
+				MF_BYCOMMAND | (pin->source_data != NULL ? MF_ENABLED : MF_GRAYED));
+		}
+		pin->pending_item = NULL;
+		pin->pending_sequence = 0;
 	}
-	pin->pending_item = NULL;
-	pin->pending_sequence = 0;
 }
 
 HWND pinned_image_open(const HWND owner, DATA_INFO *source)
@@ -4402,9 +4547,12 @@ BOOL pinned_image_clipboard_is_screenshot(HWND owner)
 BOOL pinned_image_restore_clipboard_layer(DATA_INFO *item, DWORD sequence)
 {
 	if (sequence == 0) return FALSE;
+	if (item != NULL && item->image_edit_id > 0) return TRUE;
 	if (sequence != last_copy_sequence) {
-		if (!db_history_image_edit_matches(item, last_copy_edit_id)) return FALSE;
-		last_copy_sequence = sequence;
+		int edit = db_history_find_image_edit(item);
+		if (edit == 0) return FALSE;
+		item->image_edit_id = edit;
+		return TRUE;
 	}
 	if (item != NULL) item->image_edit_id = last_copy_edit_id;
 	return TRUE;
@@ -4469,8 +4617,11 @@ void pinned_image_auto_open(HWND owner, DATA_INFO *source, DWORD sequence)
 		image.format = CF_BITMAP;
 		image.format_name = TEXT("BITMAP");
 		image.data = cropped;
-		if (pinned_image_open(owner, &image) != NULL)
-			pin_windows->pending_item = source;
+		{
+			HWND editor = pinned_image_open(owner, &image);
+			if (editor != NULL)
+				((PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA))->pending_item = source;
+		}
 	} else MessageBeep(MB_ICONWARNING);
 	if (history_image != NULL) data_free(history_image);
 	DeleteObject(cropped);
@@ -4715,7 +4866,7 @@ static LRESULT CALLBACK snip_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
 					image.data = cropped;
 				editor = pinned_image_open(owner, &image);
 				if (editor != NULL) {
-					pin_windows->pending_sequence = last_copy_sequence;
+					((PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA))->pending_sequence = last_copy_sequence;
 					SendMessage(editor, WM_COMMAND, ID_ARROW, 0);
 				}
 				} else MessageBeep(MB_ICONWARNING);
@@ -4859,6 +5010,25 @@ static BOOL start_snip(HWND owner, BOOL scrolling)
 BOOL pinned_image_start_snip(HWND owner) { return start_snip(owner, FALSE); }
 BOOL pinned_image_start_scrolling_snip(HWND owner) { return start_snip(owner, TRUE); }
 
+static BOOL save_editor_before_close(PINNED_IMAGE *pin)
+{
+	cancel_annotation_drag(pin);
+	if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
+	if (pin->dirty && !replace_source(pin)) {
+		MessageBox(pin->hwnd, pin_text(IDS_PIN_SAVE_EDITS_FAILED), TEXT("CLCL"), MB_OK | MB_ICONERROR);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+BOOL pinned_image_save_all(void)
+{
+	PINNED_IMAGE *pin;
+	for (pin = pin_windows; pin != NULL; pin = pin->next)
+		if (!save_editor_before_close(pin)) return FALSE;
+	return TRUE;
+}
+
 void pinned_image_close_all(void)
 {
 	while (pin_windows != NULL) DestroyWindow(pin_windows->hwnd);
@@ -4874,6 +5044,16 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		pin->hwnd = hwnd;
 		SetDpiFromWindow(hwnd);
 		dark_mode_set_inverse_window(hwnd);
+		{
+			InsertMenu(GetSystemMenu(hwnd, FALSE), SC_CLOSE, MF_BYCOMMAND | MF_STRING,
+				ID_PIN_WINDOW, pin_text(IDS_PIN_KEEP_OPEN));
+			InsertMenu(GetSystemMenu(hwnd, FALSE), SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, 0, NULL);
+		}
+		pin->pin_button = CreateWindowEx(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, TEXT("BUTTON"),
+			pin_text(IDS_PIN_KEEP_OPEN) + 1, WS_POPUP | BS_OWNERDRAW,
+			0, 0, 0, 0, hwnd, NULL, pin_instance, NULL);
+		if (pin->pin_button != NULL)
+			SetWindowSubclass(pin->pin_button, editor_pin_button_proc, 1, (DWORD_PTR)pin);
 		create_editor_toolbar(pin);
 		pin->menu_tip = CreateWindowEx(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, TOOLTIPS_CLASS, NULL,
 			WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -4893,6 +5073,12 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		CheckMenuRadioItem(GetSubMenu(pin->menu, 4), ID_WIDTH_1, ID_WIDTH_CUSTOM,
 			pin->stroke_width <= 12 ? ID_WIDTH_1 + pin->stroke_width - 1 : ID_WIDTH_CUSTOM, MF_BYCOMMAND);
 		return 0;
+	case WM_SYSCOMMAND:
+		if (pin != NULL && (wparam & 0xFFF0) == ID_PIN_WINDOW) {
+			toggle_editor_pin(pin);
+			return 0;
+		}
+		break;
 	case WM_SETCURSOR:
 		if (pin != NULL && (HWND)wparam == hwnd && LOWORD(lparam) == HTCLIENT) {
 			POINT point, image;
@@ -4931,6 +5117,11 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		break;
 	case WM_DRAWITEM:
+		if (pin != NULL && ((DRAWITEMSTRUCT *)lparam)->hwndItem == pin->pin_button) {
+			DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lparam;
+			paint_editor_pin(pin, item->hDC, item->rcItem, (item->itemState & ODS_SELECTED) != 0);
+			return TRUE;
+		}
 		if (((DRAWITEMSTRUCT *)lparam)->CtlType == ODT_MENU) {
 			DRAWITEMSTRUCT *item = (DRAWITEMSTRUCT *)lparam;
 			BOOL dark = !dark_mode_is_dark();
@@ -4980,9 +5171,10 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 	case WM_NCACTIVATE:
 		{
 			LRESULT result;
-			if (dark_mode_menubar_message(hwnd, msg, wparam, lparam, &result)) return result;
+			if (!dark_mode_menubar_message(hwnd, msg, wparam, lparam, &result))
+				result = DefWindowProc(hwnd, msg, wparam, lparam);
+			return result;
 		}
-		return DefWindowProc(hwnd, msg, wparam, lparam);
 	case WM_SETTINGCHANGE:
 	case WM_THEMECHANGED:
 		if (dark_mode_is_color_change(msg, lparam)) {
@@ -5010,6 +5202,9 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 
 		((MINMAXINFO *)lparam)->ptMinTrackSize.x = pin != NULL ? pin->min_window_width : Scale(410);
 		((MINMAXINFO *)lparam)->ptMinTrackSize.y = pin != NULL ? pin->min_window_height : Scale(260);
+		return 0;
+	case WM_ENTERSIZEMOVE:
+		if (pin != NULL) pin->in_size_move = TRUE;
 		return 0;
 	case WM_SIZING:
 		if (pin != NULL) {
@@ -5095,7 +5290,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		break;
 	case WM_WINDOWPOSCHANGING:
-		if (pin != NULL) {
+		if (pin != NULL && !pin->in_size_move) {
 			WINDOWPOS *wp = (WINDOWPOS *)lparam;
 			if (wp != NULL && !(wp->flags & SWP_NOSIZE) && !IsIconic(hwnd) && !IsZoomed(hwnd)) {
 				RECT target = { wp->x, wp->y, wp->x + wp->cx, wp->y + wp->cy };
@@ -5126,10 +5321,16 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		if (pin != NULL && (((WINDOWPOS *)lparam)->flags &
 			(SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER)) != (SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER))
 			place_editor_below_topmost(hwnd);
-		break;
+		{
+			LRESULT result = DefWindowProc(hwnd, msg, wparam, lparam);
+			position_editor_pin(pin);
+			return result;
+		}
 	case WM_EXITSIZEMOVE:
 		if (pin != NULL) {
+			pin->in_size_move = FALSE;
 			clamp_pinned_window_to_work_area(pin);
+			place_editor_below_topmost(hwnd);
 		}
 		return 0;
 	case WM_INITMENUPOPUP:
@@ -5216,6 +5417,10 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		break;
 	case WM_COMMAND:
 		if (pin == NULL) break;
+		if (pin->pin_button != NULL && (HWND)lparam == pin->pin_button && HIWORD(wparam) == BN_CLICKED) {
+			toggle_editor_pin(pin);
+			return 0;
+		}
 		if (LOWORD(wparam) == ID_TEXT_EDIT && HIWORD(wparam) == EN_CHANGE &&
 			pin->text_edit != NULL) {
 			update_text_edit(pin);
@@ -5758,19 +5963,18 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 		}
 		return 0;
 	case WM_CLOSE:
-		if (pin != NULL) {
-			cancel_annotation_drag(pin);
-			if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
-		}
+		if (pin != NULL && !save_editor_before_close(pin)) return 0;
 		DestroyWindow(hwnd);
 		return 0;
 	case WM_DESTROY:
 		if (pin != NULL) {
 			PINNED_IMAGE **link = &pin_windows;
+			if (pin->pin_button != NULL) DestroyWindow(pin->pin_button);
 			hide_editor_menu_tip(pin);
 			if (pin->menu_tip != NULL) DestroyWindow(pin->menu_tip);
 			if (pin->properties != NULL) DestroyWindow(pin->properties);
-			if (current_color_popup_hwnd != NULL && IsWindow(current_color_popup_hwnd)) {
+			if (current_color_popup_hwnd != NULL &&
+				GetAncestor(current_color_popup_hwnd, GA_ROOTOWNER) == hwnd) {
 				DestroyWindow(current_color_popup_hwnd);
 				current_color_popup_hwnd = NULL;
 			}
@@ -5792,6 +5996,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			DeleteObject(pin->bitmap);
 			SetMenu(hwnd, NULL);
 			DestroyMenu(pin->menu);
+			SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
 			mem_free(&pin);
 		}
 		return 0;

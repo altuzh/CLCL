@@ -1061,29 +1061,39 @@ done:
 	return pixels;
 }
 
-BOOL db_history_image_edit_matches(DATA_INFO *item, int id)
+int db_history_find_image_edit(DATA_INFO *item)
 {
 	sqlite3_stmt *stmt = NULL;
 	DATA_INFO saved = {0}, image = {0};
 	BYTE *pixels, *merged = NULL;
 	DWORD size, merged_size;
-	BOOL match = FALSE;
-	if (db == NULL || item == NULL || item->image_edit_id != 0 || id <= 0) return FALSE;
+	int match = 0, i;
+	BYTE dimensions[8];
+	if (db == NULL || item == NULL || item->image_edit_id != 0) return 0;
 	pixels = db_initial_image_pixels(item, &size);
-	if (pixels == NULL) return FALSE;
-	if (sqlite3_prepare_v2(db, "SELECT merged FROM image_edits WHERE id=?;", -1, &stmt, NULL) == SQLITE_OK) {
-		sqlite3_bind_int(stmt, 1, id);
-		if (sqlite3_step(stmt) == SQLITE_ROW)
-			image.data = png_to_bitmap(sqlite3_column_blob(stmt, 0), sqlite3_column_bytes(stmt, 0));
+	if (pixels == NULL) return 0;
+	/* PNG IHDR dimensions shortlist candidates; decoded RGB must still match exactly. */
+	for (i = 0; i < 4; i++) {
+		dimensions[i] = (BYTE)((DWORD)((LONG *)pixels)[0] >> (24 - i * 8));
+		dimensions[i + 4] = (BYTE)((DWORD)((LONG *)pixels)[1] >> (24 - i * 8));
+	}
+	if (sqlite3_prepare_v2(db, "SELECT id,merged FROM image_edits WHERE substr(merged,17,8)=? ORDER BY id DESC;",
+		-1, &stmt, NULL) == SQLITE_OK) {
+		sqlite3_bind_blob(stmt, 1, dimensions, sizeof(dimensions), SQLITE_TRANSIENT);
+		while (sqlite3_step(stmt) == SQLITE_ROW) {
+			image.data = png_to_bitmap(sqlite3_column_blob(stmt, 1), sqlite3_column_bytes(stmt, 1));
+			if (image.data == NULL) continue;
+			saved.type = TYPE_ITEM; saved.child = &image;
+			image.type = TYPE_DATA; image.format = CF_BITMAP;
+			merged = db_initial_image_pixels(&saved, &merged_size);
+			if (merged != NULL && size == merged_size && !memcmp(pixels, merged, size))
+				match = sqlite3_column_int(stmt, 0);
+			DeleteObject(image.data);
+			mem_free((void **)&merged);
+			if (match > 0) break;
+		}
 	}
 	sqlite3_finalize(stmt);
-	if (image.data != NULL) {
-		saved.type = TYPE_ITEM; saved.child = &image;
-		image.type = TYPE_DATA; image.format = CF_BITMAP;
-		merged = db_initial_image_pixels(&saved, &merged_size);
-		match = merged != NULL && size == merged_size && !memcmp(pixels, merged, size);
-		DeleteObject(image.data);
-	}
 	mem_free((void **)&pixels); mem_free((void **)&merged);
 	return match;
 }
@@ -1342,7 +1352,7 @@ static BOOL db_prune_image_edits(void)
 		"DELETE FROM favourite_edits;", NULL, NULL, NULL) != SQLITE_OK) return FALSE;
 	if (sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO favourite_edits VALUES(?);", -1, &stmt, NULL) != SQLITE_OK) return FALSE;
 	ok = db_keep_favourite_edits(regist_data.child, stmt);
-	/* Copy publishes before the delayed History capture can own its snapshot. */
+	/* Retention can remove a copied History row before delayed clipboard capture. */
 	if (ok && pending > 0) {
 		sqlite3_reset(stmt); sqlite3_bind_int(stmt, 1, pending);
 		ok = sqlite3_step(stmt) == SQLITE_DONE;
