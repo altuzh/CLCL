@@ -3409,7 +3409,7 @@ static void test_saved_image_annotations(HWND owner)
     SendMessage(pin->properties, WM_CLOSE, 0, 0);
     CHECK(pin->properties == NULL && pin->selected_artifact == NULL && !dimension->selected,
         "Properties window X clears the annotation selection");
-    CHECK(replace_source(pin) && item->image_edit_id > 0 && pin->artifacts != NULL && !pin->dirty,
+    CHECK(replace_source(pin, FALSE) && item->image_edit_id > 0 && pin->artifacts != NULL && !pin->dirty,
         "saving History retains editable objects and stores the merged bitmap");
     edit_id = item->image_edit_id;
     history_id = (int)item->param1;
@@ -3482,7 +3482,7 @@ static void test_saved_image_annotations(HWND owner)
         NULL, NULL, NULL) == SQLITE_OK, "failed merged image write fixture installs");
     {
         HANDLE old_bitmap = item->child->data;
-        CHECK(!replace_source(pin) && pin->dirty && item->image_edit_id == edit_id &&
+        CHECK(!replace_source(pin, FALSE) && pin->dirty && item->image_edit_id == edit_id &&
             item->param1 == history_id && item->child->data == old_bitmap,
             "failed save rolls back original, merged bitmap and JSON together while retaining open edits");
     }
@@ -3499,12 +3499,12 @@ static void test_saved_image_annotations(HWND owner)
     fail_favourite_save = TRUE;
     {
         HANDLE old_bitmap = regist_data.child->child->data;
-        CHECK(!replace_source(pin) && pin->dirty && regist_data.child->image_edit_id == edit_id &&
+        CHECK(!replace_source(pin, FALSE) && pin->dirty && regist_data.child->image_edit_id == edit_id &&
             regist_data.child->child->data == old_bitmap,
             "failed Favourites file save preserves the existing merged image and layer reference");
     }
     fail_favourite_save = FALSE;
-    CHECK(replace_source(pin), "closed saved Favourite supports saving after a failed file write");
+    CHECK(replace_source(pin, FALSE), "closed saved Favourite supports saving after a failed file write");
     favourite_edit = regist_data.child->image_edit_id;
     CHECK(favourite_edit != edit_id && item->image_edit_id == edit_id,
         "editing a Favourite creates its own snapshot without changing the History annotation");
@@ -3660,6 +3660,55 @@ static void test_saved_image_annotations(HWND owner)
     data_free(regist_data.child); regist_data.child = NULL;
     CHECK(db_history_trim(1) && !db_history_load_image_edit(favourite_edit, &initial, &base, &layer),
         "removing the last reference reclaims saved image snapshots");
+    {
+        HBITMAP original = create_solid_bitmap(37, 23, RGB(30, 80, 150));
+        DATA_INFO *replaced;
+        BITMAP saved = {0};
+        int old_id;
+
+        item = data_create_item(TEXT("Image to resize"), TRUE, error);
+        item->child = data_create_data(CF_BITMAP, TEXT("BITMAP"), clone_bitmap(original, NULL, NULL), 0, FALSE, error);
+        history_add(&history_data.child, item, FALSE);
+        CHECK(db_history_save_item(item), "resize fixture stores the original image");
+        old_id = (int)item->param1;
+        editor = pinned_image_open(owner, item);
+        CHECK(editor != NULL, "resize fixture opens its original History item");
+        if (editor != NULL) {
+            pin = (PINNED_IMAGE *)GetWindowLongPtr(editor, GWLP_USERDATA);
+            pin->image_rect = (RECT){0, 0, 74, 46};
+            CHECK(ensure_drawing_resolution(pin) && pin->width == 74 && pin->height == 46,
+                "editor resamples to its drawing resolution without adding an annotation");
+            history_clipboard_mock = TRUE;
+            history_clipboard_owner = owner;
+            history_clipboard_sequence = 29000;
+            SendMessage(editor, WM_COMMAND, ID_COPY_KEEP, 0);
+            CHECK(IsWindow(editor) && pin->source_item == item && item->image_edit_id > 0 && !pin->dirty,
+                "Copy and keep saves the resized bitmap to its bound History item");
+            replaced = db_history_get_item(old_id);
+            CHECK(replaced == NULL, "the original History row is replaced");
+            data_free(replaced);
+            replaced = db_history_get_item((int)item->param1);
+            CHECK(replaced != NULL && db_history_ensure_item_data(replaced) && replaced->child != NULL &&
+                GetObject(replaced->child->data, sizeof(saved), &saved) &&
+                saved.bmWidth == 74 && saved.bmHeight == 46, "SQLite stores the resized dimensions");
+            data_free(replaced);
+            capture_formats[0] = CF_BITMAP; capture_format_count = 1;
+            capture_marker = copied_bitmap;
+            CHECK(clipboard_to_history(owner) && history_data.child == item,
+                "the editor clipboard notification preserves the same live History item");
+            history_clipboard_sequence++;
+            history_clipboard_owner = NULL;
+            capture_marker = original;
+            CHECK(clipboard_to_history(owner) && history_data.child == item,
+                "recopying the original pixels preserves the resized History item");
+            history_clipboard_mock = FALSE;
+            history_clipboard_owner = NULL;
+            capture_format_count = 0; capture_marker = NULL;
+            if (copied_bitmap != NULL) { DeleteObject(copied_bitmap); copied_bitmap = NULL; }
+            DestroyWindow(editor);
+        }
+        if (original != NULL) DeleteObject(original);
+    }
 cleanup:
     pinned_image_close_all();
     sqlite3_finalize(stmt); if (inspect != NULL) sqlite3_close(inspect);
@@ -4026,7 +4075,7 @@ static void test_sqlite_multiple_bitmap_persistence(void)
         recovery.original = clone_bitmap(recovery.bitmap, NULL, NULL);
         recovery.dirty = TRUE;
         option.history_max = 0;
-        CHECK(replace_source(&recovery) && !recovery.dirty && recovery.source_item != NULL &&
+        CHECK(replace_source(&recovery, FALSE) && !recovery.dirty && recovery.source_item != NULL &&
             recovery.source_item->param1 > 0, "missing editor source is saved to SQLite before switching");
         if (history_data.child != saved_head) {
             DATA_INFO *recovered = history_data.child;

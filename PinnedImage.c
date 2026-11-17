@@ -240,6 +240,7 @@ static HINSTANCE pin_instance;
 static PINNED_IMAGE *pin_windows;
 static DWORD last_auto_sequence, last_copy_sequence;
 static int last_copy_edit_id, pending_copy_edit_id;
+static BOOL last_copy_saved;
 extern OPTION_INFO option;
 extern TCHAR work_path[];
 
@@ -321,6 +322,7 @@ static LRESULT CALLBACK editor_toolbar_proc(HWND hwnd, UINT msg, WPARAM wparam, 
 static void refit_image(PINNED_IMAGE *pin);
 static void finish_text_edit(PINNED_IMAGE *pin, BOOL accept);
 static DATA_INFO *save_editor_copy_to_history(PINNED_IMAGE *pin);
+static BOOL replace_source(PINNED_IMAGE *pin, BOOL keep_undo);
 static void update_properties(PINNED_IMAGE *pin);
 static BOOL create_property_toolbars(PINNED_IMAGE *pin, HWND dialog);
 static void update_property_buttons(PINNED_IMAGE *pin);
@@ -534,6 +536,7 @@ static BOOL ensure_drawing_resolution(PINNED_IMAGE *pin)
 	transform_artifacts(pin, pin->width, pin->height, width, height, 0, 0);
 	pin->width = width;
 	pin->height = height;
+	pin->dirty = TRUE;
 	return TRUE;
 }
 
@@ -2183,6 +2186,7 @@ static BOOL copy_bitmap_to_clipboard(HWND owner, HBITMAP bitmap, int edit_id)
 	// DIB owns complete pixel data; BITMAP is an optional compatibility format.
 	if (copy != NULL && SetClipboardData(CF_BITMAP, copy) == NULL) DeleteObject(copy);
 	last_copy_edit_id = pending_copy_edit_id = edit_id;
+	last_copy_saved = FALSE;
 	CloseClipboard();
 	last_copy_sequence = GetClipboardSequenceNumber();
 	return TRUE;
@@ -2239,15 +2243,22 @@ static BOOL save_editor_layer(PINNED_IMAGE *pin, DATA_INFO *item, BOOL history)
 
 static BOOL copy_editor_to_clipboard(PINNED_IMAGE *pin)
 {
-	DATA_INFO *saved;
-	if (pin->artifacts == NULL && (pin->source_item == NULL ||
-		(data_check(&history_data, pin->source_item) == NULL && data_check(&regist_data, pin->source_item) == NULL) ||
-		pin->source_item->image_edit_id == 0))
+	DATA_INFO *source = pin->source_item, *saved;
+	if (source != NULL && pin->source_data != NULL && data_check(&history_data, source) != NULL &&
+		(source == pin->source_data || data_check(source, pin->source_data) != NULL)) {
+		if ((pin->dirty || (source->type == TYPE_ITEM && source->param1 == 0 && db_history_is_open())) &&
+			!replace_source(pin, TRUE)) return FALSE;
+		saved = source;
+	} else if (pin->artifacts != NULL || (pin->dirty && db_history_is_open()) ||
+		(source != NULL && data_check(&regist_data, source) != NULL && source->image_edit_id > 0)) {
+		/* Clipboard capture may be delayed, replaced by a paste, or never arrive. */
+		if (!db_history_is_open() || (saved = save_editor_copy_to_history(pin)) == NULL) return FALSE;
+	} else {
 		return copy_bitmap_to_clipboard(pin->owner, pin->bitmap, 0);
-	if (!db_history_is_open()) return FALSE;
-	/* Clipboard capture may be delayed, replaced by a paste, or never arrive. */
-	saved = save_editor_copy_to_history(pin);
-	return saved != NULL && copy_bitmap_to_clipboard(pin->owner, pin->bitmap, saved->image_edit_id);
+	}
+	if (!copy_bitmap_to_clipboard(pin->owner, pin->bitmap, saved->image_edit_id)) return FALSE;
+	last_copy_saved = TRUE;
+	return TRUE;
 }
 
 static BOOL save_bitmap_as_png(PINNED_IMAGE *pin)
@@ -2307,7 +2318,7 @@ static DATA_INFO *save_editor_copy_to_history(PINNED_IMAGE *pin)
 	return item;
 }
 
-static BOOL replace_source(PINNED_IMAGE *pin)
+static BOOL replace_source(PINNED_IMAGE *pin, BOOL keep_undo)
 {
 	DATA_INFO *owner, *parent;
 	HANDLE replacement = NULL;
@@ -2369,14 +2380,15 @@ static BOOL replace_source(PINNED_IMAGE *pin)
 	}
 	if (old_data != NULL && !format_free_data(pin->source_data->format_name, old_data))
 		clipboard_free_data(pin->source_data->format_name, old_data);
+	pin->dirty = FALSE;
+	PostMessage(pin->owner, WM_HISTORY_TRIM, 0, 0);
+	if (keep_undo) return TRUE;
 	clear_selection(pin);
 	pin->active_artifact = NULL;
 	if (pin->drag_original != NULL) { free_artifacts(pin->drag_original); pin->drag_original = NULL; }
-	pin->dirty = FALSE;
 	clear_edit_stack(pin->undo, pin->undo_base, pin->undo_artifacts, &pin->undo_count);
 	clear_edit_stack(pin->redo, pin->redo_base, pin->redo_artifacts, &pin->redo_count);
 	update_properties(pin);
-	PostMessage(pin->owner, WM_HISTORY_TRIM, 0, 0);
 	return TRUE;
 }
 
@@ -4364,7 +4376,7 @@ static HWND open_image_editor(const HWND owner, DATA_INFO *source, int initial_t
 				MessageBeep(MB_ICONWARNING); return NULL;
 			}
 			original = candidate.original;
-			if (pin->dirty && !replace_source(pin)) {
+			if (pin->dirty && !replace_source(pin, FALSE)) {
 				DeleteObject(candidate.initial); free_artifacts(candidate.artifacts);
 				DeleteObject(original); DeleteObject(bitmap);
 				MessageBeep(MB_ICONWARNING); SetForegroundWindow(pin->hwnd); return NULL;
@@ -4556,6 +4568,11 @@ BOOL pinned_image_restore_clipboard_layer(DATA_INFO *item, DWORD sequence)
 	}
 	if (item != NULL) item->image_edit_id = last_copy_edit_id;
 	return TRUE;
+}
+
+BOOL pinned_image_clipboard_copy_saved(DWORD sequence)
+{
+	return last_copy_saved && sequence != 0 && sequence == last_copy_sequence;
 }
 
 int pinned_image_pending_clipboard_edit(void)
@@ -5014,7 +5031,7 @@ static BOOL save_editor_before_close(PINNED_IMAGE *pin)
 {
 	cancel_annotation_drag(pin);
 	if (pin->text_edit != NULL) finish_text_edit(pin, TRUE);
-	if (pin->dirty && !replace_source(pin)) {
+	if (pin->dirty && !replace_source(pin, FALSE)) {
 		MessageBox(pin->hwnd, pin_text(IDS_PIN_SAVE_EDITS_FAILED), TEXT("CLCL"), MB_OK | MB_ICONERROR);
 		return FALSE;
 	}
@@ -5512,7 +5529,7 @@ static LRESULT CALLBACK pinned_image_proc(HWND hwnd, UINT msg, WPARAM wparam, LP
 			}
 			break;
 		case ID_UPDATE:
-			if (!replace_source(pin)) MessageBeep(MB_ICONWARNING);
+			if (!replace_source(pin, FALSE)) MessageBeep(MB_ICONWARNING);
 			break;
 		case ID_COLOR_RED: case ID_COLOR_BLUE: case ID_COLOR_GREEN: case ID_COLOR_BLACK:
 			pin->color_index = LOWORD(wparam) - ID_COLOR_RED;

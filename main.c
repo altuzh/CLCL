@@ -2680,6 +2680,14 @@ static BOOL clipboard_to_history(const HWND hWnd)
 
 	sequence = clipboard_sequence = GetClipboardSequenceNumber();
 	GetWindowThreadProcessId(GetClipboardOwner(), &clipboard_process);
+	if (clipboard_process == GetCurrentProcessId() && !cp_tmi.enable &&
+		pinned_image_clipboard_copy_saved(clipboard_sequence)) {
+		CloseClipboard();
+		pinned_image_bind_history(NULL, clipboard_sequence, FALSE);
+		if (option.history_save == 1 && option.history_always_save == 1 && !db_history_is_open())
+			SendMessage(hWnd, WM_HISTORY_SAVE, 0, 0);
+		return TRUE;
+	}
 	// Ignore clipboard writes made by CLCL itself.
 	if (clipboard_process == GetCurrentProcessId()) sequence = 0;
 
